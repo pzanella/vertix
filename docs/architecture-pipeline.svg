@@ -1,0 +1,113 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1320 620" font-family="ui-sans-serif, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif">
+  <defs>
+    <marker id="arrowTeal" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 Z" fill="#2dd4bf" />
+    </marker>
+    <marker id="arrowAmber" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 Z" fill="#f59e0b" />
+    </marker>
+    <marker id="arrowViolet" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 Z" fill="#a78bfa" />
+    </marker>
+  </defs>
+
+  <rect x="0" y="0" width="1320" height="620" fill="#0b1220" />
+
+  <text x="660" y="36" text-anchor="middle" fill="#f8fafc" font-size="24" font-weight="700">Vertix — Frame Processing Pipeline</text>
+  <text x="660" y="58" text-anchor="middle" fill="#94a3b8" font-size="14">From a decoded video frame to the reframed 9:16 output, every render tick</text>
+
+  <!-- ===================== TOP LANE: runs every rendered frame ===================== -->
+  <!-- T1 -->
+  <rect x="40" y="100" width="260" height="90" rx="12" fill="#10241f" stroke="#2dd4bf" stroke-width="1.5" />
+  <text x="170" y="136" text-anchor="middle" fill="#e6fffa" font-size="16" font-weight="700">Decoded video frame</text>
+  <text x="170" y="158" text-anchor="middle" fill="#a7f3d0" font-size="12.5">requestVideoFrameCallback</text>
+  <text x="170" y="175" text-anchor="middle" fill="#a7f3d0" font-size="12.5">(main thread, synced to playback)</text>
+
+  <!-- T2 -->
+  <rect x="360" y="100" width="260" height="90" rx="12" fill="#10241f" stroke="#2dd4bf" stroke-width="1.5" />
+  <text x="490" y="136" text-anchor="middle" fill="#e6fffa" font-size="16" font-weight="700">Pane smoothing</text>
+  <text x="490" y="158" text-anchor="middle" fill="#a7f3d0" font-size="12.5">dead zone + LERP toward target</text>
+  <text x="490" y="175" text-anchor="middle" fill="#a7f3d0" font-size="12.5">runs every frame, regardless</text>
+
+  <!-- T3 -->
+  <rect x="680" y="100" width="260" height="90" rx="12" fill="#10241f" stroke="#2dd4bf" stroke-width="1.5" />
+  <text x="810" y="136" text-anchor="middle" fill="#e6fffa" font-size="16" font-weight="700">Cross-dissolve</text>
+  <text x="810" y="158" text-anchor="middle" fill="#a7f3d0" font-size="12.5">only if the layout just changed</text>
+  <text x="810" y="175" text-anchor="middle" fill="#a7f3d0" font-size="12.5">ease-in-out, old frame fades out</text>
+
+  <!-- T4 -->
+  <rect x="1000" y="100" width="260" height="90" rx="12" fill="#10241f" stroke="#2dd4bf" stroke-width="1.5" />
+  <text x="1130" y="136" text-anchor="middle" fill="#e6fffa" font-size="16" font-weight="700">Draw to canvas</text>
+  <text x="1130" y="158" text-anchor="middle" fill="#a7f3d0" font-size="12.5">9:16 (or untouched 16:9) output</text>
+  <text x="1130" y="175" text-anchor="middle" fill="#a7f3d0" font-size="12.5">GPU drawImage, integer coords</text>
+
+  <!-- top lane arrows -->
+  <line x1="300" y1="145" x2="356" y2="145" stroke="#2dd4bf" stroke-width="2" marker-end="url(#arrowTeal)" />
+  <line x1="620" y1="145" x2="676" y2="145" stroke="#2dd4bf" stroke-width="2" marker-end="url(#arrowTeal)" />
+  <line x1="940" y1="145" x2="996" y2="145" stroke="#2dd4bf" stroke-width="2" marker-end="url(#arrowTeal)" />
+
+  <!-- ===================== BOTTOM LANE: runs every Nth frame ===================== -->
+  <!-- B1 -->
+  <rect x="40" y="430" width="220" height="90" rx="12" fill="#241a0b" stroke="#f59e0b" stroke-width="1.5" />
+  <text x="150" y="464" text-anchor="middle" fill="#fff7e6" font-size="15.5" font-weight="700">Downscale</text>
+  <text x="150" y="485" text-anchor="middle" fill="#fde3ad" font-size="12">320×240 for detection</text>
+  <text x="150" y="502" text-anchor="middle" fill="#fde3ad" font-size="12">plain stretch fill, no letterbox</text>
+
+  <!-- B2 -->
+  <rect x="290" y="430" width="220" height="90" rx="12" fill="#241a0b" stroke="#f59e0b" stroke-width="1.5" />
+  <text x="400" y="464" text-anchor="middle" fill="#fff7e6" font-size="15.5" font-weight="700">WASM face detection</text>
+  <text x="400" y="485" text-anchor="middle" fill="#fde3ad" font-size="12">UltraFace (ONNX) via Rust/WASM</text>
+  <text x="400" y="502" text-anchor="middle" fill="#fde3ad" font-size="12">boxes + confidence + mouth motion</text>
+
+  <!-- B3 -->
+  <rect x="540" y="430" width="220" height="90" rx="12" fill="#241a0b" stroke="#f59e0b" stroke-width="1.5" />
+  <text x="650" y="464" text-anchor="middle" fill="#fff7e6" font-size="15.5" font-weight="700">Filter speakers</text>
+  <text x="650" y="485" text-anchor="middle" fill="#fde3ad" font-size="12">min face size + min visibility</text>
+  <text x="650" y="502" text-anchor="middle" fill="#fde3ad" font-size="12">drops background/cropped faces</text>
+
+  <!-- B4 -->
+  <rect x="790" y="430" width="220" height="90" rx="12" fill="#241a0b" stroke="#f59e0b" stroke-width="1.5" />
+  <text x="900" y="464" text-anchor="middle" fill="#fff7e6" font-size="15.5" font-weight="700">Debounce</text>
+  <text x="900" y="485" text-anchor="middle" fill="#fde3ad" font-size="12">N consecutive ticks must agree</text>
+  <text x="900" y="502" text-anchor="middle" fill="#fde3ad" font-size="12">before a count change commits</text>
+
+  <!-- B5 -->
+  <rect x="1040" y="430" width="220" height="90" rx="12" fill="#241a0b" stroke="#f59e0b" stroke-width="1.5" />
+  <text x="1150" y="464" text-anchor="middle" fill="#fff7e6" font-size="15.5" font-weight="700">Layout decision</text>
+  <text x="1150" y="485" text-anchor="middle" fill="#fde3ad" font-size="11.5">0 → B-roll · 1 → full crop</text>
+  <text x="1150" y="502" text-anchor="middle" fill="#fde3ad" font-size="11.5">2 → split · 3+ → grid</text>
+
+  <!-- bottom lane arrows -->
+  <line x1="260" y1="475" x2="286" y2="475" stroke="#f59e0b" stroke-width="2" marker-end="url(#arrowAmber)" />
+  <line x1="510" y1="475" x2="536" y2="475" stroke="#f59e0b" stroke-width="2" marker-end="url(#arrowAmber)" />
+  <line x1="760" y1="475" x2="786" y2="475" stroke="#f59e0b" stroke-width="2" marker-end="url(#arrowAmber)" />
+  <line x1="1010" y1="475" x2="1036" y2="475" stroke="#f59e0b" stroke-width="2" marker-end="url(#arrowAmber)" />
+
+  <!-- ===================== cross-lane connectors ===================== -->
+  <!-- decoded frame -> detection lane, gated to every Nth frame -->
+  <path d="M170,190 C170,270 150,350 150,426" fill="none" stroke="#a78bfa" stroke-width="2" stroke-dasharray="6,5" marker-end="url(#arrowViolet)" />
+  <rect x="178" y="288" width="168" height="24" rx="5" fill="#0b1220" stroke="#a78bfa" stroke-width="1" />
+  <text x="262" y="304" text-anchor="middle" fill="#c4b5fd" font-size="11.5">every Nth frame only</text>
+
+  <!-- layout decision -> pane smoothing target -->
+  <path d="M1190,426 C980,300 700,220 494,194" fill="none" stroke="#a78bfa" stroke-width="2" stroke-dasharray="6,5" marker-end="url(#arrowViolet)" />
+  <rect x="660" y="252" width="188" height="24" rx="5" fill="#0b1220" stroke="#a78bfa" stroke-width="1" />
+  <text x="754" y="268" text-anchor="middle" fill="#c4b5fd" font-size="11.5">commits new pane targets</text>
+
+  <!-- layout decision -> cross-dissolve trigger -->
+  <path d="M1090,426 C1010,350 900,250 814,194" fill="none" stroke="#a78bfa" stroke-width="2" stroke-dasharray="6,5" marker-end="url(#arrowViolet)" />
+  <rect x="860" y="330" width="210" height="24" rx="5" fill="#0b1220" stroke="#a78bfa" stroke-width="1" />
+  <text x="965" y="346" text-anchor="middle" fill="#c4b5fd" font-size="11.5">on change: snapshot + dissolve</text>
+
+  <!-- ===================== legend ===================== -->
+  <rect x="40" y="560" width="16" height="16" rx="3" fill="#10241f" stroke="#2dd4bf" stroke-width="1.5" />
+  <text x="64" y="573" fill="#cbd5e1" font-size="13">Runs every rendered frame</text>
+
+  <rect x="300" y="560" width="16" height="16" rx="3" fill="#241a0b" stroke="#f59e0b" stroke-width="1.5" />
+  <text x="324" y="573" fill="#cbd5e1" font-size="13">Runs every Nth frame (detection only)</text>
+
+  <line x1="650" y1="568" x2="686" y2="568" stroke="#a78bfa" stroke-width="2" stroke-dasharray="6,5" />
+  <text x="694" y="573" fill="#cbd5e1" font-size="13">Cross-lane data feed</text>
+
+  <text x="1280" y="600" text-anchor="end" fill="#475569" font-size="11.5">src/core/VertixEngine.ts · src/core/layoutEngine.ts · wasm/src/</text>
+</svg>

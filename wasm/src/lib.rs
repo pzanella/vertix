@@ -11,24 +11,23 @@ const GRID_ROWS: usize = 18;
 /// gap between periodic detection updates plus brief turns/occlusions.
 const FACE_TARGET_TTL_FRAMES: u32 = 24;
 /// How much a fresh detection moves the trusted face position, per update
-/// (0-1). The raw detected box position jitters a few pixels frame to frame
-/// even for a face that isn't moving — this low-pass-filters that noise out
-/// before it ever reaches the PID, instead of asking the PID to smooth it.
-const FACE_TARGET_SMOOTHING: f64 = 0.25;
+/// (0-1). Low-pass-filters the raw detection's frame-to-frame jitter before
+/// it reaches the PID, instead of asking the PID to smooth it.
+const FACE_TARGET_SMOOTHING: f64 = 0.12;
 
 /// Ignore saliency shifts smaller than this (in analysis pixels) so the
 /// crop doesn't hunt for a new target on tiny, noisy score changes.
-const DEAD_ZONE_PX: f64 = 3.0;
+const DEAD_ZONE_PX: f64 = 5.0;
 /// Max pan speed per frame (analysis pixels) — caps how fast the virtual
 /// camera can move, so a sudden score change can't cause a hard jump cut.
-const MAX_PAN_SPEED: f64 = 6.0;
+const MAX_PAN_SPEED: f64 = 3.0;
 
-// PID gains — quicker to respond than the original broadcast-style pan,
-// with a bit more derivative damping to keep the faster response smooth
-// instead of overshooting.
-const PID_KP: f64 = 0.06;
-const PID_KI: f64 = 0.002;
-const PID_KD: f64 = 0.05;
+// PID gains, softened for a slower, more cinematic pan — less proportional
+// snap (KP), more derivative damping relative to KP so the slower response
+// still settles instead of gently overshooting.
+const PID_KP: f64 = 0.03;
+const PID_KI: f64 = 0.0015;
+const PID_KD: f64 = 0.07;
 const PID_I_MAX: f64 = 200.0;
 
 /// Score multiplier for blocks that contain skin-tone pixels (likely a person).
@@ -242,12 +241,16 @@ impl ReframeEngine {
     }
 
     /// Runs face detection on a separate 320x240 letterboxed frame (see
-    /// `face.rs`) and, if a trustworthy speaker is found, makes it the
-    /// crop target for the next `FACE_TARGET_TTL_FRAMES` frames. Meant to be
-    /// called less often than every frame — it's much more expensive than
-    /// the generic saliency scan.
-    pub fn update_face_target(&mut self, face_frame_rgba: &[u8]) {
-        if let Some(cx) = self.face_tracker.update(face_frame_rgba) {
+    /// `face.rs`) and returns every detected face, flattened as
+    /// `[cx, cy, w, h, motion, score, ...]` (fractions 0..1 of the source
+    /// frame), for the multi-speaker layout. Also feeds the single-person
+    /// PID crop target (`process_frame`), unchanged from before. Meant to
+    /// be called less often than every frame — it's much more expensive
+    /// than the generic saliency scan.
+    pub fn update_faces(&mut self, face_frame_rgba: &[u8]) -> Vec<f64> {
+        let (faces, best_cx) = self.face_tracker.observe_all(face_frame_rgba);
+
+        if let Some(cx) = best_cx {
             let smoothed = match self.face_target {
                 Some(prev) => prev + FACE_TARGET_SMOOTHING * (cx - prev),
                 None => cx,
@@ -255,6 +258,17 @@ impl ReframeEngine {
             self.face_target = Some(smoothed);
             self.face_target_ttl = FACE_TARGET_TTL_FRAMES;
         }
+
+        let mut flat = Vec::with_capacity(faces.len() * 6);
+        for f in &faces {
+            flat.push(f.cx as f64);
+            flat.push(f.cy as f64);
+            flat.push(f.w as f64);
+            flat.push(f.h as f64);
+            flat.push(f.motion);
+            flat.push(f.score as f64);
+        }
+        flat
     }
 
     /// Analyzes one RGBA frame and returns the smoothed crop-window X offset.
