@@ -120,7 +120,13 @@ export function useWasmReframe(): UseWasmReframeReturn {
 
     video.onloadedmetadata = () => {
       setDuration(video.duration);
-      setState("ready");
+      // Already muted above, so autoplay is allowed almost everywhere; fall
+      // back to "ready" (user presses play) on the rare browser that still
+      // blocks it.
+      video
+        .play()
+        .then(() => setState("playing"))
+        .catch(() => setState("ready"));
     };
     video.onerror = () => {
       setState("error");

@@ -7,36 +7,44 @@ split-screen, three or more get a grid. When no face is visible (a cutaway,
 b-roll, an establishing shot), it shows the full frame instead of guessing
 a crop. Nothing is uploaded. Everything runs on your machine.
 
+![Vertix reframing a two-speaker conversation: the original 16:9 shot on the left, the live 9:16 stacked split it produces on the right](docs/demo.gif)
+
+*Real output from the actual engine — the [`2-speakers-c.mp4`](#sample-clips)
+sample clip, sourced from [Pexels](https://www.pexels.com/).*
+
 ## Why
 
 A simple center-crop often cuts off the person who matters most, especially
-when more than one person is on screen — and video with no one on screen
-at all (action shots, cutaways) needs to be left alone, not cropped by
-guesswork. Doing this well needs a few things: a way to *find* faces, a way
-to decide *how many people* are actually speakers (not background extras),
-a way to *lay out* however many there are, and a way to *move* the crop
-smoothly instead of jittering on every small gesture.
+with more than one person on screen. And footage with nobody in it at all
+(a cutaway, an establishing shot) shouldn't be cropped by guesswork; it's
+better left alone. Getting this right comes down to four smaller problems,
+solved in order: find the faces, work out how many of them are actual
+speakers, lay out however many there are, and move the crop smoothly
+instead of jittering on every small gesture.
 
-- **Finding faces** needs a real face detector, not a guess based on color
-  or brightness. Vertix runs a small pretrained model
-  ([UltraFace](https://github.com/Linzaer/Ultra-Light-Fast-Generic-Face-Detector-1MB),
-  MIT license, ~1.2MB) in Rust compiled to WebAssembly (WASM) — this is not
-  a model Vertix trained itself, just a good small one reused as-is.
-- **Deciding who counts as a speaker** filters out background people: a
-  face has to be reasonably large (not someone far away in the crowd) and
-  mostly inside the frame (not half cut off at the edge) to count.
-- **Laying out** N speakers is a simple rule: 1 fills the whole 9:16 frame,
-  2 stack top/bottom, 3+ form a grid. 0 speakers means "don't crop at all,"
-  not "guess where the interesting part of the frame is."
-- **Moving smoothly** uses a dead zone (small, ordinary movements are
-  ignored outright) plus a gentle glide toward any position that moves far
-  enough to matter — so the crop holds still through normal head/body
-  motion instead of constantly micro-adjusting.
+**Finding faces** takes a real detector, not a guess based on color or
+brightness. Vertix runs a small pretrained model
+([UltraFace](https://github.com/Linzaer/Ultra-Light-Fast-Generic-Face-Detector-1MB),
+MIT license, ~1.2MB) in Rust compiled to WebAssembly. It's a good small
+model reused as-is, not one Vertix trained itself.
+
+**Counting speakers** means filtering out background people. A face has to
+be reasonably large and mostly inside the frame to count; someone far away
+in a crowd, or half cut off at the edge, doesn't.
+
+**Laying out** *N* speakers follows a simple rule. One fills the whole
+9:16 frame. Two stack top and bottom. Three or more form a grid. Zero
+means no crop at all, rather than a guess at what's interesting.
+
+**Moving the crop** relies on a dead zone that ignores small, ordinary
+movement, plus a gentle glide toward any position that drifts far enough
+to matter. The result holds still through normal head and body motion
+instead of constantly micro-adjusting.
 
 Running a face detector on every single frame is too slow for real-time
-video, so Vertix only re-detects a few times a second. The final crop is
-still drawn straight from the video at full resolution using the GPU — no
-manual pixel copying for the output frame.
+video, so Vertix only re-detects a few times a second. The crop itself is
+still drawn straight from the video at full resolution on the GPU, with no
+manual pixel copying.
 
 ## Features
 
@@ -57,7 +65,10 @@ manual pixel copying for the output frame.
 - **Two views** — the original 16:9, or the reframed 9:16 — toggle at any
   time, even mid-playback.
 - **Load any local video** — drag and drop a file, or click to choose one.
-  Nothing leaves your browser.
+  Nothing leaves your browser. No footage handy? Pick one of the six
+  built-in [sample clips](#sample-clips) right from the app.
+- **Responsive layout** — works down to a phone-sized screen, with the
+  analytics panel moving above the video and tucking away behind a toggle.
 
 ## Architecture
 
@@ -81,9 +92,9 @@ The reframing logic and the web app around it are two separate things:
   the canvas, the transport bar, the live status badge, and the analytics
   dashboard with its trend charts.
 
-In short: if you're touching *how the reframing decides what to show*,
-you're in `src/core/`. If you're touching *how the app looks or behaves as
-a web page*, you're in `src/hooks/` or `src/components/`.
+Changing how the reframing decides what to show happens in `src/core/`.
+Changing how the app looks or behaves as a web page happens in
+`src/hooks/` or `src/components/`.
 
 ## Project Structure
 
@@ -93,6 +104,9 @@ a web page*, you're in `src/hooks/` or `src/components/`.
 ├── vite.config.ts
 ├── tsconfig.json
 ├── tailwind.config.js
+├── public/
+│   ├── favicon.svg
+│   └── samples/                    # Silent sample clips, served as static assets (see Sample Clips below)
 ├── src/
 │   ├── main.tsx                    # React entry point
 │   ├── App.tsx                     # Layout, file loading, player state
@@ -111,6 +125,7 @@ a web page*, you're in `src/hooks/` or `src/components/`.
 │       ├── Controls.tsx               # Play/pause, mute, mode toggle, scrub bar
 │       ├── Timeline.tsx               # Scrub bar (rendered inside Controls)
 │       ├── LiveStatusPanel.tsx        # Small "Status: ..." badge
+│       ├── SamplePicker.tsx           # "Try a sample clip" dropdown
 │       ├── AnalyticsDashboard.tsx     # Live metrics panel
 │       └── LiveAnalyticsCharts.tsx    # Sparkline trend charts
 ├── wasm/
@@ -149,6 +164,31 @@ The face-detection model is bundled into the WASM file, so it's a few MB
 running real face detection fully in the browser instead of a much smaller,
 cruder color-based guess.
 
+## Sample Clips
+
+`public/samples/` has six short, silent (video-only, no audio track) clips
+so you can try Vertix without hunting for your own footage. The app's
+"try a sample clip" dropdown (shown next to the drop zone before you load
+anything) lists them with these labels:
+
+| File                 | Label                                    | Speakers | Duration |
+| --------------------- | ----------------------------------------- | :------: | -------: |
+| `1-speaker.mp4`       | One speaker                              | 1        | ~35s     |
+| `2-speakers-a.mp4`    | 2 speakers without audio - example 1     | 2        | ~16s     |
+| `2-speakers-b.mp4`    | 2 speakers without audio - example 2     | 2        | ~10s     |
+| `2-speakers-c.mp4`    | 2 speakers without audio - example 3     | 2        | ~10s     |
+| `2-speakers-d.mp4`    | 2 speakers without audio - example 4     | 2        | ~8s      |
+| `3-speakers.mp4`      | 3 speakers without audio                 | 3        | ~12s     |
+
+`1-speaker.mp4` exercises the single chest-up crop, the four `2-speakers-*`
+clips exercise the stacked split (and are the best set for testing the
+b-roll/split debounce on cuts), and `3-speakers.mp4` exercises the grid
+layout. They're served straight from `public/`, so they also work as-is
+once the app is deployed — no separate hosting needed.
+
+Sourced from [Pexels](https://www.pexels.com/), free to use under the
+[Pexels License](https://www.pexels.com/license/).
+
 ## Scripts
 
 | Command               | Description                                          |
@@ -163,13 +203,13 @@ cruder color-based guess.
 ![Vertix frame processing pipeline: a decoded video frame flows through pane smoothing, cross-dissolve, and canvas draw every rendered frame, while face detection, filtering, debounce, and layout decision run every Nth frame and feed new pane targets back into the smoothing step](docs/architecture-pipeline.svg)
 
 1. `VertixEngine.attach(video, canvas)` starts a render loop driven by
-   `requestVideoFrameCallback` — this runs in sync with each decoded video
-   frame, on the main thread, so audio and video never drift apart. The
+   `requestVideoFrameCallback`, running in sync with each decoded video
+   frame on the main thread so audio and video never drift apart. The
    engine never touches the video's own playback (`.play()`, `.src`,
-   `.currentTime`) — it only reads frames and reacts to the element's own
-   `play`/`seeking`/`loadedmetadata` events. Whatever's driving playback
-   (this app's own controls, or a media framework like Shaka Player) stays
-   in full control.
+   `.currentTime`); it only reads frames and reacts to the element's own
+   `play`/`seeking`/`loadedmetadata` events. Whatever's driving playback,
+   whether this app's own controls or a media framework like Shaka Player,
+   stays in full control.
 2. Every few frames, a small (320×240) copy of the current frame is drawn
    to a hidden canvas, read back as pixels, and passed into the WASM face
    detector (`ReframeEngine.update_faces`, in `wasm/src/`). This runs the

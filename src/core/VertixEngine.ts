@@ -21,7 +21,7 @@ import {
  * listens to its native `play`/`seeking`/`loadedmetadata` events — it never
  * sets `.src`, calls `.play()`/`.pause()`, or otherwise takes over playback
  * control, so it doesn't fight whatever already owns the element. See
- * `docs/shaka-player.md` for a worked integration example.
+ * `docs/player-integration.md` for a worked integration example.
  */
 
 export type VertixMode = "16:9" | "9:16";
@@ -345,7 +345,7 @@ export class VertixEngine {
   private ensureWasm(): void {
     if (this.wasmReady || this.wasmLoading) return;
     this.wasmLoading = initWasm().then(() => {
-      this.engine = new ReframeEngine(FACE_W, FACE_H);
+      this.engine = new ReframeEngine();
       this.wasmReady = true;
       this.emitState();
     });

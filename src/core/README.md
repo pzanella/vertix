@@ -78,25 +78,26 @@ engine.destroy();
 
 ## Design notes
 
-- **No playback ownership.** See "Usage" above — this is deliberate, not
-  an oversight, and it's what makes attaching to a Shaka Player / hls.js /
-  Video.js-managed video element work without any special integration
-  code. See [`../../docs/player-integration.md`](../../docs/player-integration.md)
-  for a worked example, including the one real gotcha (cross-origin video
-  needs `video.crossOrigin = "anonymous"` or canvas reads throw).
-- **Detection stays on the main thread, on purpose.** A Web Worker version
-  was tried and reverted — the message-passing round-trip added enough
-  latency to the tracking target that panning read as disconnected, even
-  though the raw FPS number went up. If you're tempted to move detection
-  off-thread again, that's the failure mode to watch for, not just FPS.
-- **The layout only changes when the speaker *count* changes**, debounced
-  over a few detection ticks (asymmetric: dropping to zero speakers reacts
-  faster than any other change, since staying cropped over a shot with no
-  one in it looks worse than briefly widening out). Within a stable
-  layout, individual crops move only past a dead zone, then glide — they
-  never re-run the full layout decision. This two-layer design (stable
-  layout + independently-smoothed positions within it) is the result of
-  several rounds of tuning against real footage; if camera movement still
-  feels off, the constants to look at are in `VertixEngine.ts`
-  (`PANE_SMOOTHING_ALPHA`, `DEADZONE_FRACTION`,
-  `PERSON_COUNT_STABLE_TICKS`), not the layout math itself.
+Playback ownership stays with the host on purpose. This is what makes
+attaching to a Shaka Player, hls.js, or Video.js-managed video element
+work without any special integration code; see
+[`../../docs/player-integration.md`](../../docs/player-integration.md) for
+a worked example, including the one real gotcha (cross-origin video needs
+`video.crossOrigin = "anonymous"` or canvas reads throw).
+
+Detection stays on the main thread on purpose, too. A Web Worker version
+was tried and reverted: the message-passing round-trip added enough
+latency to the tracking target that panning read as disconnected, even
+though the raw FPS number went up. If you're tempted to move detection
+off-thread again, that's the failure mode to watch for, not just FPS.
+
+The layout only changes when the speaker *count* changes, debounced over a
+few detection ticks (dropping to zero speakers reacts faster than any
+other change, since staying cropped over a shot with no one in it looks
+worse than briefly widening out). Within a stable layout, individual crops
+move only past a dead zone, then glide; the full layout decision never
+reruns. This two-layer design, a stable layout plus independently-smoothed
+positions within it, came out of several rounds of tuning against real
+footage. If camera movement still feels off, look at the constants in
+`VertixEngine.ts` (`PANE_SMOOTHING_ALPHA`, `DEADZONE_FRACTION`,
+`PERSON_COUNT_STABLE_TICKS`), not the layout math itself.

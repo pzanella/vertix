@@ -1,5 +1,5 @@
 import { useCallback, useMemo, useRef, useState } from "react";
-import { AnalyticsDashboard, Canvas, Controls, LiveStatusPanel, Timeline } from "./components/Player";
+import { AnalyticsDashboard, Canvas, Controls, LiveStatusPanel, SamplePicker, Timeline } from "./components/Player";
 import { useWasmReframe } from "./hooks/useWasmReframe";
 
 export default function App() {
@@ -25,6 +25,7 @@ export default function App() {
 
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const [dragging, setDragging] = useState(false);
+  const [showAnalytics, setShowAnalytics] = useState(true);
 
   const openFile = useCallback(
     (file: File | undefined) => {
@@ -59,7 +60,7 @@ export default function App() {
   const timeline = useMemo(() => <Timeline progress={progress} duration={duration} onSeek={seek} />, [progress, duration, seek]);
 
   return (
-    <div className="h-screen w-screen flex flex-col overflow-hidden p-4 gap-3">
+    <div className="min-h-screen md:h-screen w-screen flex flex-col overflow-y-auto md:overflow-hidden p-4 gap-3">
       <header className="shrink-0 flex items-center gap-2">
         <h1 className="text-lg font-semibold tracking-tight">
           <span className="text-brand-400">Ver</span>tix
@@ -72,24 +73,27 @@ export default function App() {
       {!isActive && (
         <div className="flex-1 min-h-0 flex flex-col items-center justify-center">
           {state === "idle" && (
-            <div
-              onDragOver={(e) => {
-                e.preventDefault();
-                setDragging(true);
-              }}
-              onDragLeave={() => setDragging(false)}
-              onDrop={handleDrop}
-              onClick={() => fileInputRef.current?.click()}
-              className={`border-2 border-dashed rounded-2xl w-full max-w-lg py-20 flex flex-col items-center gap-3 cursor-pointer transition ${
-                dragging ? "border-brand-400 bg-brand-950/30" : "border-neutral-700 hover:border-brand-500"
-              }`}
-            >
-              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" className="w-10 h-10 text-neutral-500">
-                <path d="M4 5a2 2 0 0 1 2-2h4l2 2h6a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V5z" />
-              </svg>
-              <span className="text-neutral-400 text-sm">Drop a 16:9 video here, or click to choose one</span>
-              {!wasmReady && <span className="text-neutral-600 text-xs">Warming up the reframe engine…</span>}
-              <input ref={fileInputRef} type="file" accept="video/*" onChange={handleFile} className="hidden" />
+            <div className="flex flex-col items-center gap-4 w-full max-w-lg">
+              <div
+                onDragOver={(e) => {
+                  e.preventDefault();
+                  setDragging(true);
+                }}
+                onDragLeave={() => setDragging(false)}
+                onDrop={handleDrop}
+                onClick={() => fileInputRef.current?.click()}
+                className={`border-2 border-dashed rounded-2xl w-full py-20 flex flex-col items-center gap-3 cursor-pointer transition ${
+                  dragging ? "border-brand-400 bg-brand-950/30" : "border-neutral-700 hover:border-brand-500"
+                }`}
+              >
+                <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" className="w-10 h-10 text-neutral-500">
+                  <path d="M4 5a2 2 0 0 1 2-2h4l2 2h6a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V5z" />
+                </svg>
+                <span className="text-neutral-400 text-sm">Drop a 16:9 video here, or click to choose one</span>
+                {!wasmReady && <span className="text-neutral-600 text-xs">Warming up the reframe engine…</span>}
+                <input ref={fileInputRef} type="file" accept="video/*" onChange={handleFile} className="hidden" />
+              </div>
+              <SamplePicker onSelect={load} />
             </div>
           )}
 
@@ -116,10 +120,18 @@ export default function App() {
       )}
 
       {isActive && (
-        <div className="flex-1 min-h-0 flex gap-4 w-full">
+        <div className="flex-1 min-h-0 flex flex-col-reverse md:flex-row gap-4 w-full">
           <div className="flex-1 min-h-0 flex flex-col items-center gap-2">
             <Canvas canvasRef={canvasRef} mode={mode} />
-            <LiveStatusPanel mode={mode} speakerCount={speakerCount} isTransitioning={isTransitioning} />
+            <div className="flex items-center gap-2">
+              <LiveStatusPanel mode={mode} speakerCount={speakerCount} isTransitioning={isTransitioning} />
+              <button
+                onClick={() => setShowAnalytics((v) => !v)}
+                className="md:hidden shrink-0 px-3 py-1.5 rounded-full bg-neutral-900 border border-neutral-800 text-xs text-neutral-400 hover:text-neutral-200 hover:border-neutral-700 transition"
+              >
+                {showAnalytics ? "Hide analytics" : "Show analytics"}
+              </button>
+            </div>
             <div className="w-full max-w-2xl shrink-0">
               <Controls
                 playing={playing}
@@ -133,15 +145,17 @@ export default function App() {
             </div>
           </div>
 
-          <AnalyticsDashboard
-            mode={mode}
-            meta={meta}
-            progress={progress}
-            duration={duration}
-            speakerCount={speakerCount}
-            isTransitioning={isTransitioning}
-            metrics={metrics}
-          />
+          <div className={showAnalytics ? undefined : "hidden md:block"}>
+            <AnalyticsDashboard
+              mode={mode}
+              meta={meta}
+              progress={progress}
+              duration={duration}
+              speakerCount={speakerCount}
+              isTransitioning={isTransitioning}
+              metrics={metrics}
+            />
+          </div>
         </div>
       )}
     </div>

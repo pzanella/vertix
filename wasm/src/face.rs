@@ -1,6 +1,5 @@
 //! Finds faces in a small letterboxed frame using a pretrained model
-//! (UltraFace slim-320, see `models/ATTRIBUTION.md`), then picks which one
-//! is most likely speaking when there's more than one.
+//! (UltraFace slim-320, see `models/ATTRIBUTION.md`).
 
 use std::sync::OnceLock;
 use tract_onnx::prelude::*;
@@ -180,12 +179,10 @@ pub struct FaceObservation {
     pub motion: f64,
 }
 
-/// Tracks faces across calls so it can tell which one is speaking and avoid
-/// flickering between people frame to frame.
+/// Tracks the previous frame across calls so it can score mouth motion.
 pub struct FaceTracker {
     prev_frame: Vec<u8>,
     has_prev: bool,
-    last_center_x: Option<f32>,
 }
 
 impl FaceTracker {
@@ -193,15 +190,12 @@ impl FaceTracker {
         Self {
             prev_frame: Vec::new(),
             has_prev: false,
-            last_center_x: None,
         }
     }
 
     /// Runs detection on a 320x240 letterboxed RGBA frame and returns every
-    /// face that survives the skin-tone/aspect-ratio filters (unlike
-    /// `observe_all`, this doesn't pick a "winner" or touch tracking state
-    /// beyond the previous-frame buffer needed for motion scoring).
-    fn observe(&mut self, rgba: &[u8]) -> Vec<FaceObservation> {
+    /// face that survives the skin-tone/aspect-ratio filters.
+    pub fn observe(&mut self, rgba: &[u8]) -> Vec<FaceObservation> {
         let candidates = detect(rgba);
 
         let mut obs = Vec::new();
@@ -245,42 +239,7 @@ impl FaceTracker {
         obs
     }
 
-    /// Runs detection once and returns both (a) every filtered face, for
-    /// multi-speaker layout, and (b) the single "most likely speaking"
-    /// face's center-X in the same 0..320 pixel space the saliency fallback
-    /// uses, for the existing single-target PID crop. Combined into one call
-    /// so multi-speaker mode doesn't need to run the (expensive) model twice
-    /// per detection interval.
-    pub fn observe_all(&mut self, rgba: &[u8]) -> (Vec<FaceObservation>, Option<f64>) {
-        let obs = self.observe(rgba);
-
-        let mut best: Option<(f64, f32)> = None;
-        for o in &obs {
-            let hysteresis = match self.last_center_x {
-                Some(last) => 1.0 - ((o.cx - last).abs() as f64).min(1.0),
-                None => 0.0,
-            };
-
-            // Motion picks out who's talking among several faces; the
-            // hysteresis and confidence terms break near-ties so the target
-            // doesn't jump between people on every update.
-            let combined = o.motion + hysteresis * 5.0 + o.score as f64 * 2.0;
-
-            if best.is_none_or(|(s, _)| combined > s) {
-                best = Some((combined, o.cx));
-            }
-        }
-
-        let best_cx = best.map(|(_, cx)| {
-            self.last_center_x = Some(cx);
-            cx as f64 * MODEL_W as f64
-        });
-
-        (obs, best_cx)
-    }
-
     pub fn reset(&mut self) {
         self.has_prev = false;
-        self.last_center_x = None;
     }
 }

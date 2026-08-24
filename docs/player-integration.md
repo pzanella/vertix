@@ -3,12 +3,12 @@
 `VertixEngine` (see `src/core/`) never sets `.src` on a video element, never
 calls `.play()`/`.pause()`, and never sets `.currentTime`. It only *reads*
 decoded frames (`requestVideoFrameCallback`) and *listens* to the element's
-own `play`/`seeking`/`loadedmetadata` events (it doesn't need a `pause`
-listener — its render loop notices `video.paused` on its own and simply
-stops rescheduling itself). That means it doesn't compete with whatever
-already owns playback — it can attach to a video element that a media
-framework like Shaka Player, hls.js, or Video.js is independently driving,
-with no coordination needed beyond "here's the element and canvas".
+own `play`/`seeking`/`loadedmetadata` events. It doesn't even need a
+`pause` listener; the render loop just notices `video.paused` on its own
+and stops rescheduling itself. So it never competes with whatever already
+owns playback, and can attach to a video element that a media framework
+like Shaka Player, hls.js, or Video.js is independently driving, with no
+coordination needed beyond "here's the element and canvas".
 
 The worked example below uses Shaka Player because it's the most involved
 case (adaptive bitrate, `MediaSource`, its own async `load()`) — the same

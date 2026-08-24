@@ -1,6 +1,6 @@
 {
   "name": "vertix",
-  "description": "Turn 16:9 video into 9:16 in the browser — a Rust/WASM face detector and PID-smoothed virtual camera follow the speaker, with no upload and no server.",
+  "description": "Turn 16:9 video into 9:16 in the browser — Rust/WASM face detection finds speakers and frames them automatically, with no upload and no server.",
   "version": "0.1.0",
   "license": "MIT",
   "type": "module",
