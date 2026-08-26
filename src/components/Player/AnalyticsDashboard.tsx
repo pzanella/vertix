@@ -1,5 +1,5 @@
-import { memo, useEffect, useReducer } from "react";
-import type { ReframeMeta, ReframeMetrics, ReframeMode } from "../../hooks/useWasmReframe";
+import { memo, useEffect, useReducer, useState, type ReactNode } from "react";
+import type { ReframeMeta, ReframeMetrics, ReframeMode, StreamHealth } from "../../hooks/useWasmReframe";
 import { classifyLayout } from "./layoutStatus";
 import { LiveAnalyticsCharts } from "./LiveAnalyticsCharts";
 
@@ -11,6 +11,7 @@ interface AnalyticsDashboardProps {
   speakerCount: number;
   isTransitioning: boolean;
   metrics: ReframeMetrics;
+  streamHealth: StreamHealth | null;
 }
 
 const LAYOUT_LABEL: Record<ReturnType<typeof classifyLayout>, (speakerCount: number) => string> = {
@@ -32,18 +33,96 @@ function formatTime(seconds: number): string {
 function Section({ title, children }: { title: string; children: React.ReactNode }) {
   return (
     <div className="flex flex-col gap-1.5">
-      <h3 className="text-[10px] font-semibold uppercase tracking-widest text-neutral-600">{title}</h3>
+      <h3 className="text-[10px] font-mono font-semibold uppercase tracking-widest text-neutral-600">{title}</h3>
       <div className="flex flex-col gap-1">{children}</div>
     </div>
   );
 }
 
-function Row({ label, value }: { label: string; value: string }) {
+const TONE_CLASS = {
+  default: "text-neutral-200",
+  good: "text-emerald-400",
+  warn: "text-amber-400",
+  bad: "text-red-400",
+} as const;
+
+function Row({ label, value, tone = "default" }: { label: string; value: string; tone?: keyof typeof TONE_CLASS }) {
   return (
     <div className="flex items-baseline justify-between gap-3 text-xs">
       <span className="text-neutral-500">{label}</span>
-      <span className="text-neutral-200 font-mono tabular-nums text-right">{value}</span>
+      <span className={`font-mono tabular-nums text-right ${TONE_CLASS[tone]}`}>{value}</span>
     </div>
+  );
+}
+
+function ChevronIcon({ open }: { open: boolean }) {
+  return (
+    <svg
+      xmlns="http://www.w3.org/2000/svg"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={2}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      className={`w-3 h-3 text-neutral-600 transition-transform duration-150 ${open ? "rotate-90" : ""}`}
+    >
+      <path d="M9 6l6 6-6 6" />
+    </svg>
+  );
+}
+
+function CollapsibleSection({ title, defaultOpen, children }: { title: string; defaultOpen: boolean; children: ReactNode }) {
+  const [open, setOpen] = useState(defaultOpen);
+  return (
+    <div className="flex flex-col gap-1.5">
+      <button
+        onClick={() => setOpen((v) => !v)}
+        aria-expanded={open}
+        className="flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-widest text-neutral-600 hover:text-neutral-400 transition-colors"
+      >
+        <ChevronIcon open={open} />
+        {title}
+      </button>
+      {open && <div className="flex flex-col gap-1 pl-4">{children}</div>}
+    </div>
+  );
+}
+
+function bufferHealthTone(seconds: number): keyof typeof TONE_CLASS {
+  if (seconds > 5) return "good";
+  if (seconds > 1) return "warn";
+  return "bad";
+}
+
+function droppedFramesTone(dropped: number, total: number): keyof typeof TONE_CLASS {
+  if (total === 0) return "default";
+  return dropped / total > 0.02 ? "bad" : "default";
+}
+
+function StreamHealthSection({ streamHealth }: { streamHealth: StreamHealth }) {
+  const { manifestType, bufferHealthSec, bandwidthEstimateKbps, droppedFrames, totalDecodedFrames, activeVariant } = streamHealth;
+  const isAdaptive = manifestType === "HLS" || manifestType === "DASH";
+
+  if (manifestType === "LOCAL") {
+    return (
+      <CollapsibleSection title="Stream Health" defaultOpen={false}>
+        <p className="text-[11px] text-neutral-600">Local file — no network metrics.</p>
+      </CollapsibleSection>
+    );
+  }
+
+  return (
+    <CollapsibleSection title="Stream Health" defaultOpen={true}>
+      <Row label="Buffer Health" value={`${bufferHealthSec.toFixed(1)}s ahead`} tone={bufferHealthTone(bufferHealthSec)} />
+      {isAdaptive && bandwidthEstimateKbps !== null && <Row label="Bandwidth Est." value={`${bandwidthEstimateKbps} kbps`} />}
+      <Row
+        label="Dropped Frames"
+        value={`${droppedFrames} / ${totalDecodedFrames}`}
+        tone={droppedFramesTone(droppedFrames, totalDecodedFrames)}
+      />
+      {isAdaptive && activeVariant && <Row label="Active Variant" value={`${activeVariant.height}p @ ${activeVariant.bitrateKbps}kbps`} />}
+    </CollapsibleSection>
   );
 }
 
@@ -55,6 +134,7 @@ export const AnalyticsDashboard = memo(function AnalyticsDashboard({
   speakerCount,
   isTransitioning,
   metrics,
+  streamHealth,
 }: AnalyticsDashboardProps) {
   // "Stable Scene Duration" ticks up live between layout changes — the hook
   // only updates `layoutCommittedAt` at the moment a layout actually
@@ -71,12 +151,12 @@ export const AnalyticsDashboard = memo(function AnalyticsDashboard({
   const currentTime = duration * progress;
 
   return (
-    <div className="flex flex-col gap-4 p-4 rounded-xl bg-neutral-950 border border-neutral-800 w-full md:w-96 md:shrink-0 max-h-[45vh] md:max-h-none overflow-y-auto">
-      <h2 className="text-xs font-semibold text-neutral-300 tracking-wide">
+    <div className="flex flex-col gap-4 p-4 rounded-xl bg-neutral-950 border border-neutral-800/60 shadow-[inset_0_1px_0_0_rgba(255,255,255,0.04),0_8px_24px_-12px_rgba(0,0,0,0.6)] w-full md:w-96 md:shrink-0 max-h-[45vh] md:max-h-full overflow-y-auto">
+      <h2 className="text-xs font-display font-semibold text-neutral-300 tracking-wide">
         Live <span className="text-brand-400">Analytics</span>
       </h2>
 
-      <div className="rounded-lg border border-neutral-800/80 bg-neutral-900/40 p-3">
+      <div className="rounded-lg border border-neutral-800/60 bg-neutral-900/40 shadow-[inset_0_1px_0_0_rgba(255,255,255,0.04),0_8px_24px_-12px_rgba(0,0,0,0.6)] p-3">
         <LiveAnalyticsCharts metrics={metrics} />
       </div>
 
@@ -105,6 +185,8 @@ export const AnalyticsDashboard = memo(function AnalyticsDashboard({
           <Row label="Switch Count" value={String(metrics.sceneSwitchCount)} />
         </Section>
       </div>
+
+      {streamHealth && <StreamHealthSection streamHealth={streamHealth} />}
     </div>
   );
 });

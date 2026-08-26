@@ -55,7 +55,7 @@ export const Controls = memo(function Controls({ playing, mode, muted, onToggleP
         aria-label={`Switch to ${mode === "16:9" ? "9:16" : "16:9"}`}
       >
         <span
-          className={`absolute top-0.5 bottom-0.5 w-[calc(50%-2px)] rounded-full bg-brand-600 transition-transform duration-200 ${
+          className={`absolute top-0.5 bottom-0.5 w-[calc(50%-2px)] rounded-full bg-brand-600 transition-transform duration-200 ease-out ${
             mode === "9:16" ? "translate-x-[calc(100%+2px)]" : "translate-x-0"
           }`}
         />

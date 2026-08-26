@@ -12,7 +12,8 @@
   },
   "dependencies": {
     "react": "^19.0.0",
-    "react-dom": "^19.0.0"
+    "react-dom": "^19.0.0",
+    "shaka-player": "^5.2.7"
   },
   "devDependencies": {
     "@types/react": "^19.0.0",

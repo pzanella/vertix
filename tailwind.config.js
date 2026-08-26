@@ -8,6 +8,11 @@ export default {
       colors: {
         brand: colors.teal,
       },
+      fontFamily: {
+        sans: ['"IBM Plex Sans"', "ui-sans-serif", "system-ui", "sans-serif"],
+        display: ['"Space Grotesk"', '"IBM Plex Sans"', "sans-serif"],
+        mono: ['"IBM Plex Mono"', "ui-monospace", "SFMono-Regular", "monospace"],
+      },
     },
   },
   plugins: [],

@@ -1,15 +1,18 @@
 interface SampleClip {
   file: string;
-  label: string;
+  poster: string;
+  title: string;
+  subtitle: string | null;
+  speakers: number;
 }
 
 const SAMPLE_CLIPS: SampleClip[] = [
-  { file: "1-speaker.mp4", label: "One speaker" },
-  { file: "2-speakers-a.mp4", label: "2 speakers without audio - example 1" },
-  { file: "2-speakers-b.mp4", label: "2 speakers without audio - example 2" },
-  { file: "2-speakers-c.mp4", label: "2 speakers without audio - example 3" },
-  { file: "2-speakers-d.mp4", label: "2 speakers without audio - example 4" },
-  { file: "3-speakers.mp4", label: "3 speakers without audio" },
+  { file: "1-speaker.mp4", poster: "/samples/posters/1-speaker.jpg", title: "One speaker", subtitle: null, speakers: 1 },
+  { file: "2-speakers-a.mp4", poster: "/samples/posters/2-speakers-a.jpg", title: "2 speakers", subtitle: "example 1", speakers: 2 },
+  { file: "2-speakers-b.mp4", poster: "/samples/posters/2-speakers-b.jpg", title: "2 speakers", subtitle: "no audio / example 2", speakers: 2 },
+  { file: "2-speakers-c.mp4", poster: "/samples/posters/2-speakers-c.jpg", title: "2 speakers", subtitle: "no audio / example 3", speakers: 2 },
+  { file: "2-speakers-d.mp4", poster: "/samples/posters/2-speakers-d.jpg", title: "2 speakers", subtitle: "no audio / example 4", speakers: 2 },
+  { file: "3-speakers.mp4", poster: "/samples/posters/3-speakers.jpg", title: "3 speakers", subtitle: null, speakers: 3 },
 ];
 
 interface SamplePickerProps {
@@ -18,24 +21,27 @@ interface SamplePickerProps {
 
 export function SamplePicker({ onSelect }: SamplePickerProps) {
   return (
-    <div className="flex flex-col items-center gap-2 text-sm">
-      <span className="text-neutral-500">Try a sample clip</span>
-      <select
-        defaultValue=""
-        onChange={(e) => {
-          if (e.target.value) onSelect(e.target.value);
-        }}
-        className="bg-neutral-900 border border-neutral-700 rounded-lg px-3 py-1.5 text-neutral-300 hover:border-brand-500 transition cursor-pointer"
-      >
-        <option value="" disabled>
-          Choose a sample clip…
-        </option>
-        {SAMPLE_CLIPS.map((clip) => (
-          <option key={clip.file} value={`/samples/${clip.file}`}>
-            {clip.label}
-          </option>
-        ))}
-      </select>
+    <div className="grid grid-cols-2 gap-2 w-full">
+      {SAMPLE_CLIPS.map((clip) => (
+        <button
+          key={clip.file}
+          onClick={() => onSelect(`/samples/${clip.file}`)}
+          className="flex flex-col gap-2 rounded-lg border border-neutral-800 bg-neutral-900/60 p-2.5 text-left hover:border-brand-500 hover:bg-neutral-900 hover:-translate-y-0.5 hover:shadow-[0_4px_16px_-8px_rgba(0,0,0,0.6)] transition duration-150 ease-out"
+        >
+          <div className="relative aspect-video w-full rounded-md overflow-hidden">
+            <img src={clip.poster} alt={clip.title} className="aspect-video w-full object-cover rounded-md" />
+            <div className="absolute bottom-1 right-1 flex items-center gap-0.5 px-1.5 py-0.5 rounded bg-black/60">
+              {Array.from({ length: clip.speakers }).map((_, i) => (
+                <span key={i} className="w-1.5 h-1.5 rounded-full bg-neutral-300" />
+              ))}
+            </div>
+          </div>
+          <div className="flex flex-col gap-0.5">
+            <span className="text-neutral-200 text-xs">{clip.title}</span>
+            {clip.subtitle && <span className="text-[10px] text-neutral-500">{clip.subtitle}</span>}
+          </div>
+        </button>
+      ))}
     </div>
   );
 }

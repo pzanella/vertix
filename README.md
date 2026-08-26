@@ -64,9 +64,17 @@ manual pixel copying.
   activity, and render latency, each with a live trend chart.
 - **Two views** — the original 16:9, or the reframed 9:16 — toggle at any
   time, even mid-playback.
-- **Load any local video** — drag and drop a file, or click to choose one.
-  Nothing leaves your browser. No footage handy? Pick one of the six
-  built-in [sample clips](#sample-clips) right from the app.
+- **Three ways to load a video** — drag and drop a local file (nothing
+  leaves your browser), paste a direct video URL (MP4/WebM/Ogg), or paste
+  an adaptive stream URL (HLS/DASH), all through [Shaka
+  Player](https://github.com/shaka-project/shaka-player). No footage
+  handy? Pick one of the six built-in [sample clips](#sample-clips) right
+  from the app.
+- **Live network telemetry** — for URL and stream sources, buffer health,
+  estimated bandwidth, dropped frames, and the active ABR variant, shown
+  alongside the reframing metrics.
+- **Switch sources anytime** — a "Change source" control in the header
+  drops back to the picker without a page reload.
 - **Responsive layout** — works down to a phone-sized screen, with the
   analytics panel moving above the video and tucking away behind a toggle.
 
@@ -86,11 +94,16 @@ The reframing logic and the web app around it are two separate things:
   integration example.
 - **`src/hooks/useWasmReframe.ts`** is a thin React adapter around the
   engine. It owns everything specific to *this app's* playback UI —
-  loading a local file, play/pause/seek, mute, the scrub bar — and mirrors
-  the engine's own state into React state for the components to render.
+  loading a source (local file, direct URL, or HLS/DASH stream) via a
+  [Shaka Player](https://github.com/shaka-project/shaka-player) instance,
+  play/pause/seek, mute, the scrub bar — and mirrors both the engine's and
+  Shaka's own state into React state for the components to render. The
+  engine itself never knows Shaka exists; see
+  [`docs/player-integration.md`](docs/player-integration.md).
 - **`src/App.tsx`** and **`src/components/Player/`** are the actual UI:
-  the canvas, the transport bar, the live status badge, and the analytics
-  dashboard with its trend charts.
+  the source picker (upload / sample / URL), the canvas, the transport
+  bar, the live status badge, and the analytics dashboard with its trend
+  charts and network telemetry.
 
 Changing how the reframing decides what to show happens in `src/core/`.
 Changing how the app looks or behaves as a web page happens in
@@ -106,7 +119,8 @@ Changing how the app looks or behaves as a web page happens in
 ├── tailwind.config.js
 ├── public/
 │   ├── favicon.svg
-│   └── samples/                    # Silent sample clips, served as static assets (see Sample Clips below)
+│   └── samples/                    # Sample clips, served as static assets (see Sample Clips below)
+│       └── posters/                  # Poster thumbnails for the sample picker
 ├── src/
 │   ├── main.tsx                    # React entry point
 │   ├── App.tsx                     # Layout, file loading, player state
@@ -119,14 +133,16 @@ Changing how the app looks or behaves as a web page happens in
 │   │       ├── wasm.d.ts
 │   │       └── wasm_bg.wasm
 │   ├── hooks/
-│   │   └── useWasmReframe.ts       # Thin React adapter around VertixEngine
+│   │   └── useWasmReframe.ts       # Thin React adapter: VertixEngine + Shaka Player
 │   └── components/Player/
 │       ├── Canvas.tsx                 # <canvas> the video is drawn into
 │       ├── Controls.tsx               # Play/pause, mute, mode toggle, scrub bar
 │       ├── Timeline.tsx               # Scrub bar (rendered inside Controls)
 │       ├── LiveStatusPanel.tsx        # Small "Status: ..." badge
-│       ├── SamplePicker.tsx           # "Try a sample clip" dropdown
-│       ├── AnalyticsDashboard.tsx     # Live metrics panel
+│       ├── SourceTabs.tsx             # Upload / Sample / URL source picker tabs
+│       ├── SamplePicker.tsx           # Sample-clip card grid, with poster thumbnails
+│       ├── UrlSourceInput.tsx         # Direct video / HLS / DASH URL input
+│       ├── AnalyticsDashboard.tsx     # Live metrics panel + stream health
 │       └── LiveAnalyticsCharts.tsx    # Sparkline trend charts
 ├── wasm/
 │   ├── Cargo.toml
@@ -166,19 +182,19 @@ cruder color-based guess.
 
 ## Sample Clips
 
-`public/samples/` has six short, silent (video-only, no audio track) clips
-so you can try Vertix without hunting for your own footage. The app's
-"try a sample clip" dropdown (shown next to the drop zone before you load
-anything) lists them with these labels:
+`public/samples/` has six short clips so you can try Vertix without
+hunting for your own footage, shown as a card grid (with poster
+thumbnails from `public/samples/posters/`) on the Sample tab of the
+source picker:
 
-| File                 | Label                                    | Speakers | Duration |
-| --------------------- | ----------------------------------------- | :------: | -------: |
-| `1-speaker.mp4`       | One speaker                              | 1        | ~35s     |
-| `2-speakers-a.mp4`    | 2 speakers without audio - example 1     | 2        | ~16s     |
-| `2-speakers-b.mp4`    | 2 speakers without audio - example 2     | 2        | ~10s     |
-| `2-speakers-c.mp4`    | 2 speakers without audio - example 3     | 2        | ~10s     |
-| `2-speakers-d.mp4`    | 2 speakers without audio - example 4     | 2        | ~8s      |
-| `3-speakers.mp4`      | 3 speakers without audio                 | 3        | ~12s     |
+| File                 | Speakers | Audio | Duration |
+| --------------------- | :------: | :---: | -------: |
+| `1-speaker.mp4`       | 1        | no    | ~35s     |
+| `2-speakers-a.mp4`    | 2        | yes   | ~16s     |
+| `2-speakers-b.mp4`    | 2        | no    | ~10s     |
+| `2-speakers-c.mp4`    | 2        | no    | ~10s     |
+| `2-speakers-d.mp4`    | 2        | no    | ~8s      |
+| `3-speakers.mp4`      | 3        | yes   | ~12s     |
 
 `1-speaker.mp4` exercises the single chest-up crop, the four `2-speakers-*`
 clips exercise the stacked split (and are the best set for testing the

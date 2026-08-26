@@ -1,3 +1,16 @@
+> **This is now live in the app, not just a hypothetical.** `src/hooks/useWasmReframe.ts`
+> is the real reference implementation of the pattern documented below: it owns a
+> `shaka.Player` instance, calls `player.attach(video)` / `player.load(src)` for every
+> source this app supports (local file via `URL.createObjectURL`, direct progressive
+> URLs — MP4, WebM, Ogg — and adaptive HLS/DASH stream URLs), and hands the same
+> `<video>` element to `VertixEngine.attach()` — unmodified from how it works below.
+> The worked example still applies as-is; the only additions in the real hook are
+> app-level bookkeeping Shaka doesn't provide itself: mapping `shaka.util.Error` to
+> user-facing messages, an explicit `mimeType` hint on `load()` (skips Shaka's own
+> content-type sniffing, which fails for plain progressive files in practice), polling
+> `getStats()` / `getBufferedInfo()` for a `StreamHealth` readout, and revoking the
+> previous blob URL on each new `load()` to avoid leaking object URLs.
+
 # Attaching `VertixEngine` to an external media framework
 
 `VertixEngine` (see `src/core/`) never sets `.src` on a video element, never
@@ -19,7 +32,7 @@ at the bottom for confirmation that nothing about the pattern changes.
 ## Worked example: Shaka Player
 
 ```ts
-import shaka from "shaka-player/dist/shaka-player.ui";
+import shaka from "shaka-player"; // this app's real import — see useWasmReframe.ts
 import { VertixEngine } from "@vertix/core"; // or "../core" inside this repo
 
 const video = document.querySelector("video")!;

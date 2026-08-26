@@ -13,10 +13,10 @@ interface CanvasProps {
 // painted imperatively by useWasmReframe, entirely outside React.
 export const Canvas = memo(function Canvas({ canvasRef, mode }: CanvasProps) {
   return (
-    <div className="flex-1 min-h-0 w-full flex items-center justify-center bg-black rounded-xl overflow-hidden">
+    <div className="flex-1 min-h-0 w-full flex items-center justify-center bg-black rounded-xl overflow-hidden ring-1 ring-white/5">
       <canvas
         ref={canvasRef}
-        className={`max-h-full max-w-full ${
+        className={`max-h-full max-w-full transition-[aspect-ratio] duration-300 ease-out ${
           mode === "16:9" ? "aspect-video" : "aspect-[9/16]"
         } object-contain`}
       />
