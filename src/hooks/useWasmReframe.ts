@@ -1,10 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import shaka from "shaka-player";
+import type Shaka from "shaka-player";
 import { VertixEngine, type VertixMeta, type VertixMetrics, type VertixMode } from "../core";
-
-// Shaka's required setup step — installs cross-browser MediaSource/EME
-// shims. Must run before any shaka.Player is constructed.
-shaka.polyfill.installAll();
 
 export type ReframeMode = VertixMode;
 export type ReframeMeta = VertixMeta;
@@ -27,27 +23,51 @@ export interface StreamHealth {
 
 const GENERIC_ERROR_MESSAGE = "That file didn't load. Try a different video.";
 
+// The actual runtime value's type — `Shaka` (above) is a type-only import
+// usable only for dotted type access (`Shaka.Player`, `Shaka.util.Error`,
+// ...); this is the type of the value you get back from actually importing
+// the module, needed anywhere a real shaka instance is passed around.
+type ShakaRuntime = typeof import("shaka-player")["default"];
+
+// Kept out of the main bundle — see loadShaka() below.
+let shakaModulePromise: Promise<ShakaRuntime> | null = null;
+
+/** Dynamically imports and initializes Shaka Player on first use instead of
+ * bundling it into the app's initial JS — it's ~300KB gzipped, needed only
+ * once a video is actually about to load. Cached at module scope so every
+ * caller (the attach effect, load(), a StrictMode remount) shares one fetch
+ * and one polyfill.installAll() call. */
+function loadShaka(): Promise<ShakaRuntime> {
+  if (!shakaModulePromise) {
+    shakaModulePromise = import("shaka-player").then((mod) => {
+      mod.default.polyfill.installAll();
+      return mod.default;
+    });
+  }
+  return shakaModulePromise;
+}
+
 /** Narrow typed views onto Shaka's custom event payloads — `Player.addEventListener` itself is typed as plain `Event` in the shipped externs, so these fields (added at runtime via `shaka.util.FakeEvent`) aren't otherwise visible to TS. */
 interface ShakaErrorEvent extends Event {
-  detail: InstanceType<typeof shaka.util.Error>;
+  detail: Shaka.util.Error;
 }
 interface ShakaBufferingEvent extends Event {
   buffering: boolean;
 }
 
-function isShakaError(err: unknown): err is InstanceType<typeof shaka.util.Error> {
+function isShakaError(shaka: ShakaRuntime, err: unknown): err is Shaka.util.Error {
   return err instanceof shaka.util.Error;
 }
 
 /** Reverse-looks-up a `shaka.util.Error.Code` numeric value to its enum member name (e.g. "HLS_REQUIRED_TAG_MISSING") — needed because HLS- and DASH-prefixed codes share the same MANIFEST category and numeric range, so only the name tells them apart. */
-function shakaErrorCodeName(code: number): string {
+function shakaErrorCodeName(shaka: ShakaRuntime, code: number): string {
   const entry = Object.entries(shaka.util.Error.Code).find(([, value]) => value === code);
   return entry?.[0] ?? "";
 }
 
 /** Maps a Shaka load failure (from the `error` event or a rejected `player.load()`) to a user-facing message. Isolates the one spot in this app that reaches into Shaka's error shape (`error.data` is untyped upstream). */
-function mapShakaError(err: unknown): string {
-  if (!isShakaError(err)) return GENERIC_ERROR_MESSAGE;
+function mapShakaError(shaka: ShakaRuntime, err: unknown): string {
+  if (!isShakaError(shaka, err)) return GENERIC_ERROR_MESSAGE;
 
   const { category, code, data } = err as { category: number; code: number; data: unknown[] };
 
@@ -70,7 +90,7 @@ function mapShakaError(err: unknown): string {
   }
 
   if (category === shaka.util.Error.Category.MANIFEST) {
-    const codeName = shakaErrorCodeName(code);
+    const codeName = shakaErrorCodeName(shaka, code);
     if (codeName.startsWith("HLS_")) return "This stream's playlist is invalid or unsupported.";
     if (codeName.startsWith("DASH_")) return "This stream's manifest is invalid or unsupported.";
     return "This stream's manifest is invalid or unsupported.";
@@ -111,12 +131,16 @@ function classifyManifestType(src: string): StreamManifestType {
   return "PROGRESSIVE";
 }
 
-function computeBufferHealthSec(bufferedInfo: shaka.extern.BufferedInfo, currentTime: number): number {
+function computeBufferHealthSec(bufferedInfo: Shaka.extern.BufferedInfo, currentTime: number): number {
   const range = bufferedInfo.total.find((r) => currentTime >= r.start && currentTime <= r.end);
   return range ? Math.max(0, range.end - currentTime) : 0;
 }
 
-function computeStreamHealth(player: shaka.Player, video: HTMLVideoElement, manifestType: StreamManifestType): StreamHealth {
+function computeStreamHealth(
+  player: Shaka.Player,
+  video: HTMLVideoElement,
+  manifestType: StreamManifestType
+): StreamHealth {
   const stats = player.getStats();
   const bufferHealthSec = computeBufferHealthSec(player.getBufferedInfo(), video.currentTime);
   const isAdaptive = manifestType === "HLS" || manifestType === "DASH";
@@ -209,13 +233,10 @@ export function useWasmReframe(): UseWasmReframeReturn {
     engineRef.current = new VertixEngine();
   }
 
-  // Lazily-constructed singleton, same shape as `engineRef` above. Never
-  // destroyed on effect cleanup: under StrictMode's dev-only double-invoke
-  // (mount -> cleanup -> mount), a `player.destroy()` there races Shaka's
-  // async detach against the second mount's `attach()` on the same <video>
-  // element, leaving `attach()` pending forever with no error. The player
-  // is meant to live for the app's whole session anyway, so skip destroy.
-  const shakaPlayerRef = useRef<shaka.Player | null>(null);
+  const shakaPlayerRef = useRef<Shaka.Player | null>(null);
+  const shakaListenersWiredRef = useRef(false);
+  const shakaOnErrorRef = useRef<((event: Event) => void) | null>(null);
+  const shakaOnBufferingRef = useRef<((event: Event) => void) | null>(null);
 
   const [state, setState] = useState<PlayerState>("idle");
   const [meta, setMeta] = useState<VertixMeta | null>(null);
@@ -248,44 +269,19 @@ export function useWasmReframe(): UseWasmReframeReturn {
     };
   }, []);
 
-  // Wires error/buffering events onto the persistent shakaPlayerRef
-  // singleton — safe to add/remove every mount cycle since it never
-  // constructs or destroys the player itself.
+  // Tears down the Shaka listeners on true unmount, if they were ever
+  // wired (see ensureShakaReady() inside load() below — nothing sets these
+  // up before the user actually loads a source).
   useEffect(() => {
-    if (shakaPlayerRef.current === null) {
-      shakaPlayerRef.current = new shaka.Player();
-    }
-    const player = shakaPlayerRef.current;
-
-    const onError = (event: Event) => {
-      const detail = (event as ShakaErrorEvent).detail;
-      setState("error");
-      setErrorMessage(mapShakaError(detail));
-    };
-    const onBuffering = (event: Event) => {
-      setIsBuffering((event as ShakaBufferingEvent).buffering);
-    };
-    player.addEventListener("error", onError);
-    player.addEventListener("buffering", onBuffering);
     return () => {
-      player.removeEventListener("error", onError);
-      player.removeEventListener("buffering", onBuffering);
+      const player = shakaPlayerRef.current;
+      const onError = shakaOnErrorRef.current;
+      const onBuffering = shakaOnBufferingRef.current;
+      if (player && onError && onBuffering) {
+        player.removeEventListener("error", onError);
+        player.removeEventListener("buffering", onBuffering);
+      }
     };
-  }, []);
-
-  // Attaches Shaka to the <video> element, which App.tsx renders
-  // unconditionally — this only ever needs to run once, guarded by the
-  // plain ref (survives StrictMode's double-invoke, unlike a boolean state).
-  useEffect(() => {
-    if (shakaAttachedRef.current) return;
-    const video = videoRef.current;
-    const player = shakaPlayerRef.current;
-    if (!video || !player) return;
-    shakaAttachedRef.current = true;
-    player.attach(video).catch((err) => {
-      setState("error");
-      setErrorMessage(mapShakaError(err));
-    });
   }, []);
 
   // Revokes whatever local blob URL is still current on true unmount —
@@ -313,8 +309,7 @@ export function useWasmReframe(): UseWasmReframeReturn {
 
   const load = useCallback((src: string, mimeTypeHint?: string) => {
     const video = videoRef.current;
-    const player = shakaPlayerRef.current;
-    if (!video || !player) return;
+    if (!video) return;
 
     setState("loading");
     setErrorMessage(null);
@@ -335,10 +330,10 @@ export function useWasmReframe(): UseWasmReframeReturn {
         .then(() => setState("playing"))
         .catch(() => setState("ready"));
     };
-    // No native video.onerror handler: Shaka already re-surfaces media
-    // element errors through its own 'error' event (handled below) — a
-    // separate raw handler here previously raced that and clobbered
-    // Shaka's specific message with the generic fallback.
+    // No native video.onerror: Shaka already re-surfaces media element
+    // errors through its own 'error' event (handled below) — a separate raw
+    // handler here previously raced that and clobbered Shaka's specific
+    // message with the generic fallback.
 
     const previousSrc = currentSrcRef.current;
     if (previousSrc && previousSrc.startsWith("blob:")) {
@@ -353,10 +348,56 @@ export function useWasmReframe(): UseWasmReframeReturn {
     // succeeded (e.g. rapidly switching sample clips).
     const generation = ++loadGenerationRef.current;
     const mimeType = mimeTypeHint ?? mimeTypeForExtension(src);
-    player.load(src, null, mimeType).catch((err) => {
-      if (loadGenerationRef.current !== generation) return;
-      setState("error");
-      setErrorMessage(mapShakaError(err));
+
+    // Resolves Shaka (see loadShaka()), constructing the player, wiring its
+    // error/buffering events, and attaching it to <video> the first time
+    // any of this is needed — deliberately not done any earlier, so
+    // visitors who never load a video never fetch Shaka's ~270KB chunk.
+    const ensureShakaReady = async () => {
+      const shaka = await loadShaka();
+
+      if (shakaPlayerRef.current === null) {
+        shakaPlayerRef.current = new shaka.Player();
+      }
+      const player = shakaPlayerRef.current;
+
+      if (!shakaListenersWiredRef.current) {
+        shakaListenersWiredRef.current = true;
+        const onError = (event: Event) => {
+          setState("error");
+          setErrorMessage(mapShakaError(shaka, (event as ShakaErrorEvent).detail));
+        };
+        const onBuffering = (event: Event) => {
+          setIsBuffering((event as ShakaBufferingEvent).buffering);
+        };
+        shakaOnErrorRef.current = onError;
+        shakaOnBufferingRef.current = onBuffering;
+        player.addEventListener("error", onError);
+        player.addEventListener("buffering", onBuffering);
+      }
+
+      if (!shakaAttachedRef.current && videoRef.current) {
+        shakaAttachedRef.current = true;
+        try {
+          await player.attach(videoRef.current);
+        } catch (err) {
+          setState("error");
+          setErrorMessage(mapShakaError(shaka, err));
+          return null;
+        }
+      }
+
+      return { shaka, player };
+    };
+
+    ensureShakaReady().then((ready) => {
+      if (!ready || loadGenerationRef.current !== generation) return;
+      const { shaka, player } = ready;
+      player.load(src, null, mimeType).catch((err) => {
+        if (loadGenerationRef.current !== generation) return;
+        setState("error");
+        setErrorMessage(mapShakaError(shaka, err));
+      });
     });
   }, []);
 
@@ -398,7 +439,8 @@ export function useWasmReframe(): UseWasmReframeReturn {
   }, []);
 
   // Stream-health telemetry — only meaningful, and only polled, while
-  // something is actually playing back.
+  // something is actually playing back (by which point Shaka is guaranteed
+  // loaded, since nothing reaches "playing" without it).
   useEffect(() => {
     if (state !== "playing" || manifestType === null) return;
     const player = shakaPlayerRef.current;
