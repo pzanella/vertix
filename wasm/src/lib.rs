@@ -26,6 +26,12 @@ pub struct ReframeEngine {
     face_tracker: FaceTracker,
 }
 
+impl Default for ReframeEngine {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[wasm_bindgen]
 impl ReframeEngine {
     #[wasm_bindgen(constructor)]
