@@ -27,7 +27,7 @@ const GENERIC_ERROR_MESSAGE = "That file didn't load. Try a different video.";
 // usable only for dotted type access (`Shaka.Player`, `Shaka.util.Error`,
 // ...); this is the type of the value you get back from actually importing
 // the module, needed anywhere a real shaka instance is passed around.
-type ShakaRuntime = typeof import("shaka-player")["default"];
+type ShakaRuntime = (typeof import("shaka-player"))["default"];
 
 // Kept out of the main bundle — see loadShaka() below.
 let shakaModulePromise: Promise<ShakaRuntime> | null = null;

@@ -21,7 +21,9 @@
 /* Only transitions (hover/state changes) are suppressed — animate-spin loading
    indicators stay animating, since they convey real state, not decoration. */
 @media (prefers-reduced-motion: reduce) {
-  *, *::before, *::after {
+  *,
+  *::before,
+  *::after {
     transition-duration: 0.001ms !important;
   }
 }

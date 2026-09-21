@@ -377,7 +377,14 @@ export class VertixEngine {
     this.targetPanes = [];
     this.layoutSignature = "";
     this.transitionStart = null;
-    this.metrics = { ...this.metrics, faceSizes: [], motionScore: null, faceConfidence: null, cropScaleFactor: null, layoutCommittedAt: null };
+    this.metrics = {
+      ...this.metrics,
+      faceSizes: [],
+      motionScore: null,
+      faceConfidence: null,
+      cropScaleFactor: null,
+      layoutCommittedAt: null,
+    };
     this.emitState();
     this.emitMetrics();
   }
@@ -466,7 +473,9 @@ export class VertixEngine {
         // frame edge isn't a usable speaker either — only close-up,
         // unclipped faces count as an actual interview subject.
         this.lastFaces = unpackFaces(facesFlat).filter(
-          (f) => (f.h >= MIN_SPEAKER_FACE_SIZE || f.w >= MIN_SPEAKER_FACE_SIZE) && faceVisibleFraction(f) >= MIN_FACE_VISIBLE_FRACTION
+          (f) =>
+            (f.h >= MIN_SPEAKER_FACE_SIZE || f.w >= MIN_SPEAKER_FACE_SIZE) &&
+            faceVisibleFraction(f) >= MIN_FACE_VISIBLE_FRACTION
         );
 
         const count = this.lastFaces.length;
@@ -496,9 +505,12 @@ export class VertixEngine {
           faceSizes,
           motionScore,
           faceConfidence,
-          motionHistory: motionScore !== null ? appendCapped(this.metrics.motionHistory, motionScore) : this.metrics.motionHistory,
+          motionHistory:
+            motionScore !== null ? appendCapped(this.metrics.motionHistory, motionScore) : this.metrics.motionHistory,
           confidenceHistory:
-            faceConfidence !== null ? appendCapped(this.metrics.confidenceHistory, faceConfidence) : this.metrics.confidenceHistory,
+            faceConfidence !== null
+              ? appendCapped(this.metrics.confidenceHistory, faceConfidence)
+              : this.metrics.confidenceHistory,
         };
         this.emitMetrics();
 
@@ -507,7 +519,15 @@ export class VertixEngine {
         // a different pane count than what's actually on screen. The
         // deadzone itself lives inside computeSpeakerLayout.
         if (this.stablePersonCount > 0 && count === this.stablePersonCount) {
-          this.targetPanes = computeSpeakerLayout(this.lastFaces, srcW, srcH, cropW, cropH, this.targetPanes, DEADZONE_FRACTION);
+          this.targetPanes = computeSpeakerLayout(
+            this.lastFaces,
+            srcW,
+            srcH,
+            cropW,
+            cropH,
+            this.targetPanes,
+            DEADZONE_FRACTION
+          );
         }
       }
 
@@ -518,7 +538,11 @@ export class VertixEngine {
         // change dissolves in instead of cutting. Skipped on the very first
         // commit — there's no prior frame to fade from.
         if (this.layoutSignature !== "") {
-          if (!this.transitionSnapshotCanvas || this.transitionSnapshotCanvas.width !== cropW || this.transitionSnapshotCanvas.height !== cropH) {
+          if (
+            !this.transitionSnapshotCanvas ||
+            this.transitionSnapshotCanvas.width !== cropW ||
+            this.transitionSnapshotCanvas.height !== cropH
+          ) {
             this.transitionSnapshotCanvas = new OffscreenCanvas(cropW, cropH);
           }
           const snapCtx = this.transitionSnapshotCanvas.getContext("2d")!;
@@ -532,14 +556,20 @@ export class VertixEngine {
         // A genuinely new layout snaps straight to its target (empty
         // `previous` — every pane counts as "moved") instead of lerping
         // from whatever the old layout's positions were.
-        this.targetPanes = this.stablePersonCount === 0 ? [] : computeSpeakerLayout(this.lastFaces, srcW, srcH, cropW, cropH);
+        this.targetPanes =
+          this.stablePersonCount === 0 ? [] : computeSpeakerLayout(this.lastFaces, srcW, srcH, cropW, cropH);
         this.smoothedPanes = this.targetPanes.map((p) => ({ ...p.pane.source }));
 
         const cropScaleFactor =
           this.targetPanes.length > 0
             ? this.targetPanes.reduce((sum, p) => sum + srcH / p.pane.source.h, 0) / this.targetPanes.length
             : null;
-        this.metrics = { ...this.metrics, layoutCommittedAt: now, sceneSwitchCount: this.sceneSwitchCount, cropScaleFactor };
+        this.metrics = {
+          ...this.metrics,
+          layoutCommittedAt: now,
+          sceneSwitchCount: this.sceneSwitchCount,
+          cropScaleFactor,
+        };
         this.emitMetrics();
         this.emitState();
       }

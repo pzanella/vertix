@@ -85,7 +85,9 @@ export function UrlSourceInput({ state, errorMessage, onLoad }: UrlSourceInputPr
           Load
         </button>
       </div>
-      <div className="h-4 px-0.5">{helperText && <p className="text-red-400 text-[11px] leading-4">{helperText}</p>}</div>
+      <div className="h-4 px-0.5">
+        {helperText && <p className="text-red-400 text-[11px] leading-4">{helperText}</p>}
+      </div>
     </div>
   );
 }

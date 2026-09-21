@@ -1,5 +1,14 @@
 import { useCallback, useMemo, useRef, useState } from "react";
-import { AnalyticsDashboard, Canvas, Controls, LiveStatusPanel, SamplePicker, SourceTabs, Timeline, UrlSourceInput } from "./components/Player";
+import {
+  AnalyticsDashboard,
+  Canvas,
+  Controls,
+  LiveStatusPanel,
+  SamplePicker,
+  SourceTabs,
+  Timeline,
+  UrlSourceInput,
+} from "./components/Player";
 import { useWasmReframe } from "./hooks/useWasmReframe";
 
 export default function App() {
@@ -39,10 +48,7 @@ export default function App() {
     [load]
   );
 
-  const handleFile = useCallback(
-    (e: React.ChangeEvent<HTMLInputElement>) => openFile(e.target.files?.[0]),
-    [openFile]
-  );
+  const handleFile = useCallback((e: React.ChangeEvent<HTMLInputElement>) => openFile(e.target.files?.[0]), [openFile]);
 
   const handleDrop = useCallback(
     (e: React.DragEvent<HTMLDivElement>) => {
@@ -53,14 +59,17 @@ export default function App() {
     [openFile]
   );
 
-  const playing = state === "playing" || (videoRef.current ? !videoRef.current.paused : false);
+  const playing = state === "playing";
   const isActive = state === "ready" || state === "playing" || state === "paused" || state === "ended";
 
   // Memoized so Controls (memoized itself) only re-renders when the
   // timeline actually needs to — otherwise passing JSX inline as a prop
   // would create a new element reference on every App render (e.g. from
   // unrelated dashboard metrics updating), defeating that memoization.
-  const timeline = useMemo(() => <Timeline progress={progress} duration={duration} onSeek={seek} />, [progress, duration, seek]);
+  const timeline = useMemo(
+    () => <Timeline progress={progress} duration={duration} onSeek={seek} />,
+    [progress, duration, seek]
+  );
 
   return (
     <div className="min-h-screen md:h-screen w-screen flex flex-col overflow-y-auto md:overflow-hidden p-4 gap-3">
@@ -73,7 +82,9 @@ export default function App() {
           <h1 className="text-lg font-display font-semibold tracking-tight">
             <span className="text-brand-400">Ver</span>tix
           </h1>
-          <p className="hidden sm:block text-xs text-neutral-500">Turn 16:9 video into 9:16. The camera follows the action for you.</p>
+          <p className="hidden sm:block text-xs text-neutral-500">
+            Turn 16:9 video into 9:16. The camera follows the action for you.
+          </p>
         </div>
 
         {isActive && (
@@ -119,7 +130,14 @@ export default function App() {
                     </>
                   ) : (
                     <>
-                      <svg viewBox="0 0 24 24" className="w-9 h-9 text-neutral-500" fill="none" stroke="currentColor" strokeWidth={1.5} strokeLinecap="round">
+                      <svg
+                        viewBox="0 0 24 24"
+                        className="w-9 h-9 text-neutral-500"
+                        fill="none"
+                        stroke="currentColor"
+                        strokeWidth={1.5}
+                        strokeLinecap="round"
+                      >
                         <path d="M4 8V5a1 1 0 0 1 1-1h3M20 8V5a1 1 0 0 1-1-1h-3M4 16v3a1 1 0 0 0 1 1h3M20 16v3a1 1 0 0 0-1 1h-3" />
                       </svg>
                       <span className="text-neutral-400 text-sm">Drop a 16:9 video here, or click to choose one</span>
@@ -131,7 +149,9 @@ export default function App() {
               </div>
             }
             sample={
-              <div className={`flex flex-col items-center gap-2 w-full ${state === "loading" ? "opacity-70 pointer-events-none" : ""}`}>
+              <div
+                className={`flex flex-col items-center gap-2 w-full ${state === "loading" ? "opacity-70 pointer-events-none" : ""}`}
+              >
                 <SamplePicker onSelect={load} />
                 {state === "error" && <p className="text-red-400 text-xs">{errorMessage}</p>}
               </div>

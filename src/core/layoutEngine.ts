@@ -85,7 +85,13 @@ const FACE_VERTICAL_ANCHOR = 0.35;
  * thirds, not dead-center); horizontally it's exactly centered — the
  * crop's center-of-mass on the X axis is the face's own cx, full stop.
  */
-function centeredCoverCrop(face: FaceBox, srcW: number, srcH: number, paneAspect: number, zoomFactor: number): PaneRect {
+function centeredCoverCrop(
+  face: FaceBox,
+  srcW: number,
+  srcH: number,
+  paneAspect: number,
+  zoomFactor: number
+): PaneRect {
   let h = Math.min(srcH, face.h * srcH * zoomFactor);
   let w = h * paneAspect;
   if (w > srcW) {
@@ -188,8 +194,7 @@ export function computeSpeakerLayout(
       const face = ordered[idx];
       const dest: PaneRect = { x: col * paneW, y: rowIdx * rowH, w: paneW, h: rowH };
       const prev = previous[idx];
-      const moved =
-        !prev || Math.abs(face.cx - prev.face.cx) > deadzone || Math.abs(face.cy - prev.face.cy) > deadzone;
+      const moved = !prev || Math.abs(face.cx - prev.face.cx) > deadzone || Math.abs(face.cy - prev.face.cy) > deadzone;
 
       results.push(
         moved

@@ -7,12 +7,48 @@ interface SampleClip {
 }
 
 const SAMPLE_CLIPS: SampleClip[] = [
-  { file: "1-speaker.mp4", poster: "/samples/posters/1-speaker.jpg", title: "One speaker", subtitle: null, speakers: 1 },
-  { file: "2-speakers-a.mp4", poster: "/samples/posters/2-speakers-a.jpg", title: "2 speakers", subtitle: "example 1", speakers: 2 },
-  { file: "2-speakers-b.mp4", poster: "/samples/posters/2-speakers-b.jpg", title: "2 speakers", subtitle: "no audio / example 2", speakers: 2 },
-  { file: "2-speakers-c.mp4", poster: "/samples/posters/2-speakers-c.jpg", title: "2 speakers", subtitle: "no audio / example 3", speakers: 2 },
-  { file: "2-speakers-d.mp4", poster: "/samples/posters/2-speakers-d.jpg", title: "2 speakers", subtitle: "no audio / example 4", speakers: 2 },
-  { file: "3-speakers.mp4", poster: "/samples/posters/3-speakers.jpg", title: "3 speakers", subtitle: null, speakers: 3 },
+  {
+    file: "1-speaker.mp4",
+    poster: "/samples/posters/1-speaker.jpg",
+    title: "One speaker",
+    subtitle: null,
+    speakers: 1,
+  },
+  {
+    file: "2-speakers-a.mp4",
+    poster: "/samples/posters/2-speakers-a.jpg",
+    title: "2 speakers",
+    subtitle: "example 1",
+    speakers: 2,
+  },
+  {
+    file: "2-speakers-b.mp4",
+    poster: "/samples/posters/2-speakers-b.jpg",
+    title: "2 speakers",
+    subtitle: "no audio / example 2",
+    speakers: 2,
+  },
+  {
+    file: "2-speakers-c.mp4",
+    poster: "/samples/posters/2-speakers-c.jpg",
+    title: "2 speakers",
+    subtitle: "no audio / example 3",
+    speakers: 2,
+  },
+  {
+    file: "2-speakers-d.mp4",
+    poster: "/samples/posters/2-speakers-d.jpg",
+    title: "2 speakers",
+    subtitle: "no audio / example 4",
+    speakers: 2,
+  },
+  {
+    file: "3-speakers.mp4",
+    poster: "/samples/posters/3-speakers.jpg",
+    title: "3 speakers",
+    subtitle: null,
+    speakers: 3,
+  },
 ];
 
 interface SamplePickerProps {

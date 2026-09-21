@@ -20,7 +20,15 @@ function Sparkline({ data, color }: { data: number[]; color: string }) {
   if (data.length < 2) {
     return (
       <svg width="100%" height={height} viewBox={`0 0 ${width} ${height}`} preserveAspectRatio="none">
-        <line x1={0} y1={height - 1} x2={width} y2={height - 1} stroke="currentColor" className="text-neutral-800" strokeWidth={1} />
+        <line
+          x1={0}
+          y1={height - 1}
+          x2={width}
+          y2={height - 1}
+          stroke="currentColor"
+          className="text-neutral-800"
+          strokeWidth={1}
+        />
       </svg>
     );
   }
@@ -40,9 +48,25 @@ function Sparkline({ data, color }: { data: number[]; color: string }) {
 
   return (
     <svg width="100%" height={height} viewBox={`0 0 ${width} ${height}`} preserveAspectRatio="none">
-      <line x1={0} y1={height / 2} x2={width} y2={height / 2} stroke="currentColor" className="text-neutral-800" strokeWidth={1} strokeDasharray="2 3" />
+      <line
+        x1={0}
+        y1={height / 2}
+        x2={width}
+        y2={height / 2}
+        stroke="currentColor"
+        className="text-neutral-800"
+        strokeWidth={1}
+        strokeDasharray="2 3"
+      />
       <polyline points={areaPoints} fill={color} fillOpacity={0.12} stroke="none" />
-      <polyline points={points} fill="none" stroke={color} strokeWidth={1.5} strokeLinejoin="round" strokeLinecap="round" />
+      <polyline
+        points={points}
+        fill="none"
+        stroke={color}
+        strokeWidth={1.5}
+        strokeLinejoin="round"
+        strokeLinecap="round"
+      />
     </svg>
   );
 }

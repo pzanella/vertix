@@ -12,7 +12,15 @@ interface ControlsProps {
   middle?: ReactNode;
 }
 
-export const Controls = memo(function Controls({ playing, mode, muted, onTogglePlay, onToggleMute, onSetMode, middle }: ControlsProps) {
+export const Controls = memo(function Controls({
+  playing,
+  mode,
+  muted,
+  onTogglePlay,
+  onToggleMute,
+  onSetMode,
+  middle,
+}: ControlsProps) {
   return (
     <div className="flex items-center w-full px-2 gap-2">
       <button
@@ -37,7 +45,12 @@ export const Controls = memo(function Controls({ playing, mode, muted, onToggleP
         aria-label={muted ? "Unmute" : "Mute"}
       >
         {muted ? (
-          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" className="w-4 h-4 text-neutral-400">
+          <svg
+            xmlns="http://www.w3.org/2000/svg"
+            viewBox="0 0 24 24"
+            fill="currentColor"
+            className="w-4 h-4 text-neutral-400"
+          >
             <path d="M11 5L6 9H2v6h4l5 4V5zm9.54 5.46a1 1 0 0 0-1.42 0L17 12.59l-2.12-2.13a1 1 0 1 0-1.42 1.42L15.59 14l-2.13 2.12a1 1 0 1 0 1.42 1.42L17 15.41l2.12 2.13a1 1 0 0 0 1.42-1.42L18.41 14l2.13-2.12a1 1 0 0 0 0-1.42z" />
           </svg>
         ) : (

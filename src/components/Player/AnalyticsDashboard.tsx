@@ -72,7 +72,15 @@ function ChevronIcon({ open }: { open: boolean }) {
   );
 }
 
-function CollapsibleSection({ title, defaultOpen, children }: { title: string; defaultOpen: boolean; children: ReactNode }) {
+function CollapsibleSection({
+  title,
+  defaultOpen,
+  children,
+}: {
+  title: string;
+  defaultOpen: boolean;
+  children: ReactNode;
+}) {
   const [open, setOpen] = useState(defaultOpen);
   return (
     <div className="flex flex-col gap-1.5">
@@ -101,7 +109,8 @@ function droppedFramesTone(dropped: number, total: number): keyof typeof TONE_CL
 }
 
 function StreamHealthSection({ streamHealth }: { streamHealth: StreamHealth }) {
-  const { manifestType, bufferHealthSec, bandwidthEstimateKbps, droppedFrames, totalDecodedFrames, activeVariant } = streamHealth;
+  const { manifestType, bufferHealthSec, bandwidthEstimateKbps, droppedFrames, totalDecodedFrames, activeVariant } =
+    streamHealth;
   const isAdaptive = manifestType === "HLS" || manifestType === "DASH";
 
   if (manifestType === "LOCAL") {
@@ -114,14 +123,22 @@ function StreamHealthSection({ streamHealth }: { streamHealth: StreamHealth }) {
 
   return (
     <CollapsibleSection title="Stream Health" defaultOpen={true}>
-      <Row label="Buffer Health" value={`${bufferHealthSec.toFixed(1)}s ahead`} tone={bufferHealthTone(bufferHealthSec)} />
-      {isAdaptive && bandwidthEstimateKbps !== null && <Row label="Bandwidth Est." value={`${bandwidthEstimateKbps} kbps`} />}
+      <Row
+        label="Buffer Health"
+        value={`${bufferHealthSec.toFixed(1)}s ahead`}
+        tone={bufferHealthTone(bufferHealthSec)}
+      />
+      {isAdaptive && bandwidthEstimateKbps !== null && (
+        <Row label="Bandwidth Est." value={`${bandwidthEstimateKbps} kbps`} />
+      )}
       <Row
         label="Dropped Frames"
         value={`${droppedFrames} / ${totalDecodedFrames}`}
         tone={droppedFramesTone(droppedFrames, totalDecodedFrames)}
       />
-      {isAdaptive && activeVariant && <Row label="Active Variant" value={`${activeVariant.height}p @ ${activeVariant.bitrateKbps}kbps`} />}
+      {isAdaptive && activeVariant && (
+        <Row label="Active Variant" value={`${activeVariant.height}p @ ${activeVariant.bitrateKbps}kbps`} />
+      )}
     </CollapsibleSection>
   );
 }
@@ -147,6 +164,9 @@ export const AnalyticsDashboard = memo(function AnalyticsDashboard({
   }, []);
 
   const bucket = classifyLayout(mode, speakerCount, isTransitioning);
+  // Deliberately impure: this is a ticking clock readout, re-rendered every
+  // 500ms by forceTick above specifically so this recomputes with a fresh time.
+  // eslint-disable-next-line react-hooks/purity
   const stableSeconds = metrics.layoutCommittedAt !== null ? (performance.now() - metrics.layoutCommittedAt) / 1000 : 0;
   const currentTime = duration * progress;
 
@@ -170,7 +190,10 @@ export const AnalyticsDashboard = memo(function AnalyticsDashboard({
         <Section title="Detection">
           <Row label="Speakers" value={String(speakerCount)} />
           <Row label="Layout" value={LAYOUT_LABEL[bucket](speakerCount)} />
-          <Row label="Crop Scale" value={metrics.cropScaleFactor !== null ? `${metrics.cropScaleFactor.toFixed(2)}×` : "—"} />
+          <Row
+            label="Crop Scale"
+            value={metrics.cropScaleFactor !== null ? `${metrics.cropScaleFactor.toFixed(2)}×` : "—"}
+          />
         </Section>
 
         <Section title="Face Boxes">
