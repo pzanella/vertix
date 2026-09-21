@@ -9,8 +9,9 @@ a crop. Nothing is uploaded. Everything runs on your machine.
 
 ![Vertix reframing a two-speaker conversation: the original 16:9 shot on the left, the live 9:16 stacked split it produces on the right](docs/demo.gif)
 
-*Real output from the actual engine — the [`2-speakers-c.mp4`](#sample-clips)
-sample clip, sourced from [Pexels](https://www.pexels.com/).*
+*Composited with Vertix's own crop math (zoom factor, rule-of-thirds anchor)
+on the [`2-speakers-c.mp4`](#sample-clips) sample clip, sourced from
+[Pexels](https://www.pexels.com/).*
 
 ## Why
 
