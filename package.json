@@ -3,6 +3,15 @@
   "description": "Turn 16:9 video into 9:16 in the browser — Rust/WASM face detection finds speakers and frames them automatically, with no upload and no server.",
   "version": "0.1.0",
   "license": "MIT",
+  "author": "Pietro Zanella <pietrozanella22@gmail.com>",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/pzanella/vertix.git"
+  },
+  "homepage": "https://pzanella.github.io/vertix/",
+  "bugs": {
+    "url": "https://github.com/pzanella/vertix/issues"
+  },
   "type": "module",
   "scripts": {
     "dev": "vite",
