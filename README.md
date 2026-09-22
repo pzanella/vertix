@@ -1,5 +1,7 @@
 # Vertix
 
+[![Live demo](https://img.shields.io/badge/demo-live-2dd4bf?style=flat-square)](https://pzanella.github.io/vertix/)
+
 Turn a 16:9 video into 9:16, right in your browser. Vertix finds faces,
 works out how many speakers are on screen, and frames each one — a single
 speaker gets a comfortable chest-up crop, two speakers get a stacked
