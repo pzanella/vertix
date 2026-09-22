@@ -18,7 +18,7 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Setup Rust (wasm32 target)
         uses: dtolnay/rust-toolchain@stable
@@ -30,13 +30,15 @@ jobs:
         with:
           workspaces: wasm
 
+      # jetli/wasm-pack-action is unmaintained (stuck on the Node 16
+      # runtime, no newer release) — installing the prebuilt binary
+      # straight from wasm-pack's own installer script avoids that
+      # dependency entirely, same source linked from this repo's README.
       - name: Install wasm-pack
-        uses: jetli/wasm-pack-action@v0.4.0
-        with:
-          version: latest
+        run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
 
       - name: Setup Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version-file: .nvmrc
           cache: npm
@@ -62,4 +64,4 @@ jobs:
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - id: deployment
-        uses: actions/deploy-pages@v4
+        uses: actions/deploy-pages@v5
