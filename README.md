@@ -252,6 +252,99 @@ Sourced from [Pexels](https://www.pexels.com/), free to use under the
 6. When the layout itself changes, the engine cross-dissolves from the old
    framing into the new one instead of cutting instantly.
 
+## Known Limitations
+
+**Many people on screen.** The layout logic groups every detected face into
+a grid once there are 3 or more (see [How It Works](#how-it-works) above).
+That works well for the bundled sample clips and similar small-group
+conversations, but breaks down on scenes with several similarly-sized,
+similarly-positioned faces — a press conference, a panel, a crowd shot —
+where a wide grid is both visually wrong (nobody's actually "speaking" in
+five or six evenly-sized panes) and more expensive to render (one extra
+`drawImage` per pane, on top of the per-frame face-detection cost already
+described above). This is the layout a real Sky News HLS stream of a press
+conference produced during manual testing, alongside dropped frames from
+the added per-pane draw cost.
+
+As of this build, once 3 or more faces are detected simultaneously and
+[Web Audio API](https://developer.mozilla.org/en-US/docs/Web_API/Web_Audio_API)
+voice-activity energy says someone's talking, the scene locks onto whichever
+single face is clearly the active subject, checked two ways: first, is one
+face clearly the largest in frame (an interview or press-scrum subject is
+conventionally shot larger than the bystanders around them, and framing
+size holds up far better than mouth-motion in handheld footage, where
+camera shake adds apparent "motion" to every face, not just whoever's
+speaking); if no one's clearly foregrounded, falls back to mouth-motion
+dominance instead, for a same-sized panel where framing alone can't say
+who's currently talking. Two earlier versions of this each missed a real
+case: gating on 4+ faces (deliberately above any bundled sample's face
+count) missed that a real press scrum routinely filters down to exactly 3
+valid faces — the same count as a genuine 3-way conversation; motion alone
+missed a scrum where the actual speaker was clearly foregrounded (in one
+real case, roughly 2x the size of the next-largest face) but didn't have a
+decisively dominant mouth-motion score next to bystanders shifting and
+gesturing in shaky handheld footage.
+
+At exactly 3 faces, a scene neither signal can confidently resolve (no
+clear winner, nothing locked on yet) falls back to the ordinary 3-pane grid
+rather than the full, uncropped frame used at 4+ for the same ambiguous
+case — that's what keeps `3-speakers.mp4`'s natural back-and-forth
+conversation looking as it always has whenever nobody's clearly dominant by
+either signal. This is still a pair of coarse heuristics, not a trained
+active-speaker-detection model — RMS energy over a 512-sample time-domain
+window isn't a calibrated loudness measure, and both framing size and
+mouth-motion are proxies, not ground truth. A large but silent bystander
+standing close to camera, or one who gestures and nods enough to look like
+the dominant mouth-mover, can still fool it.
+
+**Voice-activity detection depends on the `<video>`'s own audio track,**
+read via `AudioContext.createMediaElementSource`
+(`src/core/audioActivity.ts`). This works the same whether the source is a
+local file or an adaptive HLS/DASH stream through Shaka Player: Shaka feeds
+the `<video>` element through a same-origin `blob:` URL backed by
+MediaSource regardless of the segment CDN's own CORS policy, so a
+cross-origin stream isn't structurally blocked from this the way a plain
+`<img>` or `fetch()` would be — confirmed by inspecting a live
+`video.sky.it` page's `<video>` element directly. It degrades to
+"unavailable" without ever throwing if the source has no audio track, the
+browser blocks `AudioContext` before a user gesture, or the CDN doesn't
+send CORS headers (which taints the audio graph so every sample reads as
+zero) — all of which are treated identically to real silence by the
+fallback above, since "can't tell who's talking" should behave the same
+regardless of *why*.
+
+**Both gaps above were found live; the fix for the second hasn't been.**
+Manual testing against real Sky HLS press-conference streams is what
+surfaced both: first that 3+2 bystanders reads as exactly 3 faces, not 4+,
+so an earlier 4+-gated version never engaged; then, after lowering the
+threshold to 3, that mouth-motion alone still didn't produce a confident
+winner against a real foregrounded, clearly-talking subject in shaky
+handheld footage. The size+motion version described above is the direct
+fix for that second finding, but as of this revision it's only had
+type-checking, linting, and a production build behind it — not yet its own
+live run against the same streams, so whether it actually locks onto the
+speaker instead of gridding, and whether `FACE_SIZE_DOMINANCE_MARGIN = 1.4`
+/ `AUDIO_ACTIVE_ENERGY = 0.02` / `ACTIVE_SPEAKER_MARGIN = 1.5` /
+`ACTIVE_SPEAKER_LOCK_TICKS = 5` hold up, is still unconfirmed. Nor has any
+version been checked against a wider range of press conferences, panels, or
+interviews with background noise, overlapping applause/questions, or a
+foregrounded bystander rather than the actual speaker.
+
+Automated (non-live) verification of this fallback is limited to
+type-checking, linting, and a production build, plus the "can't affect any
+sample clip" guarantee, which is structural (a threshold comparison, not a
+runtime check that could be skipped) rather than something run against
+each clip. A real live-playback run needs an actual foregrounded browser
+tab: attempting to drive one through browser automation surfaced a Chrome
+behavior worth noting for anyone else testing MediaSource-based playback
+that way — a `<video>` fed via Shaka's `player.attach()` never fires
+`MediaSource`'s `sourceopen` (so `attach()` never resolves, and playback
+never starts) while the tab is backgrounded
+(`document.visibilityState === "hidden"`), independent of network, CORS, or
+focus (`document.hasFocus()` can be `true` at the same time) — reproduced
+in isolation with a fresh `Player`/`<video>` pair, with `fetch()` against
+the same URL succeeding instantly throughout.
+
 ## Rebuilding the WASM Module
 
 If you change anything in `wasm/src/`:

@@ -1,4 +1,5 @@
 import initWasm, { ReframeEngine } from "./wasm/wasm.js";
+import { AudioActivityMonitor } from "./audioActivity";
 import {
   computeSpeakerLayout,
   faceVisibleFraction,
@@ -46,6 +47,10 @@ export interface VertixMetrics {
   motionScore: number | null;
   /** Average detector confidence (0-1) across current valid faces. Already thresholded upstream, so stays in a fairly narrow high band. Null with no valid faces. */
   faceConfidence: number | null;
+  /** Whether the audio-activity monitor could read real samples from this source at all — false for every bundled sample clip (no audio track) and for some cross-origin sources without CORS headers. Independent of whether anyone's currently talking. */
+  audioAvailable: boolean;
+  /** Current voice-activity energy (0-1 RMS) from the audio track, or null when audioAvailable is false. Only meaningful once MANY_SPEAKERS_THRESHOLD (3) or more raw faces are detected. */
+  audioEnergy: number | null;
   /** performance.now() timestamp the current layout was committed at, for computing "stable for Ns" live. */
   layoutCommittedAt: number | null;
   /** How many times the layout has actually changed this session. */
@@ -74,6 +79,8 @@ const INITIAL_METRICS: VertixMetrics = {
   cropScaleFactor: null,
   motionScore: null,
   faceConfidence: null,
+  audioAvailable: false,
+  audioEnergy: null,
   layoutCommittedAt: null,
   sceneSwitchCount: 0,
   fpsHistory: [],
@@ -133,6 +140,59 @@ const PERSON_COUNT_STABLE_TICKS_INITIAL = 2;
 const PERSON_COUNT_STABLE_TICKS = 6;
 const PERSON_COUNT_DROP_TO_ZERO_TICKS = 2;
 
+// --- "Many faces, ambiguous scene" safety fallback ------------------------
+// A raw face count at or above this is what runs the active-speaker check
+// below. Originally 4 (strictly above any bundled sample's face count), but
+// real press-scrum footage — one person talking, several silent bystanders
+// close enough to camera to pass the size/visibility filter — routinely
+// filters down to exactly 3 valid faces, the same count as a genuine 3-way
+// conversation (3-speakers.mp4). Telling those apart needs this same
+// audio+motion check at 3 too; see AMBIGUOUS_GRID_FALLBACK_FACES below for
+// how 3-speakers.mp4 stays unaffected when nobody dominates.
+const MANY_SPEAKERS_THRESHOLD = 3;
+// At exactly this many raw faces, a scene the audio+motion check can't
+// confidently resolve (no clear winner, nothing locked yet) falls back to
+// today's ordinary N-pane grid instead of the full-frame fallback used
+// above this count. This is what keeps 3-speakers.mp4's natural back-and-
+// forth conversation showing its usual 3-way grid during any stretch where
+// nobody's mouth motion clearly dominates — a real press scrum, by
+// contrast, only ever produces a confident winner (the one person actually
+// talking) or nothing yet locked, both already handled below. Above this
+// count, an unresolved scene is assumed too crowded to guess at and falls
+// back to no crop instead, per MANY_SPEAKERS_THRESHOLD's own reasoning.
+const AMBIGUOUS_GRID_FALLBACK_FACES = 3;
+// RMS energy (0-1) below which the audio track counts as silence/room tone
+// for this purpose, not speech. A coarse, untuned starting value — see the
+// README's "Known limitations" section for why: it hasn't been checked
+// against real broadcast audio yet.
+const AUDIO_ACTIVE_ENERGY = 0.02;
+// A face's mouth-motion score must beat the next-highest candidate's by at
+// least this multiple to count as an unambiguous single active speaker —
+// otherwise several people moving similarly (nodding, cross-talk) would
+// flip the pick every detection tick.
+const ACTIVE_SPEAKER_MARGIN = 1.5;
+// A face's size (the same max(w,h) fraction used for MIN_SPEAKER_FACE_SIZE
+// and the dashboard's faceSizes) must beat the next-largest face's by at
+// least this multiple to count as clearly the foregrounded subject.
+// Checked before motion, and without needing audio (see
+// resolveLayoutFaces) — motion alone turned out too weak a signal in
+// handheld, shaky press-scrum footage, where camera
+// shake adds apparent "motion" to every face in frame, not just whoever's
+// actually talking. Framing size doesn't have that problem, and interview
+// subjects are conventionally shot larger than bystanders around them —
+// confirmed against a real scrum where the actual speaker's face measured
+// roughly 2x the size of the two next-largest (39.1% vs. 19.9%/17.7% of
+// frame), so 1.4 leaves real margin either side of that.
+const FACE_SIZE_DOMINANCE_MARGIN = 1.4;
+// How many consecutive detection ticks a new candidate must keep winning
+// before the engine actually moves its lock onto them — same role as
+// PERSON_COUNT_STABLE_TICKS, applied to *which* face instead of how many.
+const ACTIVE_SPEAKER_LOCK_TICKS = 5;
+// Two face positions (fractions of frame) within this distance of each
+// other count as "the same person" from one tick to the next, for both the
+// lock-streak check and for re-finding the locked speaker's current face.
+const SAME_PERSON_DISTANCE = 0.08;
+
 // How much each pane's crop glides toward its subject's latest detected
 // position per rendered frame (0-1) — gentle camera-follow *within* an
 // already-stable layout (same face count), not a trigger for changing the
@@ -186,6 +246,17 @@ function drawFitFrame(
   ctx.drawImage(video, 0, Math.round((outH - fgH) / 2), outW, fgH);
 }
 
+/** The single face whose score clearly stands out from the rest by at least `margin`×, or null if the top two are too close to call (or there's only a zero-scoring "winner", which isn't one). */
+function dominantBy(faces: FaceBox[], scoreOf: (f: FaceBox) => number, margin: number): FaceBox | null {
+  const sorted = [...faces].sort((a, b) => scoreOf(b) - scoreOf(a));
+  const top = sorted[0];
+  const topScore = scoreOf(top);
+  if (topScore <= 0) return null;
+  const runnerUp = sorted[1];
+  if (runnerUp !== undefined && topScore <= scoreOf(runnerUp) * margin) return null;
+  return top;
+}
+
 type MetricsListener = (metrics: VertixMetrics) => void;
 type StateListener = (state: VertixState) => void;
 
@@ -222,9 +293,15 @@ export class VertixEngine {
   private srcDimsInitialized = false;
 
   private lastFaces: FaceBox[] = [];
+  private lastResolvedFaces: FaceBox[] = [];
   private stablePersonCount = 0;
   private pendingPersonCount = 0;
   private pendingPersonCountStreak = 0;
+
+  private audioMonitor = new AudioActivityMonitor();
+  private lockedActiveSpeakerPos: { cx: number; cy: number } | null = null;
+  private pendingActiveSpeakerPos: { cx: number; cy: number } | null = null;
+  private pendingActiveSpeakerStreak = 0;
 
   private targetPanes: PaneTarget[] = [];
   private smoothedPanes: PaneRect[] = [];
@@ -257,6 +334,7 @@ export class VertixEngine {
     this.video = video;
     this.canvas = canvas;
     this.outputCtx = null;
+    this.audioMonitor.attach(video);
     this.resetForNewSource();
 
     video.addEventListener("play", this.boundOnPlay);
@@ -281,6 +359,7 @@ export class VertixEngine {
   /** Fully tears the engine down, including the WASM instance. The engine can't be reused after this — construct a new one. */
   destroy(): void {
     this.detach();
+    this.audioMonitor.detach();
     this.engine?.free();
     this.engine = null;
     this.metricsListeners.clear();
@@ -370,9 +449,13 @@ export class VertixEngine {
   private resetTrackingState(): void {
     this.engine?.reset();
     this.lastFaces = [];
+    this.lastResolvedFaces = [];
     this.stablePersonCount = 0;
     this.pendingPersonCount = 0;
     this.pendingPersonCountStreak = 0;
+    this.lockedActiveSpeakerPos = null;
+    this.pendingActiveSpeakerPos = null;
+    this.pendingActiveSpeakerStreak = 0;
     this.smoothedPanes = [];
     this.targetPanes = [];
     this.layoutSignature = "";
@@ -382,6 +465,7 @@ export class VertixEngine {
       faceSizes: [],
       motionScore: null,
       faceConfidence: null,
+      audioEnergy: null,
       cropScaleFactor: null,
       layoutCommittedAt: null,
     };
@@ -393,6 +477,98 @@ export class VertixEngine {
     if (this.running || !this.video) return;
     this.running = true;
     this.video.requestVideoFrameCallback(this.boundOnVideoFrame);
+  }
+
+  /**
+   * Resolves raw detected faces down to what the layout should actually
+   * track this tick. Below MANY_SPEAKERS_THRESHOLD (3), returns them
+   * unchanged — exactly today's behavior for 0-2 faces.
+   *
+   * At 3 or more, a grid stops being a safe default — it's as likely to be
+   * a press scrum (one person talking, several bystanders close enough to
+   * pass the size/visibility filter) as a genuine multi-person
+   * conversation, and the multi-pane grid was never designed or tuned for
+   * the former. Resolves to whichever single face is clearly the active
+   * subject — checked by framing size first (no audio needed: this app
+   * loads every video muted by default, so a signal that required audio
+   * would sit unused until someone manually unmutes), then by audio+motion
+   * only if no one's clearly foregrounded — confidently locked onto for a
+   * few ticks, so a noisy read doesn't flip who's framed every detection
+   * tick. Or, whenever neither signal can determine that (no audio track,
+   * silence/muted with nobody foregrounded either, or no single face
+   * clearly out in front of the others by either signal): at exactly
+   * AMBIGUOUS_GRID_FALLBACK_FACES (3), the raw faces unchanged (today's
+   * ordinary grid — this is what keeps 3-speakers.mp4's natural
+   * conversation looking as it always has whenever nobody's clearly
+   * dominant); above it, an empty array, which the caller already treats
+   * as "show the full frame" for the zero-face case. This is a heuristic,
+   * not a guarantee: it trades away some cases where a real multi-person
+   * panel *could* have been framed correctly, in exchange for never
+   * confidently showing a wrong crop on a scene it can't actually make
+   * sense of.
+   */
+  private resolveLayoutFaces(rawFaces: FaceBox[]): FaceBox[] {
+    if (rawFaces.length < MANY_SPEAKERS_THRESHOLD) return rawFaces;
+    const ambiguousFallback = rawFaces.length === AMBIGUOUS_GRID_FALLBACK_FACES ? rawFaces : [];
+
+    // Framing size doesn't need audio to be meaningful, and deliberately
+    // isn't gated on it: this app loads every video muted by default (see
+    // useWasmReframe's load()), so requiring audio here would mean this
+    // whole signal sits unused for anyone who hasn't manually unmuted —
+    // exactly the state a clearly-foregrounded interview subject should
+    // still be identifiable in.
+    let winner = dominantBy(rawFaces, (f) => Math.max(f.w, f.h), FACE_SIZE_DOMINANCE_MARGIN);
+
+    if (winner === null) {
+      // No one's clearly foregrounded — a same-sized panel, where framing
+      // alone can't say who's talking. Mouth motion can, but only once we
+      // know *someone* actually is (unmuted audio above the noise floor);
+      // otherwise motion from camera shake or ordinary gesturing is as
+      // likely to win as real speech.
+      const energy = this.audioMonitor.energy();
+      winner =
+        energy !== null && energy >= AUDIO_ACTIVE_ENERGY
+          ? dominantBy(rawFaces, (f) => f.motion, ACTIVE_SPEAKER_MARGIN)
+          : null;
+    }
+
+    if (winner === null) {
+      // Neither signal found a confident subject — don't restart the
+      // lock-in streak over one ambiguous tick, but don't extend it
+      // either; keep showing whoever was already locked on, if anyone.
+      this.pendingActiveSpeakerPos = null;
+      this.pendingActiveSpeakerStreak = 0;
+      return this.lockedActiveSpeakerPos
+        ? [this.closestFaceTo(rawFaces, this.lockedActiveSpeakerPos)]
+        : ambiguousFallback;
+    }
+
+    const candidate = { cx: winner.cx, cy: winner.cy };
+    if (this.pendingActiveSpeakerPos && this.isSamePerson(this.pendingActiveSpeakerPos, candidate)) {
+      this.pendingActiveSpeakerStreak += 1;
+    } else {
+      this.pendingActiveSpeakerPos = candidate;
+      this.pendingActiveSpeakerStreak = 1;
+    }
+    if (this.pendingActiveSpeakerStreak >= ACTIVE_SPEAKER_LOCK_TICKS) {
+      this.lockedActiveSpeakerPos = candidate;
+    }
+
+    return this.lockedActiveSpeakerPos
+      ? [this.closestFaceTo(rawFaces, this.lockedActiveSpeakerPos)]
+      : ambiguousFallback;
+  }
+
+  private isSamePerson(a: { cx: number; cy: number }, b: { cx: number; cy: number }): boolean {
+    return Math.abs(a.cx - b.cx) < SAME_PERSON_DISTANCE && Math.abs(a.cy - b.cy) < SAME_PERSON_DISTANCE;
+  }
+
+  private closestFaceTo(faces: FaceBox[], pos: { cx: number; cy: number }): FaceBox {
+    return faces.reduce((best, f) => {
+      const d = (f.cx - pos.cx) ** 2 + (f.cy - pos.cy) ** 2;
+      const bd = (best.cx - pos.cx) ** 2 + (best.cy - pos.cy) ** 2;
+      return d < bd ? f : best;
+    });
   }
 
   // Runs on every decoded frame. Rendering happens synchronously here (not
@@ -478,7 +654,13 @@ export class VertixEngine {
             faceVisibleFraction(f) >= MIN_FACE_VISIBLE_FRACTION
         );
 
-        const count = this.lastFaces.length;
+        // Resolves the raw detected faces down to what layout should
+        // actually track — unchanged for 0-3 faces, but for 4+ (a scene the
+        // grid layout was never validated on) either the single face the
+        // audio track says is talking, or none at all, treated exactly
+        // like the zero-face case below. See MANY_SPEAKERS_THRESHOLD.
+        this.lastResolvedFaces = this.resolveLayoutFaces(this.lastFaces);
+        const count = this.lastResolvedFaces.length;
         if (count === this.pendingPersonCount) {
           this.pendingPersonCountStreak += 1;
         } else {
@@ -505,6 +687,8 @@ export class VertixEngine {
           faceSizes,
           motionScore,
           faceConfidence,
+          audioAvailable: this.audioMonitor.available,
+          audioEnergy: this.audioMonitor.energy(),
           motionHistory:
             motionScore !== null ? appendCapped(this.metrics.motionHistory, motionScore) : this.metrics.motionHistory,
           confidenceHistory:
@@ -520,7 +704,7 @@ export class VertixEngine {
         // deadzone itself lives inside computeSpeakerLayout.
         if (this.stablePersonCount > 0 && count === this.stablePersonCount) {
           this.targetPanes = computeSpeakerLayout(
-            this.lastFaces,
+            this.lastResolvedFaces,
             srcW,
             srcH,
             cropW,
@@ -557,7 +741,7 @@ export class VertixEngine {
         // `previous` — every pane counts as "moved") instead of lerping
         // from whatever the old layout's positions were.
         this.targetPanes =
-          this.stablePersonCount === 0 ? [] : computeSpeakerLayout(this.lastFaces, srcW, srcH, cropW, cropH);
+          this.stablePersonCount === 0 ? [] : computeSpeakerLayout(this.lastResolvedFaces, srcW, srcH, cropW, cropH);
         this.smoothedPanes = this.targetPanes.map((p) => ({ ...p.pane.source }));
 
         const cropScaleFactor =

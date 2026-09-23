@@ -170,6 +170,8 @@ const INITIAL_METRICS: VertixMetrics = {
   cropScaleFactor: null,
   motionScore: null,
   faceConfidence: null,
+  audioAvailable: false,
+  audioEnergy: null,
   layoutCommittedAt: null,
   sceneSwitchCount: 0,
   fpsHistory: [],

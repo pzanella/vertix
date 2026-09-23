@@ -203,6 +203,11 @@ export const AnalyticsDashboard = memo(function AnalyticsDashboard({
           />
         </Section>
 
+        <Section title="Voice Activity">
+          <Row label="Audio Track" value={metrics.audioAvailable ? "readable" : "unavailable"} />
+          <Row label="Energy" value={metrics.audioEnergy !== null ? metrics.audioEnergy.toFixed(3) : "—"} />
+        </Section>
+
         <Section title="Scene">
           <Row label="Stable For" value={metrics.layoutCommittedAt !== null ? `${stableSeconds.toFixed(1)}s` : "—"} />
           <Row label="Switch Count" value={String(metrics.sceneSwitchCount)} />
