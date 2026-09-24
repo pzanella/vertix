@@ -49,7 +49,7 @@ export interface VertixMetrics {
   faceConfidence: number | null;
   /** Whether the audio-activity monitor could read real samples from this source at all — false for every bundled sample clip (no audio track) and for some cross-origin sources without CORS headers. Independent of whether anyone's currently talking. */
   audioAvailable: boolean;
-  /** Current voice-activity energy (0-1 RMS) from the audio track, or null when audioAvailable is false. Only meaningful once MANY_SPEAKERS_THRESHOLD (3) or more raw faces are detected. */
+  /** Current voice-activity energy (0-1 RMS) from the audio track, or null when audioAvailable is false. Only meaningful once ACTIVE_SPEAKER_THRESHOLD (2) or more raw faces are detected. */
   audioEnergy: number | null;
   /** performance.now() timestamp the current layout was committed at, for computing "stable for Ns" live. */
   layoutCommittedAt: number | null;
@@ -105,92 +105,158 @@ function easeInOutCubic(t: number): number {
   return t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
 }
 
-// Detection resolution the face model is fed — drawn as a plain stretch
-// fill (not letterboxed), so a detected face's fractional position maps
-// directly onto the same fraction of the source frame.
+// Detection frame size — a plain stretch fill (not letterboxed), so a
+// detected face's position maps directly onto the same fraction of the
+// source frame.
 const FACE_W = 320;
 const FACE_H = 240;
-// Face detection (synchronous WASM/ONNX inference, blocks this thread while
-// it runs) only runs on every Nth frame; drawing and the pane LERP below
-// still run every frame regardless. Kept on the main thread on purpose — a
-// Web Worker version added enough round-trip latency to the tracking
-// target that panning read as disconnected, even though raw FPS went up.
-const FACE_DETECT_INTERVAL = 4;
+// Detection doesn't run on every frame, only every Nth one — rendering and
+// pane smoothing still do.
+const FACE_DETECT_INTERVAL = 5;
+// How long to wait for the detection worker to report ready before giving
+// up and falling back to running WASM on the main thread instead.
+const WORKER_READY_TIMEOUT_MS = 4000;
 
-// A face only counts toward the layout if it's at least this tall or wide,
-// as a fraction of the frame — filters out background people (footballers
-// on the pitch, crowd/spectators), which the model still happily detects
-// but which typically only occupy 2-8% of the frame, vs. a real on-camera
-// interview subject's close-up framing.
+// --- Shared detection worker ------------------------------------------
+// One worker for the whole page rather than one per VertixEngine instance.
+// Two instances racing to create their own worker at the same time used to
+// leave one of them stuck forever with no error — going through this
+// single shared instance avoids that regardless of how many engines end up
+// constructed (React StrictMode always creates at least two in dev).
+let sharedWorker: Worker | null = null;
+let sharedWorkerReady = false;
+let sharedWorkerLoadPromise: Promise<boolean> | null = null;
+let nextDetectionRequestId = 0;
+const pendingDetectionCallbacks = new Map<number, (facesFlat: Float64Array) => void>();
+
+/**
+ * Creates the shared worker on first call and waits for it to report
+ * ready. Later calls (from any VertixEngine instance) just get the same
+ * result instead of creating another worker. Resolves false if it can't
+ * be built, errors, or times out — callers fall back to running WASM on
+ * the main thread instead (see dispatchDetection).
+ */
+function getSharedDetectionWorker(): Promise<boolean> {
+  if (sharedWorkerLoadPromise) return sharedWorkerLoadPromise;
+
+  sharedWorkerLoadPromise = new Promise((resolve) => {
+    let worker: Worker;
+    try {
+      // Respects Vite's base path (root in dev, a subpath on GitHub
+      // Pages). No `type: "module"` — the bundle is built classic, see
+      // scripts/build-worker.mjs.
+      worker = new Worker(`${import.meta.env.BASE_URL}workers/faceDetectionWorker.js`);
+    } catch (err) {
+      console.error(
+        "[Vertix] Couldn't construct the detection worker; falling back to running WASM on the main thread.",
+        err
+      );
+      resolve(false);
+      return;
+    }
+
+    let settled = false;
+    const fail = (reason: string) => {
+      if (settled) return;
+      settled = true;
+      console.error(
+        `[Vertix] Detection worker unavailable (${reason}); falling back to running WASM on the main thread.`
+      );
+      worker.terminate();
+      sharedWorker = null;
+      resolve(false);
+    };
+
+    const timeout = setTimeout(() => fail(`no "ready" within ${WORKER_READY_TIMEOUT_MS}ms`), WORKER_READY_TIMEOUT_MS);
+
+    worker.onmessage = (e: MessageEvent) => {
+      const msg = e.data as { type: string; requestId?: number; faces?: ArrayBuffer; message?: string };
+      if (msg.type === "ready") {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timeout);
+        sharedWorkerReady = true;
+        resolve(true);
+        return;
+      }
+      if (msg.type === "error") {
+        clearTimeout(timeout);
+        fail(msg.message ?? "unknown error");
+        return;
+      }
+      if (msg.type === "result" && msg.requestId !== undefined) {
+        const callback = pendingDetectionCallbacks.get(msg.requestId);
+        pendingDetectionCallbacks.delete(msg.requestId);
+        callback?.(new Float64Array(msg.faces!));
+      }
+    };
+    worker.onerror = (e: ErrorEvent) => {
+      clearTimeout(timeout);
+      fail(e.message);
+    };
+
+    sharedWorker = worker;
+  });
+
+  return sharedWorkerLoadPromise;
+}
+
+// A face only counts toward the layout if it's at least this tall or wide
+// (fraction of frame) — filters out background people the model still
+// happily detects (crowd, players on a pitch) that aren't a real subject.
 const MIN_SPEAKER_FACE_SIZE = 0.12;
 // A face must be at least this visible within the frame (not cropped off
-// at an edge) to count — see `faceVisibleFraction`. Guards against a
-// half-visible face at the frame boundary triggering a split.
+// at an edge) to count — see faceVisibleFraction.
 const MIN_FACE_VISIBLE_FRACTION = 0.8;
 
 // A person-count change only takes effect once this many consecutive
-// detection ticks agree, so a momentary misdetection doesn't flip the
-// layout and back. Three thresholds for three cases: the very first
-// layout commit (nothing on screen yet, so no flicker risk) can be fast;
-// a normal mid-stream count change needs more confirmation; dropping to 0
-// speakers (B-roll) sits in between — faster than a normal change, since
-// staying cropped over an empty shot looks worse than briefly widening
-// out, but not instant, so a single stray frame can't flip the layout.
+// ticks agree, so a single misdetection doesn't flip the layout and back.
+// Three cases: the very first commit (nothing on screen yet, safe to be
+// fast), a normal count change (needs more confirmation), and dropping to
+// 0/B-roll (faster than a normal change, but not instant either).
 const PERSON_COUNT_STABLE_TICKS_INITIAL = 2;
 const PERSON_COUNT_STABLE_TICKS = 6;
 const PERSON_COUNT_DROP_TO_ZERO_TICKS = 2;
 
-// --- "Many faces, ambiguous scene" safety fallback ------------------------
-// A raw face count at or above this is what runs the active-speaker check
-// below. Originally 4 (strictly above any bundled sample's face count), but
-// real press-scrum footage — one person talking, several silent bystanders
-// close enough to camera to pass the size/visibility filter — routinely
-// filters down to exactly 3 valid faces, the same count as a genuine 3-way
-// conversation (3-speakers.mp4). Telling those apart needs this same
-// audio+motion check at 3 too; see AMBIGUOUS_GRID_FALLBACK_FACES below for
-// how 3-speakers.mp4 stays unaffected when nobody dominates.
-const MANY_SPEAKERS_THRESHOLD = 3;
-// At exactly this many raw faces, a scene the audio+motion check can't
-// confidently resolve (no clear winner, nothing locked yet) falls back to
-// today's ordinary N-pane grid instead of the full-frame fallback used
-// above this count. This is what keeps 3-speakers.mp4's natural back-and-
-// forth conversation showing its usual 3-way grid during any stretch where
-// nobody's mouth motion clearly dominates — a real press scrum, by
-// contrast, only ever produces a confident winner (the one person actually
-// talking) or nothing yet locked, both already handled below. Above this
-// count, an unresolved scene is assumed too crowded to guess at and falls
-// back to no crop instead, per MANY_SPEAKERS_THRESHOLD's own reasoning.
+// --- Active-speaker resolution ----------------------------------------
+// From this many raw faces up, a plain split/grid stops being a safe
+// default — it could be a genuine multi-person conversation, or just one
+// person talking with a silent bystander close enough to camera to pass
+// the filters (an interview subject with a reporter's face/mic arm in
+// frame, a press scrum). See resolveLayoutFaces for how it tells them apart.
+const ACTIVE_SPEAKER_THRESHOLD = 2;
+// At this face count or below, a scene resolveLayoutFaces can't confidently
+// read falls back to the ordinary split/grid instead of showing nothing —
+// this is what keeps genuine 2- and 3-person conversations looking normal
+// whenever nobody's clearly dominant. Above it, an unresolved scene is
+// assumed too crowded to guess at and shows no crop instead.
 const AMBIGUOUS_GRID_FALLBACK_FACES = 3;
-// RMS energy (0-1) below which the audio track counts as silence/room tone
-// for this purpose, not speech. A coarse, untuned starting value — see the
-// README's "Known limitations" section for why: it hasn't been checked
-// against real broadcast audio yet.
+// RMS energy below which the audio track counts as silence, not speech.
+// A rough starting value — hasn't been tuned against real broadcast audio.
 const AUDIO_ACTIVE_ENERGY = 0.02;
-// A face's mouth-motion score must beat the next-highest candidate's by at
-// least this multiple to count as an unambiguous single active speaker —
-// otherwise several people moving similarly (nodding, cross-talk) would
-// flip the pick every detection tick.
+// A face's mouth-motion score must beat the runner-up by this multiple to
+// count as a clear active speaker, once audio has confirmed someone's
+// actually talking.
 const ACTIVE_SPEAKER_MARGIN = 1.5;
-// A face's size (the same max(w,h) fraction used for MIN_SPEAKER_FACE_SIZE
-// and the dashboard's faceSizes) must beat the next-largest face's by at
-// least this multiple to count as clearly the foregrounded subject.
-// Checked before motion, and without needing audio (see
-// resolveLayoutFaces) — motion alone turned out too weak a signal in
-// handheld, shaky press-scrum footage, where camera
-// shake adds apparent "motion" to every face in frame, not just whoever's
-// actually talking. Framing size doesn't have that problem, and interview
-// subjects are conventionally shot larger than bystanders around them —
-// confirmed against a real scrum where the actual speaker's face measured
-// roughly 2x the size of the two next-largest (39.1% vs. 19.9%/17.7% of
-// frame), so 1.4 leaves real margin either side of that.
+// Same idea, used when audio can't confirm anyone's speaking — which in
+// practice is most playback: no audio track at all, muted until the
+// viewer unmutes, or silent on cross-origin sources without CORS. Motion
+// still gets tried, just held to a stricter margin to make up for the
+// missing confirmation.
+const ACTIVE_SPEAKER_MARGIN_NO_AUDIO = 2.2;
+// A face's size must beat the next-largest by this multiple to count as
+// clearly the foregrounded subject — checked before motion, and without
+// needing audio. Camera shake reads as motion on every face in a scene;
+// framing size doesn't have that problem, and interview subjects are
+// usually shot larger than bystanders. Tuned against a real press scrum
+// where the actual speaker's face measured about 2x the next-largest.
 const FACE_SIZE_DOMINANCE_MARGIN = 1.4;
-// How many consecutive detection ticks a new candidate must keep winning
-// before the engine actually moves its lock onto them — same role as
-// PERSON_COUNT_STABLE_TICKS, applied to *which* face instead of how many.
+// How many consecutive ticks a new candidate has to keep winning before
+// the engine actually locks onto them — same idea as
+// PERSON_COUNT_STABLE_TICKS, applied to who's framed instead of how many.
 const ACTIVE_SPEAKER_LOCK_TICKS = 5;
-// Two face positions (fractions of frame) within this distance of each
-// other count as "the same person" from one tick to the next, for both the
-// lock-streak check and for re-finding the locked speaker's current face.
+// Two face positions within this distance (fraction of frame) count as
+// "the same person" from one tick to the next.
 const SAME_PERSON_DISTANCE = 0.08;
 
 // How much each pane's crop glides toward its subject's latest detected
@@ -265,9 +331,18 @@ export class VertixEngine {
   private canvas: HTMLCanvasElement | null = null;
   private outputCtx: CanvasRenderingContext2D | null = null;
 
+  // Face detection normally runs in the shared worker above. `engine` (a
+  // main-thread WASM instance) only exists as a fallback if the worker
+  // can't be used.
   private engine: InstanceType<typeof ReframeEngine> | null = null;
   private wasmReady = false;
   private wasmLoading: Promise<void> | null = null;
+
+  private detectionInFlight = false;
+  // Bumped on every reset (seek, mode change) so a shared-worker result
+  // already in flight gets discarded instead of landing on top of
+  // freshly-cleared tracking state.
+  private detectionRequestGeneration = 0;
 
   private faceCanvas: OffscreenCanvas;
   private faceCtx: OffscreenCanvasRenderingContext2D;
@@ -320,11 +395,15 @@ export class VertixEngine {
     this.faceCanvas = fc;
     this.faceCtx = fc.getContext("2d", { willReadFrequently: true })!;
     this.blurCanvas = new OffscreenCanvas(1, 1);
-    // Starts loading immediately, not on first `attach` — a host typically
-    // constructs the engine well before it has a video/canvas to attach to
-    // (e.g. while the user is still picking a file), and that dead time is
-    // exactly when this latency should be hidden.
-    this.ensureWasm();
+    // Starts loading right away, not on first attach — a host usually
+    // constructs the engine before it has a video to attach to (e.g. while
+    // the user's still picking a file), and that's exactly the dead time
+    // to hide this latency in. Shared across instances, so only the first
+    // call actually creates anything.
+    void getSharedDetectionWorker().then((ok) => {
+      if (!ok) this.ensureWasm();
+      else this.emitState();
+    });
   }
 
   /** Attaches to a video/canvas pair. Safe to call again with a different pair — the previous one is detached first. */
@@ -356,7 +435,11 @@ export class VertixEngine {
     this.outputCtx = null;
   }
 
-  /** Fully tears the engine down, including the WASM instance. The engine can't be reused after this — construct a new one. */
+  /**
+   * Tears this instance down for good — construct a new one to reuse.
+   * Doesn't touch the shared detection worker; other instances may still
+   * be using it.
+   */
   destroy(): void {
     this.detach();
     this.audioMonitor.detach();
@@ -384,7 +467,7 @@ export class VertixEngine {
 
   getState(): VertixState {
     return {
-      wasmReady: this.wasmReady,
+      wasmReady: sharedWorkerReady || this.wasmReady,
       mode: this.mode,
       meta: this.meta,
       speakerCount: this.stablePersonCount,
@@ -448,6 +531,15 @@ export class VertixEngine {
   /** Clears face-tracking/layout state without touching video dimensions or WASM readiness — used on seek and mode changes. */
   private resetTrackingState(): void {
     this.engine?.reset();
+    // Resets the worker's own tracker too — mouth motion needs a previous
+    // frame to diff against, and a seek just invalidated it. This affects
+    // every instance sharing the worker, which is fine since the app only
+    // ever has one video actually playing at a time.
+    sharedWorker?.postMessage({ type: "reset" });
+    // Whatever's in flight belongs to a frame from before this reset —
+    // discard it instead of feeding it into the state we're about to clear.
+    this.detectionInFlight = false;
+    this.detectionRequestGeneration += 1;
     this.lastFaces = [];
     this.lastResolvedFaces = [];
     this.stablePersonCount = 0;
@@ -481,61 +573,46 @@ export class VertixEngine {
 
   /**
    * Resolves raw detected faces down to what the layout should actually
-   * track this tick. Below MANY_SPEAKERS_THRESHOLD (3), returns them
-   * unchanged — exactly today's behavior for 0-2 faces.
+   * track this tick. Below ACTIVE_SPEAKER_THRESHOLD, faces pass through
+   * unchanged.
    *
-   * At 3 or more, a grid stops being a safe default — it's as likely to be
-   * a press scrum (one person talking, several bystanders close enough to
-   * pass the size/visibility filter) as a genuine multi-person
-   * conversation, and the multi-pane grid was never designed or tuned for
-   * the former. Resolves to whichever single face is clearly the active
-   * subject — checked by framing size first (no audio needed: this app
-   * loads every video muted by default, so a signal that required audio
-   * would sit unused until someone manually unmutes), then by audio+motion
-   * only if no one's clearly foregrounded — confidently locked onto for a
-   * few ticks, so a noisy read doesn't flip who's framed every detection
-   * tick. Or, whenever neither signal can determine that (no audio track,
-   * silence/muted with nobody foregrounded either, or no single face
-   * clearly out in front of the others by either signal): at exactly
-   * AMBIGUOUS_GRID_FALLBACK_FACES (3), the raw faces unchanged (today's
-   * ordinary grid — this is what keeps 3-speakers.mp4's natural
-   * conversation looking as it always has whenever nobody's clearly
-   * dominant); above it, an empty array, which the caller already treats
-   * as "show the full frame" for the zero-face case. This is a heuristic,
-   * not a guarantee: it trades away some cases where a real multi-person
-   * panel *could* have been framed correctly, in exchange for never
-   * confidently showing a wrong crop on a scene it can't actually make
-   * sense of.
+   * Above it, a plain split/grid isn't trustworthy anymore — it could be a
+   * real multi-person conversation, or one person talking with a silent
+   * bystander close enough to camera to pass the filters. This looks for a
+   * single active speaker: first by framing size (works without audio),
+   * then by mouth motion if sizes are too close to call. A winner has to
+   * hold for a few ticks before the engine actually locks onto them, so
+   * one noisy read doesn't flip the framing.
+   *
+   * If neither signal is confident, falls back to the raw faces (today's
+   * ordinary split/grid) at AMBIGUOUS_GRID_FALLBACK_FACES or below, or to
+   * showing nothing above it — better to punt on a scene we can't read
+   * than confidently show the wrong crop.
+   *
+   * `energy` is the audio reading for this same tick, passed in by the
+   * caller rather than read again here to avoid re-summing the analyser
+   * buffer twice for the same instant.
    */
-  private resolveLayoutFaces(rawFaces: FaceBox[]): FaceBox[] {
-    if (rawFaces.length < MANY_SPEAKERS_THRESHOLD) return rawFaces;
-    const ambiguousFallback = rawFaces.length === AMBIGUOUS_GRID_FALLBACK_FACES ? rawFaces : [];
+  private resolveLayoutFaces(rawFaces: FaceBox[], energy: number | null): FaceBox[] {
+    if (rawFaces.length < ACTIVE_SPEAKER_THRESHOLD) return rawFaces;
+    const ambiguousFallback = rawFaces.length <= AMBIGUOUS_GRID_FALLBACK_FACES ? rawFaces : [];
 
-    // Framing size doesn't need audio to be meaningful, and deliberately
-    // isn't gated on it: this app loads every video muted by default (see
-    // useWasmReframe's load()), so requiring audio here would mean this
-    // whole signal sits unused for anyone who hasn't manually unmuted —
-    // exactly the state a clearly-foregrounded interview subject should
-    // still be identifiable in.
+    // Size doesn't need audio — every video loads muted by default, so a
+    // signal that required audio would go unused until someone unmutes.
     let winner = dominantBy(rawFaces, (f) => Math.max(f.w, f.h), FACE_SIZE_DOMINANCE_MARGIN);
 
     if (winner === null) {
-      // No one's clearly foregrounded — a same-sized panel, where framing
-      // alone can't say who's talking. Mouth motion can, but only once we
-      // know *someone* actually is (unmuted audio above the noise floor);
-      // otherwise motion from camera shake or ordinary gesturing is as
-      // likely to win as real speech.
-      const energy = this.audioMonitor.energy();
-      winner =
-        energy !== null && energy >= AUDIO_ACTIVE_ENERGY
-          ? dominantBy(rawFaces, (f) => f.motion, ACTIVE_SPEAKER_MARGIN)
-          : null;
+      // Sizes are too close to call — try motion instead, held to a
+      // stricter margin if audio hasn't confirmed anyone's actually
+      // talking.
+      const audioConfirmed = energy !== null && energy >= AUDIO_ACTIVE_ENERGY;
+      winner = dominantBy(rawFaces, (f) => f.motion, audioConfirmed ? ACTIVE_SPEAKER_MARGIN : ACTIVE_SPEAKER_MARGIN_NO_AUDIO);
     }
 
     if (winner === null) {
-      // Neither signal found a confident subject — don't restart the
-      // lock-in streak over one ambiguous tick, but don't extend it
-      // either; keep showing whoever was already locked on, if anyone.
+      // No confident winner this tick — don't restart the lock streak,
+      // but don't extend it either. Keep showing whoever's already locked
+      // on, if anyone.
       this.pendingActiveSpeakerPos = null;
       this.pendingActiveSpeakerStreak = 0;
       return this.lockedActiveSpeakerPos
@@ -571,14 +648,121 @@ export class VertixEngine {
     });
   }
 
+  private dispatchDetection(video: HTMLVideoElement, srcW: number, srcH: number, cropW: number, cropH: number): void {
+    this.faceCtx.drawImage(video, 0, 0, FACE_W, FACE_H);
+    const faceImageData = this.faceCtx.getImageData(0, 0, FACE_W, FACE_H);
+    const audioEnergy = this.audioMonitor.energy();
+
+    if (sharedWorkerReady && sharedWorker) {
+      this.detectionInFlight = true;
+      const generation = this.detectionRequestGeneration;
+      const requestId = nextDetectionRequestId++;
+      pendingDetectionCallbacks.set(requestId, (facesFlat) => {
+        this.detectionInFlight = false;
+        // Belongs to a frame from before a reset (seek, mode change) —
+        // discard it instead of feeding stale positions into the layout.
+        if (generation !== this.detectionRequestGeneration) return;
+        this.processDetectionResult(facesFlat, audioEnergy, srcW, srcH, cropW, cropH);
+      });
+      const rgba = faceImageData.data.buffer;
+      sharedWorker.postMessage({ type: "detect", requestId, rgba }, [rgba]);
+    } else if (this.engine) {
+      const facesFlat = this.engine.update_faces(new Uint8Array(faceImageData.data.buffer));
+      this.processDetectionResult(facesFlat, audioEnergy, srcW, srcH, cropW, cropH);
+    }
+  }
+
+  private processDetectionResult(
+    facesFlat: Float64Array,
+    audioEnergy: number | null,
+    srcW: number,
+    srcH: number,
+    cropW: number,
+    cropH: number
+  ): void {
+    // Background people (crowd, players on a pitch) still get detected by
+    // the model — only close-up, unclipped faces count as an actual speaker.
+    this.lastFaces = unpackFaces(facesFlat).filter(
+      (f) =>
+        (f.h >= MIN_SPEAKER_FACE_SIZE || f.w >= MIN_SPEAKER_FACE_SIZE) &&
+        faceVisibleFraction(f) >= MIN_FACE_VISIBLE_FRACTION
+    );
+
+    this.lastResolvedFaces = this.resolveLayoutFaces(this.lastFaces, audioEnergy);
+    const count = this.lastResolvedFaces.length;
+    if (count === this.pendingPersonCount) {
+      this.pendingPersonCountStreak += 1;
+    } else {
+      this.pendingPersonCount = count;
+      this.pendingPersonCountStreak = 1;
+    }
+    const requiredTicks =
+      count === 0
+        ? PERSON_COUNT_DROP_TO_ZERO_TICKS
+        : this.layoutSignature === ""
+          ? PERSON_COUNT_STABLE_TICKS_INITIAL
+          : PERSON_COUNT_STABLE_TICKS;
+    if (this.pendingPersonCountStreak >= requiredTicks) {
+      this.stablePersonCount = count;
+    }
+    this.emitState();
+
+    const faces = this.lastFaces;
+    const faceSizes = faces.map((f) => Math.round(Math.max(f.w, f.h) * 1000) / 10);
+    const motionScore = faces.length > 0 ? Math.max(...faces.map((f) => f.motion)) : null;
+    const faceConfidence = faces.length > 0 ? faces.reduce((s, f) => s + f.confidence, 0) / faces.length : null;
+    this.metrics = {
+      ...this.metrics,
+      faceSizes,
+      motionScore,
+      faceConfidence,
+      audioAvailable: this.audioMonitor.available,
+      audioEnergy,
+      motionHistory:
+        motionScore !== null ? appendCapped(this.metrics.motionHistory, motionScore) : this.metrics.motionHistory,
+      confidenceHistory:
+        faceConfidence !== null
+          ? appendCapped(this.metrics.confidenceHistory, faceConfidence)
+          : this.metrics.confidenceHistory,
+    };
+    this.emitMetrics();
+
+    // Only refresh the LERP target once the raw count matches the
+    // *committed* layout — otherwise, mid-debounce, this could compute a
+    // different pane count than what's actually on screen. The deadzone
+    // itself lives inside computeSpeakerLayout.
+    if (this.stablePersonCount > 0 && count === this.stablePersonCount) {
+      this.targetPanes = computeSpeakerLayout(
+        this.lastResolvedFaces,
+        srcW,
+        srcH,
+        cropW,
+        cropH,
+        this.targetPanes,
+        DEADZONE_FRACTION
+      );
+    }
+  }
+
   // Runs on every decoded frame. Rendering happens synchronously here (not
   // through any framework state) so playback stays perfectly in sync with
   // audio.
   private onVideoFrame(now: DOMHighResTimeStamp, metadata: VideoFrameCallbackMetadata): void {
     const video = this.video;
     const canvas = this.canvas;
-    if (!video || !canvas || video.paused || video.ended) {
+    if (!video || !canvas) {
+      // detach()/destroy() already cleared these — nothing left to render.
       this.running = false;
+      return;
+    }
+    if (video.paused || video.ended) {
+      // Don't give up — just wait for the next real frame. `ended` can
+      // still read true for a tick right after playback actually resumes
+      // (replaying seeks back to 0 internally, which isn't perfectly
+      // synchronous with the "play" event) — treating that as a final
+      // stop used to leave this loop off for good while the video kept
+      // playing fine, a canvas freeze that looked like a real hang.
+      video.requestVideoFrameCallback(this.boundOnVideoFrame);
       return;
     }
 
@@ -640,79 +824,8 @@ export class VertixEngine {
       // committed once per debounced face-count change and held fixed;
       // within it, each pane's crop only drifts smoothly toward its target.
       this.frameCounter += 1;
-      if (this.frameCounter % FACE_DETECT_INTERVAL === 0 && this.engine) {
-        this.faceCtx.drawImage(video, 0, 0, FACE_W, FACE_H);
-        const faceImageData = this.faceCtx.getImageData(0, 0, FACE_W, FACE_H);
-        const facesFlat = this.engine.update_faces(new Uint8Array(faceImageData.data.buffer));
-        // Background people (players on the pitch, crowd) still get
-        // detected by the model, and a half-visible face clipped at the
-        // frame edge isn't a usable speaker either — only close-up,
-        // unclipped faces count as an actual interview subject.
-        this.lastFaces = unpackFaces(facesFlat).filter(
-          (f) =>
-            (f.h >= MIN_SPEAKER_FACE_SIZE || f.w >= MIN_SPEAKER_FACE_SIZE) &&
-            faceVisibleFraction(f) >= MIN_FACE_VISIBLE_FRACTION
-        );
-
-        // Resolves the raw detected faces down to what layout should
-        // actually track — unchanged for 0-3 faces, but for 4+ (a scene the
-        // grid layout was never validated on) either the single face the
-        // audio track says is talking, or none at all, treated exactly
-        // like the zero-face case below. See MANY_SPEAKERS_THRESHOLD.
-        this.lastResolvedFaces = this.resolveLayoutFaces(this.lastFaces);
-        const count = this.lastResolvedFaces.length;
-        if (count === this.pendingPersonCount) {
-          this.pendingPersonCountStreak += 1;
-        } else {
-          this.pendingPersonCount = count;
-          this.pendingPersonCountStreak = 1;
-        }
-        const requiredTicks =
-          count === 0
-            ? PERSON_COUNT_DROP_TO_ZERO_TICKS
-            : this.layoutSignature === ""
-              ? PERSON_COUNT_STABLE_TICKS_INITIAL
-              : PERSON_COUNT_STABLE_TICKS;
-        if (this.pendingPersonCountStreak >= requiredTicks) {
-          this.stablePersonCount = count;
-        }
-        this.emitState();
-
-        const faces = this.lastFaces;
-        const faceSizes = faces.map((f) => Math.round(Math.max(f.w, f.h) * 1000) / 10);
-        const motionScore = faces.length > 0 ? Math.max(...faces.map((f) => f.motion)) : null;
-        const faceConfidence = faces.length > 0 ? faces.reduce((s, f) => s + f.confidence, 0) / faces.length : null;
-        this.metrics = {
-          ...this.metrics,
-          faceSizes,
-          motionScore,
-          faceConfidence,
-          audioAvailable: this.audioMonitor.available,
-          audioEnergy: this.audioMonitor.energy(),
-          motionHistory:
-            motionScore !== null ? appendCapped(this.metrics.motionHistory, motionScore) : this.metrics.motionHistory,
-          confidenceHistory:
-            faceConfidence !== null
-              ? appendCapped(this.metrics.confidenceHistory, faceConfidence)
-              : this.metrics.confidenceHistory,
-        };
-        this.emitMetrics();
-
-        // Only refresh the LERP target once the raw count matches the
-        // *committed* layout — otherwise, mid-debounce, this could compute
-        // a different pane count than what's actually on screen. The
-        // deadzone itself lives inside computeSpeakerLayout.
-        if (this.stablePersonCount > 0 && count === this.stablePersonCount) {
-          this.targetPanes = computeSpeakerLayout(
-            this.lastResolvedFaces,
-            srcW,
-            srcH,
-            cropW,
-            cropH,
-            this.targetPanes,
-            DEADZONE_FRACTION
-          );
-        }
+      if (this.frameCounter % FACE_DETECT_INTERVAL === 0 && !this.detectionInFlight) {
+        this.dispatchDetection(video, srcW, srcH, cropW, cropH);
       }
 
       const targetSignature = this.stablePersonCount === 0 ? "broll" : `speakers:${this.stablePersonCount}`;
@@ -722,24 +835,30 @@ export class VertixEngine {
         // change dissolves in instead of cutting. Skipped on the very first
         // commit — there's no prior frame to fade from.
         if (this.layoutSignature !== "") {
-          if (
-            !this.transitionSnapshotCanvas ||
-            this.transitionSnapshotCanvas.width !== cropW ||
-            this.transitionSnapshotCanvas.height !== cropH
-          ) {
-            this.transitionSnapshotCanvas = new OffscreenCanvas(cropW, cropH);
-          }
-          const snapCtx = this.transitionSnapshotCanvas.getContext("2d")!;
-          snapCtx.clearRect(0, 0, cropW, cropH);
-          snapCtx.drawImage(canvas, 0, 0);
-          this.transitionStart = now;
           this.sceneSwitchCount += 1;
+          if (this.transitionStart === null) {
+            if (
+              !this.transitionSnapshotCanvas ||
+              this.transitionSnapshotCanvas.width !== cropW ||
+              this.transitionSnapshotCanvas.height !== cropH
+            ) {
+              this.transitionSnapshotCanvas = new OffscreenCanvas(cropW, cropH);
+            }
+            const snapCtx = this.transitionSnapshotCanvas.getContext("2d")!;
+            snapCtx.clearRect(0, 0, cropW, cropH);
+            snapCtx.drawImage(canvas, 0, 0);
+            this.transitionStart = now;
+          } else {
+            // Another layout change landed mid-fade. The canvas right now
+            // holds a partial blend, not a clean frame — cut straight to
+            // the new layout instead of stacking a second fade on top of it.
+            this.transitionStart = null;
+          }
         }
         this.layoutSignature = targetSignature;
 
-        // A genuinely new layout snaps straight to its target (empty
-        // `previous` — every pane counts as "moved") instead of lerping
-        // from whatever the old layout's positions were.
+        // A new layout snaps straight to its target instead of gliding in
+        // from the old positions.
         this.targetPanes =
           this.stablePersonCount === 0 ? [] : computeSpeakerLayout(this.lastResolvedFaces, srcW, srcH, cropW, cropH);
         this.smoothedPanes = this.targetPanes.map((p) => ({ ...p.pane.source }));

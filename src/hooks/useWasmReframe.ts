@@ -194,6 +194,8 @@ interface UseWasmReframeReturn {
   mode: VertixMode;
   load: (src: string, mimeTypeHint?: string) => void;
   togglePlay: () => void;
+  /** Restarts playback from an `ended` state — see its own doc comment for why this isn't just togglePlay() again. */
+  replay: () => void;
   seek: (fraction: number) => void;
   progress: number;
   duration: number;
@@ -231,9 +233,6 @@ export function useWasmReframe(): UseWasmReframeReturn {
   const loadGenerationRef = useRef(0);
 
   const engineRef = useRef<VertixEngine | null>(null);
-  if (engineRef.current === null) {
-    engineRef.current = new VertixEngine();
-  }
 
   const shakaPlayerRef = useRef<Shaka.Player | null>(null);
   const shakaListenersWiredRef = useRef(false);
@@ -254,9 +253,13 @@ export function useWasmReframe(): UseWasmReframeReturn {
   const [manifestType, setManifestType] = useState<StreamManifestType | null>(null);
   const [streamHealth, setStreamHealth] = useState<StreamHealth | null>(null);
 
-  // Mirror the engine's own state/metrics into React state.
+  // Built inside the effect, not eagerly during render: VertixEngine.destroy()
+  // is one-way, and StrictMode's dev-only mount→cleanup→remount would
+  // otherwise destroy a render-created instance almost immediately, leaving
+  // every later render stuck reusing an already-destroyed engine.
   useEffect(() => {
-    const engine = engineRef.current!;
+    const engine = new VertixEngine();
+    engineRef.current = engine;
     const unsubState = engine.onStateChange((s) => {
       setModeState(s.mode);
       setMeta(s.meta);
@@ -268,6 +271,7 @@ export function useWasmReframe(): UseWasmReframeReturn {
       unsubState();
       unsubMetrics();
       engine.destroy();
+      engineRef.current = null;
     };
   }, []);
 
@@ -322,6 +326,15 @@ export function useWasmReframe(): UseWasmReframeReturn {
     // the video's own "loadedmetadata" event — nothing to do here beyond
     // this app's own file-loading state.
 
+    const srcManifestType = classifyManifestType(src);
+    // Without this, the WebAudio tap reads a cross-origin source as
+    // silence no matter what's actually happening (see
+    // AudioActivityMonitor). Scoped to HLS/DASH only: Shaka already fetches
+    // those segments in CORS mode, so a stream that plays at all here
+    // proves the server allows it. A plain progressive URL has no such
+    // guarantee, and setting this unconditionally could break loading one.
+    video.crossOrigin = srcManifestType === "HLS" || srcManifestType === "DASH" ? "anonymous" : null;
+
     video.onloadedmetadata = () => {
       setDuration(video.duration);
       // Already muted above, so autoplay is allowed almost everywhere; fall
@@ -342,7 +355,7 @@ export function useWasmReframe(): UseWasmReframeReturn {
       URL.revokeObjectURL(previousSrc);
     }
     currentSrcRef.current = src;
-    setManifestType(classifyManifestType(src));
+    setManifestType(srcManifestType);
 
     // player.load() aborts any in-flight load when called again, and the
     // aborted promise rejects (Category.PLAYER) same as a real failure —
@@ -414,6 +427,25 @@ export function useWasmReframe(): UseWasmReframeReturn {
       video.pause();
       setState("paused");
     }
+  }, []);
+
+  /**
+   * Restarts playback after `ended` — separate from togglePlay() because
+   * `.play()` on an ended video technically rewinds to 0 on its own, but
+   * for an MSE/Shaka source that implicit rewind doesn't reliably kick
+   * Shaka's streaming engine back into fetching segments. Seeking
+   * explicitly reuses the same path seek() already uses for scrubbing,
+   * which does.
+   */
+  const replay = useCallback(() => {
+    const video = videoRef.current;
+    if (!video) return;
+    video.currentTime = 0;
+    setProgress(0);
+    video
+      .play()
+      .then(() => setState("playing"))
+      .catch(() => setState("ready"));
   }, []);
 
   const seek = useCallback((fraction: number) => {
@@ -503,6 +535,7 @@ export function useWasmReframe(): UseWasmReframeReturn {
     mode,
     load,
     togglePlay,
+    replay,
     seek,
     progress,
     duration,

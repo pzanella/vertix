@@ -112,6 +112,13 @@ Changing how the reframing decides what to show happens in `src/core/`.
 Changing how the app looks or behaves as a web page happens in
 `src/hooks/` or `src/components/`.
 
+Face detection (the one genuinely expensive step in the pipeline) normally
+runs in a Worker (`src/core/faceDetectionWorker.ts`, pre-bundled by
+`npm run build:worker`), falling back to the main thread if the worker
+doesn't prove itself ready in time — see the relevant note under
+[Known Limitations](#known-limitations) for the two earlier, reverted
+attempts this replaced and what's still unconfirmed about this one.
+
 ## Project Structure
 
 ```
@@ -171,12 +178,18 @@ Changing how the app looks or behaves as a web page happens in
 
 ```bash
 npm install
-npm run build:wasm   # compiles wasm/ and writes bindings to src/core/wasm/
-npm run dev          # starts the Vite dev server (http://localhost:5173)
+npm run build:wasm    # compiles wasm/ and writes bindings to src/core/wasm/
+npm run build:worker  # bundles the face-detection worker to public/workers/
+npm run dev           # starts the Vite dev server (http://localhost:5173)
 ```
 
-`src/core/wasm/` is generated and gitignored — run `npm run build:wasm`
-again after cloning, or after changing anything in `wasm/src/`.
+`src/core/wasm/` and `public/workers/` are both generated and gitignored —
+re-run `npm run build:wasm` after cloning or after changing anything in
+`wasm/src/`, and `npm run build:worker` after that (it needs
+`src/core/wasm/` to already exist) or after changing
+`src/core/faceDetectionWorker.ts`. `npm run build` runs `build:worker`
+automatically; `npm run dev` doesn't, the same as it doesn't re-run
+`build:wasm` automatically either.
 
 The face-detection model is bundled into the WASM file, so it's a few MB
 (around 5MB, ~2MB gzipped) instead of a few KB. That's the trade-off for
@@ -216,6 +229,7 @@ Sourced from [Pexels](https://www.pexels.com/), free to use under the
 | `npm run build`        | Type-check, then build for production into `dist/`     |
 | `npm run preview`      | Serve the production build locally                     |
 | `npm run build:wasm`   | Rebuild the Rust crate with `wasm-pack`                 |
+| `npm run build:worker` | Rebuild the face-detection worker bundle with esbuild   |
 
 ## How It Works
 
@@ -230,11 +244,14 @@ Sourced from [Pexels](https://www.pexels.com/), free to use under the
    whether this app's own controls or a media framework like Shaka Player,
    stays in full control.
 2. Every few frames, a small (320×240) copy of the current frame is drawn
-   to a hidden canvas, read back as pixels, and passed into the WASM face
-   detector (`ReframeEngine.update_faces`, in `wasm/src/`). This runs the
-   UltraFace model, removes overlapping boxes, and returns every detected
-   face's position, size, and a couple of extra signals (how much the
-   mouth area is moving, the model's own confidence).
+   to a hidden canvas, read back as pixels, and handed to the WASM face
+   detector (`ReframeEngine.update_faces`, in `wasm/src/`) — normally in a
+   dedicated Worker, with only the result (not this thread) waited on; a
+   main-thread fallback exists if the worker doesn't check in ready in
+   time. This runs the UltraFace model, removes overlapping boxes, and
+   returns every detected face's position, size, and a couple of extra
+   signals (how much the mouth area is moving, the model's own
+   confidence).
 3. Detected faces are filtered in `src/core/VertixEngine.ts`: a face has
    to be a reasonable size and mostly inside the frame to count as an
    actual on-camera speaker (this is what keeps a stadium full of distant
@@ -254,96 +271,61 @@ Sourced from [Pexels](https://www.pexels.com/), free to use under the
 
 ## Known Limitations
 
-**Many people on screen.** The layout logic groups every detected face into
-a grid once there are 3 or more (see [How It Works](#how-it-works) above).
-That works well for the bundled sample clips and similar small-group
-conversations, but breaks down on scenes with several similarly-sized,
-similarly-positioned faces — a press conference, a panel, a crowd shot —
-where a wide grid is both visually wrong (nobody's actually "speaking" in
-five or six evenly-sized panes) and more expensive to render (one extra
-`drawImage` per pane, on top of the per-frame face-detection cost already
-described above). This is the layout a real Sky News HLS stream of a press
-conference produced during manual testing, alongside dropped frames from
-the added per-pane draw cost.
+**Face detection runs in a Worker**, shared across every `VertixEngine`
+instance on the page, so the main thread only hands off a small (320×240)
+frame and waits for the result instead of blocking on WASM/ONNX inference
+itself. Falls back to running WASM synchronously on the main thread if the
+worker can't be built, errors, or doesn't report ready within
+`WORKER_READY_TIMEOUT_MS` (4s).
 
-As of this build, once 3 or more faces are detected simultaneously and
-[Web Audio API](https://developer.mozilla.org/en-US/docs/Web_API/Web_Audio_API)
-voice-activity energy says someone's talking, the scene locks onto whichever
-single face is clearly the active subject, checked two ways: first, is one
-face clearly the largest in frame (an interview or press-scrum subject is
-conventionally shot larger than the bystanders around them, and framing
-size holds up far better than mouth-motion in handheld footage, where
-camera shake adds apparent "motion" to every face, not just whoever's
-speaking); if no one's clearly foregrounded, falls back to mouth-motion
-dominance instead, for a same-sized panel where framing alone can't say
-who's currently talking. Two earlier versions of this each missed a real
-case: gating on 4+ faces (deliberately above any bundled sample's face
-count) missed that a real press scrum routinely filters down to exactly 3
-valid faces — the same count as a genuine 3-way conversation; motion alone
-missed a scrum where the actual speaker was clearly foregrounded (in one
-real case, roughly 2x the size of the next-largest face) but didn't have a
-decisively dominant mouth-motion score next to bystanders shifting and
-gesturing in shaky handheld footage.
+Getting there took a few rounds. Vite's own worker-bundling hung
+indefinitely with no error for this specific file — fixed by pre-bundling
+the worker with esbuild instead (`scripts/build-worker.mjs`, served as a
+plain static file). After that, the worker still hung, but only when
+created from the app's own code — never from a manual console call. Turned
+out React StrictMode constructs two `VertixEngine`s per mount, and two
+near-simultaneous `new Worker()` calls against the same script reliably
+left one of them stuck forever. Fixed by making the worker a page-level
+singleton (`getSharedDetectionWorker()`) instead of one per instance.
 
-At exactly 3 faces, a scene neither signal can confidently resolve (no
-clear winner, nothing locked on yet) falls back to the ordinary 3-pane grid
-rather than the full, uncropped frame used at 4+ for the same ambiguous
-case — that's what keeps `3-speakers.mp4`'s natural back-and-forth
-conversation looking as it always has whenever nobody's clearly dominant by
-either signal. This is still a pair of coarse heuristics, not a trained
-active-speaker-detection model — RMS energy over a 512-sample time-domain
-window isn't a calibrated loudness measure, and both framing size and
-mouth-motion are proxies, not ground truth. A large but silent bystander
-standing close to camera, or one who gestures and nods enough to look like
-the dominant mouth-mover, can still fool it.
+**Rapid layout changes could tear a frame**, found on chaotic press-scrum
+footage: a second layout change landing mid-fade would snapshot an
+already-blended frame instead of a clean one, compounding into visibly
+torn panes. Fixed by cutting cleanly to the new layout instead of starting
+a second fade on top of an unfinished one.
 
-**Voice-activity detection depends on the `<video>`'s own audio track,**
-read via `AudioContext.createMediaElementSource`
-(`src/core/audioActivity.ts`). This works the same whether the source is a
-local file or an adaptive HLS/DASH stream through Shaka Player: Shaka feeds
-the `<video>` element through a same-origin `blob:` URL backed by
-MediaSource regardless of the segment CDN's own CORS policy, so a
-cross-origin stream isn't structurally blocked from this the way a plain
-`<img>` or `fetch()` would be — confirmed by inspecting a live
-`video.sky.it` page's `<video>` element directly. It degrades to
-"unavailable" without ever throwing if the source has no audio track, the
-browser blocks `AudioContext` before a user gesture, or the CDN doesn't
-send CORS headers (which taints the audio graph so every sample reads as
-zero) — all of which are treated identically to real silence by the
-fallback above, since "can't tell who's talking" should behave the same
-regardless of *why*.
+**Active-speaker resolution.** Once 2 or more faces are detected, a plain
+grid/split isn't trustworthy on its own — a press-scrum bystander or a
+reporter holding a mic into frame reads the same as a genuine multi-person
+conversation. The engine tries to lock onto a single active speaker: first
+by who's clearly the largest face in frame (works without audio), then by
+mouth motion if sizes are too close to call. Below `AMBIGUOUS_GRID_FALLBACK_FACES`
+(3), an unresolved scene falls back to the ordinary split/grid rather than
+guessing wrong; above it, to no crop at all. Neither signal is a trained
+model — framing size and mouth motion are proxies, not ground truth, and a
+large-but-silent bystander or an animated talker can still fool it. This
+logic was only ever validated against a handful of real streams and the
+bundled samples; extending it down to 2 faces is recent and hasn't had a
+long real-world test pass yet, so watch in particular for genuine
+back-and-forth dialogue occasionally collapsing to one pane when it
+shouldn't.
 
-**Both gaps above were found live; the fix for the second hasn't been.**
-Manual testing against real Sky HLS press-conference streams is what
-surfaced both: first that 3+2 bystanders reads as exactly 3 faces, not 4+,
-so an earlier 4+-gated version never engaged; then, after lowering the
-threshold to 3, that mouth-motion alone still didn't produce a confident
-winner against a real foregrounded, clearly-talking subject in shaky
-handheld footage. The size+motion version described above is the direct
-fix for that second finding, but as of this revision it's only had
-type-checking, linting, and a production build behind it — not yet its own
-live run against the same streams, so whether it actually locks onto the
-speaker instead of gridding, and whether `FACE_SIZE_DOMINANCE_MARGIN = 1.4`
-/ `AUDIO_ACTIVE_ENERGY = 0.02` / `ACTIVE_SPEAKER_MARGIN = 1.5` /
-`ACTIVE_SPEAKER_LOCK_TICKS = 5` hold up, is still unconfirmed. Nor has any
-version been checked against a wider range of press conferences, panels, or
-interviews with background noise, overlapping applause/questions, or a
-foregrounded bystander rather than the actual speaker.
+**Voice-activity detection depends on the `<video>`'s own audio track**
+(`src/core/audioActivity.ts`), and degrades to "unavailable" — never
+throws — if there's no audio track, the browser blocks `AudioContext`
+before a user gesture, or the source is muted (every video loads muted by
+default, so this is the common case until a viewer unmutes). Cross-origin
+sources also read as silence unless the `<video>` element is marked
+`crossOrigin="anonymous"`, which this app now sets for HLS/DASH sources
+specifically (not plain progressive URLs, where an untested CORS setup
+could break loading altogether). This is exactly why the size-based check
+above doesn't need audio to work at all.
 
-Automated (non-live) verification of this fallback is limited to
-type-checking, linting, and a production build, plus the "can't affect any
-sample clip" guarantee, which is structural (a threshold comparison, not a
-runtime check that could be skipped) rather than something run against
-each clip. A real live-playback run needs an actual foregrounded browser
-tab: attempting to drive one through browser automation surfaced a Chrome
-behavior worth noting for anyone else testing MediaSource-based playback
-that way — a `<video>` fed via Shaka's `player.attach()` never fires
-`MediaSource`'s `sourceopen` (so `attach()` never resolves, and playback
-never starts) while the tab is backgrounded
-(`document.visibilityState === "hidden"`), independent of network, CORS, or
-focus (`document.hasFocus()` can be `true` at the same time) — reproduced
-in isolation with a fresh `Player`/`<video>` pair, with `fetch()` against
-the same URL succeeding instantly throughout.
+**Testing this live needs an actual foregrounded browser tab.** A `<video>`
+fed through Shaka's `player.attach()` never fires `MediaSource`'s
+`sourceopen` while the tab is backgrounded, independent of network, CORS,
+or focus — so real playback can only be verified by hand, not through this
+project's own browser-automation tooling.
 
 ## Rebuilding the WASM Module
 

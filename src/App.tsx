@@ -18,6 +18,7 @@ export default function App() {
     mode,
     setMode,
     togglePlay,
+    replay,
     seek,
     load,
     progress,
@@ -185,9 +186,11 @@ export default function App() {
             <div className="w-full max-w-2xl shrink-0">
               <Controls
                 playing={playing}
+                ended={state === "ended"}
                 mode={mode}
                 muted={muted}
                 onTogglePlay={togglePlay}
+                onReplay={replay}
                 onToggleMute={toggleMute}
                 onSetMode={setMode}
                 middle={timeline}
