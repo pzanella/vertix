@@ -82,14 +82,23 @@ Playback ownership stays with the host on purpose. This is what makes
 attaching to a Shaka Player, hls.js, or Video.js-managed video element
 work without any special integration code; see
 [`../../docs/player-integration.md`](../../docs/player-integration.md) for
-a worked example, including the one real gotcha (cross-origin video needs
-`video.crossOrigin = "anonymous"` or canvas reads throw).
+a worked example.
 
-Detection stays on the main thread on purpose, too. A Web Worker version
-was tried and reverted: the message-passing round-trip added enough
-latency to the tracking target that panning read as disconnected, even
-though the raw FPS number went up. If you're tempted to move detection
-off-thread again, that's the failure mode to watch for, not just FPS.
+Detection runs off the main thread, in a single Worker shared by every
+`VertixEngine` instance the page ever constructs (`getSharedDetectionWorker`
+near the top of `VertixEngine.ts`) — not just the WASM inference call, but
+the pixel readback that feeds it too (`faceDetectionWorker.ts` owns its
+own `OffscreenCanvas` for that). Falls back to running both synchronously
+on the main thread if the worker can't be built, errors, or doesn't report
+ready within `WORKER_READY_TIMEOUT_MS`. See the README's own "Known
+Limitations" for how this got here — an early attempt did add enough
+round-trip latency to read as disconnected panning, but that was a
+one-worker-per-instance mistake, not a reason to avoid a worker at all.
+
+One caveat this design doesn't fully cover yet: once the worker reports
+ready, nothing keeps watching it — if it crashes later (not just fails to
+start), detection silently stops for good instead of falling back. Worth
+fixing before leaning on this in front of untrusted/adversarial input.
 
 The layout only changes when the speaker *count* changes, debounced over a
 few detection ticks (dropping to zero speakers reacts faster than any

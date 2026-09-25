@@ -65,28 +65,40 @@ video.currentTime = 30; // engine hears "seeking" and resets its tracking state
 // await player.destroy();
 ```
 
-## The one real gotcha: cross-origin video and canvas readback
+## The one real gotcha: cross-origin video and audio readback
 
 Vertix reads pixels off the video via `ctx.getImageData()` (for face
 detection) and `canvas.drawImage(video, ...)` (for the actual reframed
-output). If the video's underlying segments are cross-origin and don't
-serve CORS headers, the browser marks the `<canvas>` "tainted" and
-`getImageData()` throws a `SecurityError` — Vertix will fail loudly the
-first time it tries to detect a face.
+output). For MSE-backed playback — which is what Shaka, hls.js, and any
+other adaptive-streaming player use — this does **not** get tainted by a
+cross-origin segment CDN, confirmed against a real cross-origin HLS
+stream with no `crossOrigin` set at all: the browser doesn't apply the
+usual cross-origin-`<img>`/`<video src>` canvas-tainting rule to media fed
+through a `MediaSource`, since the bytes were already fetched and appended
+by JS. Don't add defensive handling for this — it isn't a real failure
+mode for MSE sources.
 
-Fix: the host must mark the video element (and Shaka, hls.js, etc. must be
-configured to actually respect it) as CORS-enabled *before* it starts
-loading segments:
+What *does* need `crossOrigin` is anything reading the video's own audio
+via the Web Audio API — `AudioContext.createMediaElementSource(video)`
+silently reads all-zero samples from a cross-origin source unless the
+element is marked CORS-enabled *before* it starts loading segments, and
+the origin serving the video/manifest/segments returns
+`Access-Control-Allow-Origin` for your page's origin:
 
 ```ts
 video.crossOrigin = "anonymous";
 ```
 
-...and the origin serving the video/manifest/segments must return
-`Access-Control-Allow-Origin` for your page's origin. This is entirely a
-concern for whichever media framework is loading the content — Vertix
-itself has no CORS configuration of its own, it just inherits whether the
-canvas is tainted.
+Only set this for adaptive HLS/DASH sources you know the CDN allows —
+Shaka's own segment fetches for a stream that plays at all already prove
+that (they use the Fetch API in normal `cors` mode). For a plain
+progressive URL loaded via native `src=` playback, setting this
+unconditionally risks breaking loading entirely if that particular
+server doesn't grant CORS. This is entirely a concern for whichever media
+framework is loading the content — Vertix itself has no CORS
+configuration of its own and doesn't read audio at all; this only matters
+if your own app does, the way `useWasmReframe.ts`'s `AudioActivityMonitor`
+does for its voice-activity signal.
 
 ## hls.js / Video.js / a plain `<video src>`
 
