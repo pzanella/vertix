@@ -67,7 +67,7 @@ function gridRows(n: number): number[] {
 // zoomed-in. Single-speaker fills the whole 9:16 frame, so it can afford a
 // real chest-up framing; multi-speaker panes are much smaller, so the same
 // wide framing would show mostly empty space around a tiny face.
-const SINGLE_SPEAKER_ZOOM_FACTOR = 6.0;
+const SINGLE_SPEAKER_ZOOM_FACTOR = 6.5;
 const MULTI_SPEAKER_ZOOM_FACTOR = 2.75;
 // Where the face's vertical center sits within the crop (0 = top, 1 =
 // bottom), targeting a rule-of-thirds composition (eyes at roughly 1/3 from

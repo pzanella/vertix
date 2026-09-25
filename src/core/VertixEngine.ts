@@ -60,6 +60,16 @@ export interface VertixMetrics {
   frameTimeHistory: number[];
   motionHistory: number[];
   confidenceHistory: number[];
+  /** Whether the last detection tick ran in the shared worker or fell back to the main thread. Null before the first tick. */
+  detectionMode: "worker" | "main-thread" | null;
+  /** How long the last detection call itself took (WASM inference only, not the surrounding postMessage/bitmap overhead), in ms. Null before the first tick. */
+  workerInferenceMs: number | null;
+  workerInferenceHistory: number[];
+  /** Whether this browser supports the Long Tasks API (Chromium-only as of writing) — the main-thread-stall numbers below are meaningless if this is false. */
+  longTasksSupported: boolean;
+  /** Total main-thread time (ms) spent in tasks over 50ms, in the last few seconds. */
+  longTaskMs: number;
+  longTaskHistory: number[];
 }
 
 export interface VertixState {
@@ -72,7 +82,11 @@ export interface VertixState {
   isTransitioning: boolean;
 }
 
-const INITIAL_METRICS: VertixMetrics = {
+// Exported so useWasmReframe.ts's own pre-attach placeholder state matches
+// this exactly, instead of keeping a second copy that has to be updated by
+// hand every time a metric is added here (the old failure mode: a new
+// field forgotten in one of the two spots).
+export const INITIAL_METRICS: VertixMetrics = {
   fps: 0,
   frameTimeMs: 0,
   faceSizes: [],
@@ -87,6 +101,12 @@ const INITIAL_METRICS: VertixMetrics = {
   frameTimeHistory: [],
   motionHistory: [],
   confidenceHistory: [],
+  detectionMode: null,
+  workerInferenceMs: null,
+  workerInferenceHistory: [],
+  longTasksSupported: false,
+  longTaskMs: 0,
+  longTaskHistory: [],
 };
 
 // Cap on trend-chart history length — at this round's sampling rates (a
@@ -99,6 +119,11 @@ function appendCapped(arr: number[], value: number): number[] {
   next.push(value);
   return next;
 }
+
+// How far back to sum blocked main-thread time for the "Main Thread"
+// dashboard reading — long enough to smooth out one-off spikes, short
+// enough to still feel live.
+const LONG_TASK_WINDOW_MS = 3000;
 
 /** Cubic ease-in-out (gentle start, gentle finish) — shapes the layout cross-dissolve so it reads as a smooth reveal, not a snap. */
 function easeInOutCubic(t: number): number {
@@ -127,14 +152,17 @@ let sharedWorker: Worker | null = null;
 let sharedWorkerReady = false;
 let sharedWorkerLoadPromise: Promise<boolean> | null = null;
 let nextDetectionRequestId = 0;
-const pendingDetectionCallbacks = new Map<number, (facesFlat: Float64Array) => void>();
+const pendingDetectionCallbacks = new Map<number, (facesFlat: Float64Array, tookMs: number) => void>();
 
 /**
  * Creates the shared worker on first call and waits for it to report
  * ready. Later calls (from any VertixEngine instance) just get the same
  * result instead of creating another worker. Resolves false if it can't
  * be built, errors, or times out — callers fall back to running WASM on
- * the main thread instead (see dispatchDetection).
+ * the main thread instead (see dispatchDetection). A crash discovered
+ * later, after this already resolved true, is handled the same way —
+ * sharedWorkerReady just flips back off and dispatchDetection's fallback
+ * branch takes over on its own next tick, no need to call this again.
  */
 function getSharedDetectionWorker(): Promise<boolean> {
   if (sharedWorkerLoadPromise) return sharedWorkerLoadPromise;
@@ -156,21 +184,30 @@ function getSharedDetectionWorker(): Promise<boolean> {
     }
 
     let settled = false;
+    // Also the recovery path for a crash discovered well after startup, not
+    // just an initial-load failure — always tears the worker down and flips
+    // sharedWorkerReady off, but only resolves/clears the timeout once
+    // (a promise can't settle twice). dispatchDetection's fallback branch
+    // calls ensureWasm() lazily on its own next tick once sharedWorkerReady
+    // is false, so nothing else needs to be notified explicitly.
     const fail = (reason: string) => {
-      if (settled) return;
-      settled = true;
       console.error(
         `[Vertix] Detection worker unavailable (${reason}); falling back to running WASM on the main thread.`
       );
       worker.terminate();
       sharedWorker = null;
-      resolve(false);
+      sharedWorkerReady = false;
+      if (!settled) {
+        settled = true;
+        clearTimeout(timeout);
+        resolve(false);
+      }
     };
 
     const timeout = setTimeout(() => fail(`no "ready" within ${WORKER_READY_TIMEOUT_MS}ms`), WORKER_READY_TIMEOUT_MS);
 
     worker.onmessage = (e: MessageEvent) => {
-      const msg = e.data as { type: string; requestId?: number; faces?: ArrayBuffer; message?: string };
+      const msg = e.data as { type: string; requestId?: number; faces?: ArrayBuffer; tookMs?: number; message?: string };
       if (msg.type === "ready") {
         if (settled) return;
         settled = true;
@@ -180,18 +217,16 @@ function getSharedDetectionWorker(): Promise<boolean> {
         return;
       }
       if (msg.type === "error") {
-        clearTimeout(timeout);
         fail(msg.message ?? "unknown error");
         return;
       }
       if (msg.type === "result" && msg.requestId !== undefined) {
         const callback = pendingDetectionCallbacks.get(msg.requestId);
         pendingDetectionCallbacks.delete(msg.requestId);
-        callback?.(new Float64Array(msg.faces!));
+        callback?.(new Float64Array(msg.faces!), msg.tookMs ?? 0);
       }
     };
     worker.onerror = (e: ErrorEvent) => {
-      clearTimeout(timeout);
       fail(e.message);
     };
 
@@ -262,8 +297,8 @@ const SAME_PERSON_DISTANCE = 0.08;
 // How much each pane's crop glides toward its subject's latest detected
 // position per rendered frame (0-1) — gentle camera-follow *within* an
 // already-stable layout (same face count), not a trigger for changing the
-// layout itself.
-const PANE_SMOOTHING_ALPHA = 0.08;
+// layout itself. Lower = slower, calmer follow.
+const PANE_SMOOTHING_ALPHA = 0.06;
 
 // A face must drift more than this (a fraction of frame width/height) from
 // where its pane's crop was last aimed before the crop moves at all.
@@ -364,6 +399,13 @@ export class VertixEngine {
   private lastMetricsPush = 0;
   private sceneSwitchCount = 0;
 
+  // Main-thread stall tracking (Long Tasks API — Chromium only). Raw
+  // entries land here as they're observed; onVideoFrame's own metrics-push
+  // tick (same 300ms cadence as FPS) reduces them down to "ms blocked in
+  // the last LONG_TASK_WINDOW_MS" for the dashboard.
+  private longTaskObserver: PerformanceObserver | null = null;
+  private recentLongTasks: { time: number; duration: number }[] = [];
+
   private srcDims = { w: 0, h: 0, cropW: 0, cropH: 0 };
   private srcDimsInitialized = false;
 
@@ -404,6 +446,22 @@ export class VertixEngine {
       if (!ok) this.ensureWasm();
       else this.emitState();
     });
+
+    // Long Tasks isn't in every browser (Chromium only, as of writing) —
+    // observe() throws for an unsupported entry type, so this just leaves
+    // longTasksSupported false instead of failing the whole constructor.
+    try {
+      this.longTaskObserver = new PerformanceObserver((list) => {
+        const now = performance.now();
+        for (const entry of list.getEntries()) {
+          this.recentLongTasks.push({ time: now, duration: entry.duration });
+        }
+      });
+      this.longTaskObserver.observe({ entryTypes: ["longtask"] });
+      this.metrics = { ...this.metrics, longTasksSupported: true };
+    } catch {
+      this.longTaskObserver = null;
+    }
   }
 
   /** Attaches to a video/canvas pair. Safe to call again with a different pair — the previous one is detached first. */
@@ -443,6 +501,7 @@ export class VertixEngine {
   destroy(): void {
     this.detach();
     this.audioMonitor.detach();
+    this.longTaskObserver?.disconnect();
     this.engine?.free();
     this.engine = null;
     this.metricsListeners.clear();
@@ -522,7 +581,9 @@ export class VertixEngine {
     this.frameTimeEma = 0;
     this.lastMetricsPush = 0;
     this.sceneSwitchCount = 0;
-    this.metrics = INITIAL_METRICS;
+    // Browser capability, not a per-source reading — INITIAL_METRICS always
+    // has this false, so it'd get wiped out on every source load otherwise.
+    this.metrics = { ...INITIAL_METRICS, longTasksSupported: this.longTaskObserver !== null };
     this.resetTrackingState();
     this.emitState();
     this.emitMetrics();
@@ -649,26 +710,49 @@ export class VertixEngine {
   }
 
   private dispatchDetection(video: HTMLVideoElement, srcW: number, srcH: number, cropW: number, cropH: number): void {
-    this.faceCtx.drawImage(video, 0, 0, FACE_W, FACE_H);
-    const faceImageData = this.faceCtx.getImageData(0, 0, FACE_W, FACE_H);
     const audioEnergy = this.audioMonitor.energy();
 
     if (sharedWorkerReady && sharedWorker) {
       this.detectionInFlight = true;
       const generation = this.detectionRequestGeneration;
       const requestId = nextDetectionRequestId++;
-      pendingDetectionCallbacks.set(requestId, (facesFlat) => {
+      pendingDetectionCallbacks.set(requestId, (facesFlat, tookMs) => {
         this.detectionInFlight = false;
         // Belongs to a frame from before a reset (seek, mode change) —
         // discard it instead of feeding stale positions into the layout.
         if (generation !== this.detectionRequestGeneration) return;
-        this.processDetectionResult(facesFlat, audioEnergy, srcW, srcH, cropW, cropH);
+        this.processDetectionResult(facesFlat, audioEnergy, srcW, srcH, cropW, cropH, "worker", tookMs);
       });
-      const rgba = faceImageData.data.buffer;
-      sharedWorker.postMessage({ type: "detect", requestId, rgba }, [rgba]);
-    } else if (this.engine) {
+      // Resizing via createImageBitmap instead of drawImage+getImageData
+      // here keeps the main thread from doing a synchronous GPU→CPU
+      // readback every detection tick — the worker does that part now
+      // (see faceDetectionWorker.ts).
+      createImageBitmap(video, { resizeWidth: FACE_W, resizeHeight: FACE_H, resizeQuality: "low" })
+        .then((bitmap) => {
+          if (generation !== this.detectionRequestGeneration || !sharedWorker) {
+            bitmap.close();
+            return;
+          }
+          sharedWorker.postMessage({ type: "detect", requestId, bitmap }, [bitmap]);
+        })
+        .catch(() => {
+          this.detectionInFlight = false;
+          pendingDetectionCallbacks.delete(requestId);
+        });
+    } else {
+      // The worker either never became usable, or just stopped being one
+      // (a runtime crash after reporting ready — see getSharedDetectionWorker's
+      // fail()). Either way, this instance may never have needed its own
+      // WASM fallback before now; ensureWasm() is a no-op once it's
+      // already loading or ready, so it's safe to call on every tick here.
+      this.ensureWasm();
+      if (!this.engine) return;
+      this.faceCtx.drawImage(video, 0, 0, FACE_W, FACE_H);
+      const faceImageData = this.faceCtx.getImageData(0, 0, FACE_W, FACE_H);
+      const start = performance.now();
       const facesFlat = this.engine.update_faces(new Uint8Array(faceImageData.data.buffer));
-      this.processDetectionResult(facesFlat, audioEnergy, srcW, srcH, cropW, cropH);
+      const tookMs = performance.now() - start;
+      this.processDetectionResult(facesFlat, audioEnergy, srcW, srcH, cropW, cropH, "main-thread", tookMs);
     }
   }
 
@@ -678,7 +762,9 @@ export class VertixEngine {
     srcW: number,
     srcH: number,
     cropW: number,
-    cropH: number
+    cropH: number,
+    detectionMode: "worker" | "main-thread",
+    inferenceMs: number
   ): void {
     // Background people (crowd, players on a pitch) still get detected by
     // the model — only close-up, unclipped faces count as an actual speaker.
@@ -718,6 +804,9 @@ export class VertixEngine {
       faceConfidence,
       audioAvailable: this.audioMonitor.available,
       audioEnergy,
+      detectionMode,
+      workerInferenceMs: inferenceMs,
+      workerInferenceHistory: appendCapped(this.metrics.workerInferenceHistory, inferenceMs),
       motionHistory:
         motionScore !== null ? appendCapped(this.metrics.motionHistory, motionScore) : this.metrics.motionHistory,
       confidenceHistory:
@@ -781,12 +870,18 @@ export class VertixEngine {
     this.lastFrameTime = now;
     if (now - this.lastMetricsPush > 300) {
       this.lastMetricsPush = now;
+      // Drop long-task entries that have aged out of the window, then sum
+      // what's left.
+      this.recentLongTasks = this.recentLongTasks.filter((t) => now - t.time <= LONG_TASK_WINDOW_MS);
+      const longTaskMs = this.recentLongTasks.reduce((sum, t) => sum + t.duration, 0);
       this.metrics = {
         ...this.metrics,
         fps: this.fpsEma,
         frameTimeMs: this.frameTimeEma,
         fpsHistory: appendCapped(this.metrics.fpsHistory, this.fpsEma),
         frameTimeHistory: appendCapped(this.metrics.frameTimeHistory, this.frameTimeEma),
+        longTaskMs,
+        longTaskHistory: appendCapped(this.metrics.longTaskHistory, longTaskMs),
       };
       this.emitMetrics();
     }
