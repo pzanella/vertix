@@ -92,6 +92,8 @@ const COLOR = {
   confidence: "#38bdf8", // sky
   motion: "#a78bfa", // violet
   latency: "#fb923c", // amber
+  worker: "#4ade80", // green
+  longTask: "#f87171", // red
 } as const;
 
 export const LiveAnalyticsCharts = memo(function LiveAnalyticsCharts({ metrics }: LiveAnalyticsChartsProps) {
@@ -107,7 +109,7 @@ export const LiveAnalyticsCharts = memo(function LiveAnalyticsCharts({ metrics }
         label="Face Confidence"
         color={COLOR.confidence}
         data={metrics.confidenceHistory}
-        value={metrics.faceConfidence !== null ? `${(metrics.faceConfidence * 100).toFixed(0)}%` : "—"}
+        value={metrics.faceConfidence !== null ? `${(metrics.faceConfidence * 100).toFixed(1)}%` : "—"}
       />
       <ChartRow
         label="Motion Activity"
@@ -121,6 +123,20 @@ export const LiveAnalyticsCharts = memo(function LiveAnalyticsCharts({ metrics }
         data={metrics.frameTimeHistory}
         value={metrics.frameTimeMs > 0 ? `${metrics.frameTimeMs.toFixed(1)}ms` : "—"}
       />
+      <ChartRow
+        label={metrics.detectionMode === "main-thread" ? "Detection Latency (main thread)" : "Worker Latency"}
+        color={COLOR.worker}
+        data={metrics.workerInferenceHistory}
+        value={metrics.workerInferenceMs !== null ? `${metrics.workerInferenceMs.toFixed(1)}ms` : "—"}
+      />
+      {metrics.longTasksSupported && (
+        <ChartRow
+          label="Main Thread Stalls"
+          color={COLOR.longTask}
+          data={metrics.longTaskHistory}
+          value={`${metrics.longTaskMs.toFixed(0)}ms`}
+        />
+      )}
     </div>
   );
 });
