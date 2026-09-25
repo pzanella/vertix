@@ -4,5 +4,6 @@ export { Controls } from "./Controls";
 export { LiveStatusPanel } from "./LiveStatusPanel";
 export { SamplePicker } from "./SamplePicker";
 export { SourceTabs } from "./SourceTabs";
+export { StreamHealthOverlay } from "./StreamHealthOverlay";
 export { Timeline } from "./Timeline";
 export { UrlSourceInput } from "./UrlSourceInput";

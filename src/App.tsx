@@ -6,6 +6,7 @@ import {
   LiveStatusPanel,
   SamplePicker,
   SourceTabs,
+  StreamHealthOverlay,
   Timeline,
   UrlSourceInput,
 } from "./components/Player";
@@ -70,6 +71,14 @@ export default function App() {
   const timeline = useMemo(
     () => <Timeline progress={progress} duration={duration} onSeek={seek} />,
     [progress, duration, seek]
+  );
+
+  // Same reasoning as `timeline` above — keeps Canvas's own memoization
+  // meaningful instead of it re-rendering just because a new element
+  // reference showed up in its `overlay` prop every render.
+  const streamHealthOverlay = useMemo(
+    () => <StreamHealthOverlay streamHealth={streamHealth} />,
+    [streamHealth]
   );
 
   return (
@@ -165,7 +174,7 @@ export default function App() {
       {isActive && (
         <div className="flex-1 min-h-0 flex flex-col-reverse md:flex-row gap-4 w-full">
           <div className="flex-1 min-h-0 flex flex-col items-center gap-2">
-            <Canvas canvasRef={canvasRef} mode={mode} />
+            <Canvas canvasRef={canvasRef} mode={mode} overlay={streamHealthOverlay} />
             <div className="w-full flex items-center justify-between gap-2">
               <div className="flex items-center gap-2">
                 <LiveStatusPanel mode={mode} speakerCount={speakerCount} isTransitioning={isTransitioning} />
@@ -207,7 +216,6 @@ export default function App() {
               speakerCount={speakerCount}
               isTransitioning={isTransitioning}
               metrics={metrics}
-              streamHealth={streamHealth}
             />
           </div>
         </div>
