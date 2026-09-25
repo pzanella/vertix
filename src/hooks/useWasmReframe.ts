@@ -1,13 +1,15 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type Shaka from "shaka-player";
-import { VertixEngine, type VertixMeta, type VertixMetrics, type VertixMode } from "../core";
+import { INITIAL_METRICS, VertixEngine, type VertixMeta, type VertixMetrics, type VertixMode } from "../core";
 
 export type ReframeMode = VertixMode;
 export type ReframeMeta = VertixMeta;
 export type ReframeMetrics = VertixMetrics;
 export type PlayerState = "idle" | "loading" | "ready" | "playing" | "paused" | "ended" | "error";
 
-/** Cosmetic-only classification of the loaded source — doesn't affect how Shaka loads it. HLS/DASH are adaptive (ABR ladder); PROGRESSIVE is any plain file (mp4, webm, ogg, ...); LOCAL is a local blob URL. */
+/** Cosmetic-only classification of the loaded source — doesn't affect how Shaka loads it.
+ * HLS/DASH are adaptive (ABR ladder), PROGRESSIVE is any plain file (mp4, webm, ogg, ...),
+ * LOCAL is a local blob URL. */
 export type StreamManifestType = "HLS" | "DASH" | "PROGRESSIVE" | "LOCAL";
 
 export interface StreamHealth {
@@ -19,6 +21,12 @@ export interface StreamHealth {
   totalDecodedFrames: number;
   /** Currently active HLS/DASH rendition — null unless manifestType is HLS or DASH. */
   activeVariant: { height: number; bitrateKbps: number } | null;
+  /** Total bytes downloaded for this playback session, from Shaka's own network stats. */
+  bytesDownloaded: number;
+  /** How many times playback has stalled waiting for data (Shaka's own count, not the same as a dropped frame). */
+  stallsDetected: number;
+  /** How many times the ABR ladder has switched quality — null for PROGRESSIVE/LOCAL (no ladder to switch on). */
+  qualitySwitches: number | null;
 }
 
 const GENERIC_ERROR_MESSAGE = "That file didn't load. Try a different video.";
@@ -47,7 +55,9 @@ function loadShaka(): Promise<ShakaRuntime> {
   return shakaModulePromise;
 }
 
-/** Narrow typed views onto Shaka's custom event payloads — `Player.addEventListener` itself is typed as plain `Event` in the shipped externs, so these fields (added at runtime via `shaka.util.FakeEvent`) aren't otherwise visible to TS. */
+/** Narrow typed views onto Shaka's custom event payloads. `Player.addEventListener` is typed
+ * as plain `Event` in the shipped externs, so these fields (added at runtime via
+ * `shaka.util.FakeEvent`) aren't otherwise visible to TS. */
 interface ShakaErrorEvent extends Event {
   detail: Shaka.util.Error;
 }
@@ -59,13 +69,17 @@ function isShakaError(shaka: ShakaRuntime, err: unknown): err is Shaka.util.Erro
   return err instanceof shaka.util.Error;
 }
 
-/** Reverse-looks-up a `shaka.util.Error.Code` numeric value to its enum member name (e.g. "HLS_REQUIRED_TAG_MISSING") — needed because HLS- and DASH-prefixed codes share the same MANIFEST category and numeric range, so only the name tells them apart. */
+/** Reverse-looks-up a `shaka.util.Error.Code` value to its enum member name (e.g.
+ * "HLS_REQUIRED_TAG_MISSING") — needed because HLS- and DASH-prefixed codes share the same
+ * MANIFEST category and numeric range, so only the name tells them apart. */
 function shakaErrorCodeName(shaka: ShakaRuntime, code: number): string {
   const entry = Object.entries(shaka.util.Error.Code).find(([, value]) => value === code);
   return entry?.[0] ?? "";
 }
 
-/** Maps a Shaka load failure (from the `error` event or a rejected `player.load()`) to a user-facing message. Isolates the one spot in this app that reaches into Shaka's error shape (`error.data` is untyped upstream). */
+/** Maps a Shaka load failure (from the `error` event or a rejected `player.load()`) to a
+ * user-facing message. Isolates the one spot in this app that reaches into Shaka's error
+ * shape (`error.data` is untyped upstream). */
 function mapShakaError(shaka: ShakaRuntime, err: unknown): string {
   if (!isShakaError(shaka, err)) return GENERIC_ERROR_MESSAGE;
 
@@ -103,7 +117,10 @@ function mapShakaError(shaka: ShakaRuntime, err: unknown): string {
   return GENERIC_ERROR_MESSAGE;
 }
 
-/** Derives a MIME type from a URL's extension, passed to `player.load()` to skip Shaka's own content-type sniffing — that sniffing fails in practice (empty codecs, rejected by the browser). Returns undefined for extension-less sources (blob: URLs); callers must supply an explicit hint for those instead. */
+/** Derives a MIME type from a URL's extension, passed to `player.load()` to skip Shaka's own
+ * content-type sniffing (which fails in practice — empty codecs, rejected by the browser).
+ * Returns undefined for extension-less sources (blob: URLs); callers must supply an explicit
+ * hint for those instead. */
 function mimeTypeForExtension(src: string): string | undefined {
   const match = src.match(/\.([a-z0-9]+)(?:\?.*)?$/i);
   switch (match?.[1]?.toLowerCase()) {
@@ -160,25 +177,11 @@ function computeStreamHealth(
     droppedFrames: stats.droppedFrames,
     totalDecodedFrames: stats.decodedFrames,
     activeVariant,
+    bytesDownloaded: stats.bytesDownloaded,
+    stallsDetected: stats.stallsDetected,
+    qualitySwitches: isAdaptive ? stats.switchHistory.length : null,
   };
 }
-
-const INITIAL_METRICS: VertixMetrics = {
-  fps: 0,
-  frameTimeMs: 0,
-  faceSizes: [],
-  cropScaleFactor: null,
-  motionScore: null,
-  faceConfidence: null,
-  audioAvailable: false,
-  audioEnergy: null,
-  layoutCommittedAt: null,
-  sceneSwitchCount: 0,
-  fpsHistory: [],
-  frameTimeHistory: [],
-  motionHistory: [],
-  confidenceHistory: [],
-};
 
 // Cadence for both the video's own error-recovery/loadedmetadata handling and
 // the stream-health poll below — kept no faster than VertixEngine's own
