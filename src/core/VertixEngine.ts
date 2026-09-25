@@ -207,7 +207,13 @@ function getSharedDetectionWorker(): Promise<boolean> {
     const timeout = setTimeout(() => fail(`no "ready" within ${WORKER_READY_TIMEOUT_MS}ms`), WORKER_READY_TIMEOUT_MS);
 
     worker.onmessage = (e: MessageEvent) => {
-      const msg = e.data as { type: string; requestId?: number; faces?: ArrayBuffer; tookMs?: number; message?: string };
+      const msg = e.data as {
+        type: string;
+        requestId?: number;
+        faces?: ArrayBuffer;
+        tookMs?: number;
+        message?: string;
+      };
       if (msg.type === "ready") {
         if (settled) return;
         settled = true;
@@ -667,7 +673,11 @@ export class VertixEngine {
       // stricter margin if audio hasn't confirmed anyone's actually
       // talking.
       const audioConfirmed = energy !== null && energy >= AUDIO_ACTIVE_ENERGY;
-      winner = dominantBy(rawFaces, (f) => f.motion, audioConfirmed ? ACTIVE_SPEAKER_MARGIN : ACTIVE_SPEAKER_MARGIN_NO_AUDIO);
+      winner = dominantBy(
+        rawFaces,
+        (f) => f.motion,
+        audioConfirmed ? ACTIVE_SPEAKER_MARGIN : ACTIVE_SPEAKER_MARGIN_NO_AUDIO
+      );
     }
 
     if (winner === null) {

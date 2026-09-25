@@ -108,8 +108,16 @@ export const AnalyticsDashboard = memo(function AnalyticsDashboard({
         <Section title="Performance">
           <Row
             label="Detection"
-            value={metrics.detectionMode === "worker" ? "Worker" : metrics.detectionMode === "main-thread" ? "Main Thread" : "—"}
-            tone={metrics.detectionMode === "worker" ? "good" : metrics.detectionMode === "main-thread" ? "warn" : "default"}
+            value={
+              metrics.detectionMode === "worker"
+                ? "Worker"
+                : metrics.detectionMode === "main-thread"
+                  ? "Main Thread"
+                  : "—"
+            }
+            tone={
+              metrics.detectionMode === "worker" ? "good" : metrics.detectionMode === "main-thread" ? "warn" : "default"
+            }
           />
           <Row
             label="Main Thread"

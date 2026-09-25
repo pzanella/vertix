@@ -83,7 +83,9 @@ export const StreamHealthOverlay = memo(function StreamHealthOverlay({ streamHea
               )}
               <Row label="Downloaded" value={formatBytes(bytesDownloaded)} />
               <Row label="Stalls" value={String(stallsDetected)} tone={stallsDetected > 0 ? "warn" : "default"} />
-              {isAdaptive && qualitySwitches !== null && <Row label="Quality Switches" value={String(qualitySwitches)} />}
+              {isAdaptive && qualitySwitches !== null && (
+                <Row label="Quality Switches" value={String(qualitySwitches)} />
+              )}
             </Section>
           )}
         </div>

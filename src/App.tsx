@@ -76,10 +76,7 @@ export default function App() {
   // Same reasoning as `timeline` above — keeps Canvas's own memoization
   // meaningful instead of it re-rendering just because a new element
   // reference showed up in its `overlay` prop every render.
-  const streamHealthOverlay = useMemo(
-    () => <StreamHealthOverlay streamHealth={streamHealth} />,
-    [streamHealth]
-  );
+  const streamHealthOverlay = useMemo(() => <StreamHealthOverlay streamHealth={streamHealth} />, [streamHealth]);
 
   return (
     <div className="min-h-screen md:h-screen w-screen flex flex-col overflow-y-auto md:overflow-hidden p-4 gap-3">

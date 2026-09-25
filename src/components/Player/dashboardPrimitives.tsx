@@ -13,7 +13,15 @@ export function Section({ title, children }: { title: string; children: React.Re
   );
 }
 
-export function Row({ label, value, tone = "default" }: { label: string; value: string; tone?: keyof typeof TONE_CLASS }) {
+export function Row({
+  label,
+  value,
+  tone = "default",
+}: {
+  label: string;
+  value: string;
+  tone?: keyof typeof TONE_CLASS;
+}) {
   return (
     <div className="flex items-baseline justify-between gap-3 text-xs">
       <span className="text-neutral-500">{label}</span>
