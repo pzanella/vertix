@@ -50,6 +50,7 @@ export const Controls = memo(function Controls({
 
       <button
         onClick={onToggleMute}
+        aria-pressed={!muted}
         className="shrink-0 rounded-full w-8 h-8 flex items-center justify-center bg-neutral-800 hover:bg-neutral-700 transition"
         aria-label={muted ? "Unmute" : "Mute"}
       >
@@ -58,12 +59,17 @@ export const Controls = memo(function Controls({
             xmlns="http://www.w3.org/2000/svg"
             viewBox="0 0 24 24"
             fill="currentColor"
-            className="w-4 h-4 text-neutral-400"
+            className="w-4 h-4 text-neutral-500"
           >
             <path d="M11 5L6 9H2v6h4l5 4V5zm9.54 5.46a1 1 0 0 0-1.42 0L17 12.59l-2.12-2.13a1 1 0 1 0-1.42 1.42L15.59 14l-2.13 2.12a1 1 0 1 0 1.42 1.42L17 15.41l2.12 2.13a1 1 0 0 0 1.42-1.42L18.41 14l2.13-2.12a1 1 0 0 0 0-1.42z" />
           </svg>
         ) : (
-          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" className="w-4 h-4">
+          <svg
+            xmlns="http://www.w3.org/2000/svg"
+            viewBox="0 0 24 24"
+            fill="currentColor"
+            className="w-4 h-4 text-white"
+          >
             <path d="M11 5L6 9H2v6h4l5 4V5zm2 4.06c1.18.45 2 1.56 2 2.94s-.82 2.49-2 2.94v-5.88zM13 3.23v2.06c2.89.86 5 3.54 5 6.71s-2.11 5.85-5 6.71v2.06c4.01-.91 7-4.49 7-8.77s-2.99-7.86-7-8.77z" />
           </svg>
         )}
