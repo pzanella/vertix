@@ -106,9 +106,9 @@ The reframing logic and the web app around it are two separate things:
   engine itself never knows Shaka exists; see
   [`docs/player-integration.md`](docs/player-integration.md).
 - **`src/App.tsx`** and **`src/components/Player/`** are the actual UI:
-  the source picker (upload / sample / URL), the canvas, the transport
-  bar, the live status badge, and the analytics dashboard with its trend
-  charts and network telemetry.
+  the source picker (upload / sample / URL), the canvas (with the network
+  telemetry overlay on top of it), the transport bar, the live status
+  badge, and the analytics dashboard with its trend charts.
 
 Changing how the reframing decides what to show happens in `src/core/`.
 Changing how the app looks or behaves as a web page happens in
@@ -289,11 +289,10 @@ block JS) and hands the result over — even the pixel readback
 (`drawImage`+`getImageData`) that used to run on the main thread now
 happens inside the worker. Falls back to running both synchronously on the
 main thread if the worker can't be built, errors, or doesn't report ready
-within `WORKER_READY_TIMEOUT_MS` (4s) — though that fallback only ever
-triggers around startup: once the worker's reported ready, nothing keeps
-watching it, so a later crash currently stops detection silently instead
-of falling back. Worth fixing before relying on this against untrusted
-input.
+within `WORKER_READY_TIMEOUT_MS` (4s) — and that fallback isn't just a
+startup check: a crash discovered well after the worker reported ready
+(not just an initial-load failure) is recovered from the same way, via
+`getSharedDetectionWorker`'s `fail()`.
 
 Getting there took a few rounds. Vite's own worker-bundling hung
 indefinitely with no error for this specific file — fixed by pre-bundling

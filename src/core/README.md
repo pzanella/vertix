@@ -95,10 +95,12 @@ Limitations" for how this got here — an early attempt did add enough
 round-trip latency to read as disconnected panning, but that was a
 one-worker-per-instance mistake, not a reason to avoid a worker at all.
 
-One caveat this design doesn't fully cover yet: once the worker reports
-ready, nothing keeps watching it — if it crashes later (not just fails to
-start), detection silently stops for good instead of falling back. Worth
-fixing before leaning on this in front of untrusted/adversarial input.
+A crash discovered well after the worker reported ready — not just an
+initial-load failure — is recovered from the same way: `fail()` (inside
+`getSharedDetectionWorker`) always tears the worker down and flips
+`sharedWorkerReady` off, and `dispatchDetection`'s fallback branch calls
+`ensureWasm()` lazily on its own next tick, even for an instance that
+never needed its own WASM engine before.
 
 The layout only changes when the speaker *count* changes, debounced over a
 few detection ticks (dropping to zero speakers reacts faster than any

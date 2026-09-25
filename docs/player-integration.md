@@ -67,9 +67,10 @@ video.currentTime = 30; // engine hears "seeking" and resets its tracking state
 
 ## The one real gotcha: cross-origin video and audio readback
 
-Vertix reads pixels off the video via `ctx.getImageData()` (for face
-detection) and `canvas.drawImage(video, ...)` (for the actual reframed
-output). For MSE-backed playback — which is what Shaka, hls.js, and any
+Vertix reads pixels off the video via `getImageData()` (for face
+detection — normally inside its own Worker, see `src/core/README.md`) and
+`canvas.drawImage(video, ...)` (for the actual reframed output, on the
+main thread). For MSE-backed playback — which is what Shaka, hls.js, and any
 other adaptive-streaming player use — this does **not** get tainted by a
 cross-origin segment CDN, confirmed against a real cross-origin HLS
 stream with no `crossOrigin` set at all: the browser doesn't apply the
