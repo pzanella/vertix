@@ -6,12 +6,13 @@ reframing algorithm is actually designed to do (`src/core/layoutEngine.ts`,
 tell a real regression apart from the algorithm doing exactly what it's supposed to.
 
 Two facts that shape every row below:
-- **1 face**: always fills the whole frame — no active-speaker logic involved.
-- **2 or more faces**: the engine first tries to resolve a single active speaker (by face size
-  dominance, then by mouth motion if sizes are close) before falling back to a plain split/grid
-  if it can't tell. For the four `2-speakers-*` clips below, nobody should dominate, so they're
-  expected to just split as always — but this is the part that changed most recently, so treat
-  it as the thing most worth double-checking, not an assumption.
+- **1 or 2 faces**: always split into independent panes — 1 face fills the whole frame, 2 stack
+  top/bottom. No active-speaker guessing at this count; a size-dominance version of that was
+  tried and reverted (it locked onto a reporter's mic-holding arm instead of the actual speaker
+  in real footage — see README's Known Limitations).
+- **3 or more faces**: the engine first tries to resolve a single active speaker (by face size
+  dominance, then by mouth motion if sizes are close) before falling back to the ordinary grid
+  if it can't tell.
 
 | Clip | Faces | Expected framing |
 |---|---|---|
@@ -26,9 +27,10 @@ Two facts that shape every row below:
 
 - Any pane showing a frozen/stale frame while others update.
 - A pane's crop snapping instantly instead of gliding, or drifting onto empty background.
-- Any of the four `2-speakers-*` clips collapsing to a single pane instead of staying split —
-  the risk flagged above.
-- Rapid flickering between single-speaker and grid/split layouts within a couple of seconds —
-  the lock-in logic (`ACTIVE_SPEAKER_LOCK_TICKS`) is meant to prevent this.
+- For `3-speakers.mp4`: rapid flickering between single-speaker and grid layouts within a
+  couple of seconds — the lock-in logic (`ACTIVE_SPEAKER_LOCK_TICKS`) is meant to prevent this.
+- For `3-speakers.mp4`: the crop locking onto someone who isn't actually the speaker (a bystander,
+  a mic-holder) and staying there — the exact failure that got the 2-face version of this reverted;
+  watch for it here too since the same size-dominance check still runs at 3+.
 - Console showing `[Vertix] Detection worker unavailable` under normal conditions.
 - Analytics Dashboard's Face Confidence / Motion Activity staying at zero throughout playback.

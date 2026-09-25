@@ -310,21 +310,27 @@ already-blended frame instead of a clean one, compounding into visibly
 torn panes. Fixed by cutting cleanly to the new layout instead of starting
 a second fade on top of an unfinished one.
 
-**Active-speaker resolution.** Once 2 or more faces are detected, a plain
-grid/split isn't trustworthy on its own — a press-scrum bystander or a
-reporter holding a mic into frame reads the same as a genuine multi-person
+**Active-speaker resolution.** Once 3 or more faces are detected, a plain
+grid isn't trustworthy on its own — a press-scrum bystander or a reporter
+holding a mic into frame reads the same as a genuine multi-person
 conversation. The engine tries to lock onto a single active speaker: first
 by who's clearly the largest face in frame (works without audio), then by
 mouth motion if sizes are too close to call. Below `AMBIGUOUS_GRID_FALLBACK_FACES`
-(3), an unresolved scene falls back to the ordinary split/grid rather than
+(3), an unresolved scene falls back to the ordinary grid rather than
 guessing wrong; above it, to no crop at all. Neither signal is a trained
 model — framing size and mouth motion are proxies, not ground truth, and a
-large-but-silent bystander or an animated talker can still fool it. This
-logic was only ever validated against a handful of real streams and the
-bundled samples; extending it down to 2 faces is recent and hasn't had a
-long real-world test pass yet, so watch in particular for genuine
-back-and-forth dialogue occasionally collapsing to one pane when it
-shouldn't.
+large-but-silent bystander or an animated talker can still fool it.
+
+This was tried at 2 faces as well and reverted: on a real interview clip,
+the size check locked onto a reporter's mic-holding arm/shoulder (facing
+away from camera) instead of the actual on-camera subject, and held the
+crop there — facing away, subject not shown — for several seconds before
+anything else won by enough margin to take the lock back. At 2 faces, a
+plain split at least always keeps the real subject visible in their own
+pane; a confidently-wrong single-speaker lock is strictly worse than that
+trade, so this now only runs at 3+, matching the range it was originally
+validated against. The same failure mode is still structurally possible
+at 3+ — it just hasn't been observed there yet.
 
 **Voice-activity detection depends on the `<video>`'s own audio track**
 (`src/core/audioActivity.ts`), and degrades to "unavailable" — never

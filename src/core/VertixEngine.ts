@@ -49,7 +49,7 @@ export interface VertixMetrics {
   faceConfidence: number | null;
   /** Whether the audio-activity monitor could read real samples from this source at all — false for every bundled sample clip (no audio track) and for some cross-origin sources without CORS headers. Independent of whether anyone's currently talking. */
   audioAvailable: boolean;
-  /** Current voice-activity energy (0-1 RMS) from the audio track, or null when audioAvailable is false. Only meaningful once ACTIVE_SPEAKER_THRESHOLD (2) or more raw faces are detected. */
+  /** Current voice-activity energy (0-1 RMS) from the audio track, or null when audioAvailable is false. Only meaningful once ACTIVE_SPEAKER_THRESHOLD (3) or more raw faces are detected. */
   audioEnergy: number | null;
   /** performance.now() timestamp the current layout was committed at, for computing "stable for Ns" live. */
   layoutCommittedAt: number | null;
@@ -265,12 +265,21 @@ const PERSON_COUNT_DROP_TO_ZERO_TICKS = 2;
 // person talking with a silent bystander close enough to camera to pass
 // the filters (an interview subject with a reporter's face/mic arm in
 // frame, a press scrum). See resolveLayoutFaces for how it tells them apart.
-const ACTIVE_SPEAKER_THRESHOLD = 2;
+//
+// Tried at 2 and reverted: on a real interview (subject + a reporter
+// holding a mic into frame, facing away from camera), the size-dominance
+// check picked the reporter — her mic/shoulder read as the larger box at
+// that moment — and the 5-tick lock then held the crop on her, facing
+// away, for several seconds while the actual subject went unshown. At 2
+// faces a plain split at least always keeps the real subject visible in
+// their own pane; a confidently-wrong single-speaker lock is worse than
+// that, so this only runs at 3+ again, where it was validated for longer.
+const ACTIVE_SPEAKER_THRESHOLD = 3;
 // At this face count or below, a scene resolveLayoutFaces can't confidently
-// read falls back to the ordinary split/grid instead of showing nothing —
-// this is what keeps genuine 2- and 3-person conversations looking normal
-// whenever nobody's clearly dominant. Above it, an unresolved scene is
-// assumed too crowded to guess at and shows no crop instead.
+// read falls back to the ordinary grid instead of showing nothing — this is
+// what keeps a genuine 3-person conversation looking normal whenever
+// nobody's clearly dominant. Above it, an unresolved scene is assumed too
+// crowded to guess at and shows no crop instead.
 const AMBIGUOUS_GRID_FALLBACK_FACES = 3;
 // RMS energy below which the audio track counts as silence, not speech.
 // A rough starting value — hasn't been tuned against real broadcast audio.
