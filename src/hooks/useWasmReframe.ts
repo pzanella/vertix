@@ -247,7 +247,7 @@ export function useWasmReframe(): UseWasmReframeReturn {
   const [mode, setModeState] = useState<VertixMode>("9:16");
   const [progress, setProgress] = useState(0);
   const [duration, setDuration] = useState(0);
-  const [muted, setMuted] = useState(true);
+  const [muted, setMuted] = useState(false);
   const [speakerCount, setSpeakerCount] = useState(0);
   const [isTransitioning, setIsTransitioning] = useState(false);
   const [metrics, setMetrics] = useState<VertixMetrics>(INITIAL_METRICS);
@@ -323,7 +323,7 @@ export function useWasmReframe(): UseWasmReframeReturn {
     setState("loading");
     setErrorMessage(null);
     setStreamHealth(null);
-    video.muted = true;
+    video.muted = false;
     video.playsInline = true;
     // Engine state (tracking, layout, metrics) resets itself in response to
     // the video's own "loadedmetadata" event — nothing to do here beyond
@@ -340,11 +340,16 @@ export function useWasmReframe(): UseWasmReframeReturn {
 
     video.onloadedmetadata = () => {
       setDuration(video.duration);
-      // Already muted above, so autoplay is allowed almost everywhere; fall
-      // back to "ready" (user presses play) on the rare browser that still
-      // blocks it.
+      // Tries with sound first — loading a file follows a user gesture, which
+      // most browsers accept for audible autoplay. If refused, retries muted
+      // (allowed almost everywhere), then falls back to "ready" (user presses
+      // play) on the rare browser that blocks even that.
       video
         .play()
+        .catch(() => {
+          video.muted = true;
+          return video.play();
+        })
         .then(() => setState("playing"))
         .catch(() => setState("ready"));
     };
@@ -467,11 +472,16 @@ export function useWasmReframe(): UseWasmReframeReturn {
       if (video.duration) setProgress(video.currentTime / video.duration);
     };
     const onEnded = () => setState("ended");
+    // The element itself is the source of truth — load() and the autoplay
+    // fallback change `muted` directly, and the icon must follow.
+    const onVolumeChange = () => setMuted(video.muted);
     video.addEventListener("timeupdate", onTimeUpdate);
     video.addEventListener("ended", onEnded);
+    video.addEventListener("volumechange", onVolumeChange);
     return () => {
       video.removeEventListener("timeupdate", onTimeUpdate);
       video.removeEventListener("ended", onEnded);
+      video.removeEventListener("volumechange", onVolumeChange);
     };
   }, []);
 
@@ -498,7 +508,6 @@ export function useWasmReframe(): UseWasmReframeReturn {
     const video = videoRef.current;
     if (!video) return;
     video.muted = !video.muted;
-    setMuted(video.muted);
   }, []);
 
   const changeSource = useCallback(() => {

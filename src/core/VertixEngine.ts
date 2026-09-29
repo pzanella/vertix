@@ -289,8 +289,9 @@ const AUDIO_ACTIVE_ENERGY = 0.02;
 // actually talking.
 const ACTIVE_SPEAKER_MARGIN = 1.5;
 // Same idea, used when audio can't confirm anyone's speaking — which in
-// practice is most playback: no audio track at all, muted until the
-// viewer unmutes, or silent on cross-origin sources without CORS. Motion
+// practice is most playback: no audio track at all, muted (by the viewer,
+// or by the browser refusing audible autoplay), or silent on cross-origin
+// sources without CORS. Motion
 // still gets tried, just held to a stricter margin to make up for the
 // missing confirmation.
 const ACTIVE_SPEAKER_MARGIN_NO_AUDIO = 2.2;
@@ -673,8 +674,8 @@ export class VertixEngine {
     if (rawFaces.length < ACTIVE_SPEAKER_THRESHOLD) return rawFaces;
     const ambiguousFallback = rawFaces.length <= AMBIGUOUS_GRID_FALLBACK_FACES ? rawFaces : [];
 
-    // Size doesn't need audio — every video loads muted by default, so a
-    // signal that required audio would go unused until someone unmutes.
+    // Size doesn't need audio — playback is often muted or has no audio
+    // track, so a signal that required audio would frequently go unused.
     let winner = dominantBy(rawFaces, (f) => Math.max(f.w, f.h), FACE_SIZE_DOMINANCE_MARGIN);
 
     if (winner === null) {

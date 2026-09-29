@@ -58,6 +58,8 @@ export class AudioActivityMonitor {
       this.analyser.connect(this.ctx.destination);
       this.data = new Uint8Array(this.analyser.fftSize);
       this._available = true;
+      video.addEventListener("play", this.resumeIfSuspended);
+      video.addEventListener("volumechange", this.resumeIfSuspended);
     } catch {
       // No audio track, an already-tapped element, or anything else the
       // browser objects to — degrade to unavailable, never surface an error.
@@ -65,7 +67,19 @@ export class AudioActivityMonitor {
     }
   }
 
+  /**
+   * The context is created from an effect, outside any user gesture, so the
+   * browser may start it suspended — and since the element's audio flows
+   * only through this graph, a suspended context means silent playback even
+   * while unmuted. Retried on every play/unmute, which usually carry a gesture.
+   */
+  private resumeIfSuspended = (): void => {
+    if (this.ctx?.state === "suspended") void this.ctx.resume().catch(() => {});
+  };
+
   detach(): void {
+    this.sourceVideo?.removeEventListener("play", this.resumeIfSuspended);
+    this.sourceVideo?.removeEventListener("volumechange", this.resumeIfSuspended);
     this.sourceNode?.disconnect();
     this.analyser?.disconnect();
     void this.ctx?.close().catch(() => {});

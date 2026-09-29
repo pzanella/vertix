@@ -335,8 +335,9 @@ at 3+ — it just hasn't been observed there yet.
 **Voice-activity detection depends on the `<video>`'s own audio track**
 (`src/core/audioActivity.ts`), and degrades to "unavailable" — never
 throws — if there's no audio track, the browser blocks `AudioContext`
-before a user gesture, or the source is muted (every video loads muted by
-default, so this is the common case until a viewer unmutes). Cross-origin
+before a user gesture, or the source is muted (videos autoplay with sound
+when the browser allows it, and fall back to muted when it refuses
+audible autoplay, until the viewer unmutes). Cross-origin
 sources also read as silence unless the `<video>` element is marked
 `crossOrigin="anonymous"`, which this app now sets for HLS/DASH sources
 specifically (not plain progressive URLs, where an untested CORS setup
