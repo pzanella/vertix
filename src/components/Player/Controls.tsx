@@ -11,7 +11,7 @@ interface ControlsProps {
   onReplay: () => void;
   onToggleMute: () => void;
   onSetMode: (mode: ReframeMode) => void;
-  /** Rendered in the middle of the bar (the scrub timeline) — kept as a slot so this stays a single compact transport-bar row instead of a separate stacked row. */
+  /** Rendered in the middle of the bar (the scrub timeline) — kept as a slot rather than owned here. On desktop it sits inline between the buttons; on mobile it wraps onto its own full-width row. */
   middle?: ReactNode;
 }
 
@@ -27,7 +27,13 @@ export const Controls = memo(function Controls({
   middle,
 }: ControlsProps) {
   return (
-    <div className="flex items-center w-full px-2 gap-2">
+    // Wraps onto two rows below `md`: playback buttons + mode toggle stay
+    // together on the first line (order-last pushes the scrub bar past
+    // them regardless of its own place in the markup), and the scrub bar
+    // drops to its own full-width line instead of squeezing everything
+    // into one row that's too narrow to fit it. Unchanged above `md` —
+    // order resets and this is a single row, same as before.
+    <div className="flex flex-wrap md:flex-nowrap items-center w-full px-2 gap-2">
       <button
         onClick={ended ? onReplay : onTogglePlay}
         className="shrink-0 rounded-full w-8 h-8 flex items-center justify-center bg-brand-600 hover:bg-brand-500 transition"
@@ -75,7 +81,7 @@ export const Controls = memo(function Controls({
         )}
       </button>
 
-      {middle && <div className="flex-1 min-w-0">{middle}</div>}
+      {middle && <div className="order-last md:order-none w-full md:w-auto md:flex-1 min-w-0">{middle}</div>}
 
       <button
         onClick={() => onSetMode(mode === "16:9" ? "9:16" : "16:9")}

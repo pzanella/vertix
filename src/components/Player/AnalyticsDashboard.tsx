@@ -63,7 +63,7 @@ export const AnalyticsDashboard = memo(function AnalyticsDashboard({
   const currentTime = duration * progress;
 
   return (
-    <div className="flex flex-col gap-4 p-4 rounded-xl bg-neutral-950 border border-neutral-800/60 shadow-[inset_0_1px_0_0_rgba(255,255,255,0.04),0_8px_24px_-12px_rgba(0,0,0,0.6)] w-full md:w-96 md:shrink-0 max-h-[45vh] md:max-h-full overflow-y-auto">
+    <div className="flex flex-col gap-4 p-4 rounded-xl bg-neutral-950 border border-neutral-800/60 shadow-[inset_0_1px_0_0_rgba(255,255,255,0.04),0_8px_24px_-12px_rgba(0,0,0,0.6)] w-full md:w-96 md:shrink-0 md:max-h-full md:overflow-y-auto">
       <h2 className="text-xs font-display font-semibold text-neutral-300 tracking-wide">
         Live <span className="text-brand-400">Analytics</span>
       </h2>

@@ -39,7 +39,6 @@ export default function App() {
 
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const [dragging, setDragging] = useState(false);
-  const [showAnalytics, setShowAnalytics] = useState(true);
 
   const openFile = useCallback(
     (file: File | undefined) => {
@@ -169,25 +168,17 @@ export default function App() {
       )}
 
       {isActive && (
-        <div className="flex-1 min-h-0 flex flex-col-reverse md:flex-row gap-4 w-full">
+        <div className="flex-1 min-h-0 flex flex-col md:flex-row gap-4 w-full">
           <div className="flex-1 min-h-0 flex flex-col items-center gap-2">
             <Canvas canvasRef={canvasRef} mode={mode} overlay={streamHealthOverlay} />
-            <div className="w-full flex items-center justify-between gap-2">
-              <div className="flex items-center gap-2">
-                <LiveStatusPanel mode={mode} speakerCount={speakerCount} isTransitioning={isTransitioning} />
-                {isBuffering && (
-                  <div className="flex items-center gap-2 px-3 py-1.5 rounded-full bg-neutral-900 border border-neutral-800 text-xs text-neutral-300">
-                    <span className="w-3 h-3 rounded-full border-2 border-neutral-700 border-t-brand-400 animate-spin" />
-                    Buffering…
-                  </div>
-                )}
-              </div>
-              <button
-                onClick={() => setShowAnalytics((v) => !v)}
-                className="md:hidden shrink-0 px-3 py-1.5 rounded-full bg-neutral-900 border border-neutral-800 text-xs text-neutral-400 hover:text-neutral-200 hover:border-neutral-700 transition"
-              >
-                {showAnalytics ? "Hide analytics" : "Show analytics"}
-              </button>
+            <div className="w-full flex items-center gap-2">
+              <LiveStatusPanel mode={mode} speakerCount={speakerCount} isTransitioning={isTransitioning} />
+              {isBuffering && (
+                <div className="flex items-center gap-2 px-3 py-1.5 rounded-full bg-neutral-900 border border-neutral-800 text-xs text-neutral-300">
+                  <span className="w-3 h-3 rounded-full border-2 border-neutral-700 border-t-brand-400 animate-spin" />
+                  Buffering…
+                </div>
+              )}
             </div>
             <div className="w-full max-w-2xl shrink-0">
               <Controls
@@ -204,17 +195,15 @@ export default function App() {
             </div>
           </div>
 
-          <div className={showAnalytics ? undefined : "hidden md:block"}>
-            <AnalyticsDashboard
-              mode={mode}
-              meta={meta}
-              progress={progress}
-              duration={duration}
-              speakerCount={speakerCount}
-              isTransitioning={isTransitioning}
-              metrics={metrics}
-            />
-          </div>
+          <AnalyticsDashboard
+            mode={mode}
+            meta={meta}
+            progress={progress}
+            duration={duration}
+            speakerCount={speakerCount}
+            isTransitioning={isTransitioning}
+            metrics={metrics}
+          />
         </div>
       )}
     </div>
