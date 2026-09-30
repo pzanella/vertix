@@ -79,8 +79,8 @@ export function SamplePicker({ onSelect }: SamplePickerProps) {
             </div>
           </div>
           <div className="flex flex-col gap-0.5">
-            <span className="text-neutral-200 text-xs">{clip.title}</span>
-            {clip.subtitle && <span className="text-[10px] text-neutral-500">{clip.subtitle}</span>}
+            <span className="text-neutral-200 text-base">{clip.title}</span>
+            {clip.subtitle && <span className="text-base text-neutral-500">{clip.subtitle}</span>}
           </div>
         </button>
       ))}

@@ -62,7 +62,7 @@ export const StreamHealthOverlay = memo(function StreamHealthOverlay({ streamHea
       {open && (
         <div className="w-56 rounded-lg border border-neutral-800/60 bg-neutral-950/95 backdrop-blur-sm shadow-[0_8px_24px_-12px_rgba(0,0,0,0.8)] p-3">
           {manifestType === "LOCAL" ? (
-            <p className="text-[11px] text-neutral-600">Local file — no network metrics.</p>
+            <p className="text-base text-neutral-600">Local file — no network metrics.</p>
           ) : (
             <Section title="Stream Health">
               <Row

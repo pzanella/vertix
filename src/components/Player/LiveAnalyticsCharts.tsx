@@ -74,7 +74,7 @@ function Sparkline({ data, color }: { data: number[]; color: string }) {
 function ChartRow({ label, color, data, value }: ChartSpec) {
   return (
     <div className="flex flex-col gap-1">
-      <div className="flex items-baseline justify-between text-xs">
+      <div className="flex items-baseline justify-between text-base">
         <span className="text-neutral-500">{label}</span>
         <span className="font-mono tabular-nums" style={{ color }}>
           {value}

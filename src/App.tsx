@@ -88,7 +88,7 @@ export default function App() {
           <h1 className="text-lg font-display font-semibold tracking-tight">
             <span className="text-brand-400">Ver</span>tix
           </h1>
-          <p className="hidden sm:block text-xs text-neutral-500">
+          <p className="hidden sm:block text-base text-neutral-500">
             Turn 16:9 video into 9:16. The camera follows the action for you.
           </p>
         </div>
@@ -96,7 +96,7 @@ export default function App() {
         {isActive && (
           <button
             onClick={changeSource}
-            className="flex items-center gap-1.5 px-3 py-1.5 rounded-full border border-neutral-800 text-xs text-neutral-400 hover:text-neutral-100 hover:border-neutral-600 active:scale-95 transition"
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-full border border-neutral-800 text-base text-neutral-400 hover:text-neutral-100 hover:border-neutral-600 active:scale-95 transition"
           >
             <svg viewBox="0 0 24 24" className="w-3.5 h-3.5" fill="currentColor">
               <path d="M12 4l6 6h-4v6h-4v-6H6l6-6zM5 19h14v2H5z" />
@@ -132,7 +132,7 @@ export default function App() {
                   {state === "loading" ? (
                     <>
                       <div className="w-8 h-8 rounded-full border-2 border-neutral-700 border-t-brand-400 animate-spin" />
-                      <span className="text-neutral-400 text-sm">Reading your video…</span>
+                      <span className="text-neutral-400 text-base">Reading your video…</span>
                     </>
                   ) : (
                     <>
@@ -146,12 +146,14 @@ export default function App() {
                       >
                         <path d="M4 8V5a1 1 0 0 1 1-1h3M20 8V5a1 1 0 0 1-1-1h-3M4 16v3a1 1 0 0 0 1 1h3M20 16v3a1 1 0 0 0-1 1h-3" />
                       </svg>
-                      <span className="text-neutral-400 text-sm">Drop a 16:9 video here, or click to choose one</span>
+                      <span className="text-neutral-400 text-base text-center">
+                        Drop a 16:9 video here, or click to choose one
+                      </span>
                     </>
                   )}
                   <input ref={fileInputRef} type="file" accept="video/*" onChange={handleFile} className="hidden" />
                 </div>
-                {state === "error" && <p className="text-red-400 text-xs">{errorMessage}</p>}
+                {state === "error" && <p className="text-red-400 text-base">{errorMessage}</p>}
               </div>
             }
             sample={
@@ -159,7 +161,7 @@ export default function App() {
                 className={`flex flex-col items-center gap-2 w-full ${state === "loading" ? "opacity-70 pointer-events-none" : ""}`}
               >
                 <SamplePicker onSelect={load} />
-                {state === "error" && <p className="text-red-400 text-xs">{errorMessage}</p>}
+                {state === "error" && <p className="text-red-400 text-base">{errorMessage}</p>}
               </div>
             }
             url={<UrlSourceInput state={state} errorMessage={errorMessage} onLoad={load} />}
@@ -174,7 +176,7 @@ export default function App() {
             <div className="w-full flex items-center gap-2">
               <LiveStatusPanel mode={mode} speakerCount={speakerCount} isTransitioning={isTransitioning} />
               {isBuffering && (
-                <div className="flex items-center gap-2 px-3 py-1.5 rounded-full bg-neutral-900 border border-neutral-800 text-xs text-neutral-300">
+                <div className="flex items-center gap-2 px-3 py-1.5 rounded-full bg-neutral-900 border border-neutral-800 text-base text-neutral-300">
                   <span className="w-3 h-3 rounded-full border-2 border-neutral-700 border-t-brand-400 animate-spin" />
                   Buffering…
                 </div>

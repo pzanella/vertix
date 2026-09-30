@@ -79,7 +79,7 @@ export function SourceTabs({ upload, sample, url }: SourceTabsProps) {
             tabIndex={active === tab.id ? 0 : -1}
             onClick={() => setActive(tab.id)}
             onKeyDown={onKeyDown}
-            className={`relative z-10 flex-1 h-full text-[11px] font-display font-medium rounded-full transition-colors ${
+            className={`relative z-10 flex-1 h-full text-base font-display font-medium rounded-full transition-colors ${
               active === tab.id ? "text-white" : "text-neutral-500 hover:text-neutral-300"
             }`}
           >
