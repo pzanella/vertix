@@ -363,7 +363,24 @@ This runs `wasm-pack build --target web` and writes the bindings to
 
 ## License
 
-MIT — see [LICENSE](LICENSE). The bundled face-detection model
+Copyright (c) 2026 Pietro Zanella.
+
+Vertix is dual-licensed:
+
+- **Open source — [GNU AGPL-3.0](LICENSE).** Free to use, study, modify
+  and share. If you distribute Vertix, or a modified version, or make it
+  available to users over a network (e.g. as a hosted web app or SaaS),
+  you must release the complete corresponding source code under the
+  AGPL-3.0 as well.
+- **Commercial license.** For use in closed-source or proprietary
+  products and services without the AGPL-3.0 obligations, a separate
+  commercial license is available — contact
+  [@pzanella](https://github.com/pzanella) to discuss terms.
+
+Versions released before the switch to AGPL-3.0 remain available under
+the MIT license they were published with.
+
+The bundled face-detection model
 ([UltraFace](https://github.com/Linzaer/Ultra-Light-Fast-Generic-Face-Detector-1MB))
 is also MIT-licensed; see
 [wasm/src/models/ATTRIBUTION.md](wasm/src/models/ATTRIBUTION.md).
