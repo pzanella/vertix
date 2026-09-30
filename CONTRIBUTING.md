@@ -81,9 +81,9 @@ specific to your own file).
 Vertix is dual-licensed under the [AGPL-3.0](LICENSE) and a separate
 commercial license (see [License](README.md#license)).
 
-Issues, bug reports and feature proposals are welcome at any time. Code
-contributions require signing the
-[Contributor License Agreement](CLA.md), which grants the maintainer the
-right to distribute your contribution under both licenses. The CLA bot
-asks you to sign on your first pull request; pull requests are merged
-only after the CLA is signed.
+Issues, bug reports and feature proposals are welcome at any time. By
+submitting a pull request, you agree that your contribution may be
+distributed under the AGPL-3.0 and under commercial licenses offered by
+the maintainer, and you confirm that you have the right to grant this
+(the work is your own, or you have permission to contribute it). You
+keep the copyright on your contribution.

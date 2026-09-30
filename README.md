@@ -365,17 +365,9 @@ This runs `wasm-pack build --target web` and writes the bindings to
 
 Copyright (c) 2026 Pietro Zanella.
 
-Vertix is dual-licensed:
-
-- **Open source — [GNU AGPL-3.0](LICENSE).** Free to use, study, modify
-  and share. If you distribute Vertix, or a modified version, or make it
-  available to users over a network (e.g. as a hosted web app or SaaS),
-  you must release the complete corresponding source code under the
-  AGPL-3.0 as well.
-- **Commercial license.** For use in closed-source or proprietary
-  products and services without the AGPL-3.0 obligations, a separate
-  commercial license is available — contact
-  [@pzanella](https://github.com/pzanella) to discuss terms.
+Vertix is licensed under the [GNU AGPL-3.0](LICENSE). For commercial
+licensing, contact
+[pietrozanella22@gmail.com](mailto:pietrozanella22@gmail.com).
 
 Versions released before the switch to AGPL-3.0 remain available under
 the MIT license they were published with.
