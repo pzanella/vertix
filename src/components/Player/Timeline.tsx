@@ -15,7 +15,7 @@ export const Timeline = memo(function Timeline({ progress, duration, onSeek }: T
 
   return (
     <div className="flex items-center gap-2 w-full">
-      <span className="text-base text-neutral-500 tabular-nums w-12 text-right shrink-0">
+      <span className="text-base text-neutral-500 tabular-nums w-12 text-left shrink-0">
         {formatTime(progress * duration)}
       </span>
       <input
@@ -27,7 +27,7 @@ export const Timeline = memo(function Timeline({ progress, duration, onSeek }: T
         onChange={(e) => onSeek(parseFloat(e.target.value))}
         className="flex-1 h-1 accent-brand-500 cursor-pointer"
       />
-      <span className="text-base text-neutral-500 tabular-nums w-12 shrink-0">{formatTime(duration)}</span>
+      <span className="text-base text-neutral-500 tabular-nums w-12 text-right shrink-0">{formatTime(duration)}</span>
     </div>
   );
 });

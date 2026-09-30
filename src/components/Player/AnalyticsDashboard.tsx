@@ -68,11 +68,11 @@ export const AnalyticsDashboard = memo(function AnalyticsDashboard({
         Live <span className="text-brand-400">Analytics</span>
       </h2>
 
-      <div className="rounded-lg border border-neutral-800/60 bg-neutral-900/40 shadow-[inset_0_1px_0_0_rgba(255,255,255,0.04),0_8px_24px_-12px_rgba(0,0,0,0.6)] p-3">
+      <div className="rounded-lg p-0">
         <LiveAnalyticsCharts metrics={metrics} />
       </div>
 
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-x-4 gap-y-4">
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-x-4 gap-y-8">
         <Section title="Video">
           <Row label="Resolution" value={meta ? `${meta.width}×${meta.height}` : "—"} />
           <Row label="Aspect" value={mode} />

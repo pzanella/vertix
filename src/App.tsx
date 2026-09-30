@@ -125,10 +125,6 @@ export default function App() {
                     state === "loading" ? "cursor-wait opacity-70" : "cursor-pointer"
                   } ${dragging ? "border-brand-400 bg-brand-950/30" : "border-neutral-700 hover:border-brand-500"}`}
                 >
-                  <span className="absolute -top-1 -left-1 w-4 h-4 border-t border-l border-neutral-700" />
-                  <span className="absolute -top-1 -right-1 w-4 h-4 border-t border-r border-neutral-700" />
-                  <span className="absolute -bottom-1 -left-1 w-4 h-4 border-b border-l border-neutral-700" />
-                  <span className="absolute -bottom-1 -right-1 w-4 h-4 border-b border-r border-neutral-700" />
                   {state === "loading" ? (
                     <>
                       <div className="w-8 h-8 rounded-full border-2 border-neutral-700 border-t-brand-400 animate-spin" />
@@ -171,7 +167,7 @@ export default function App() {
 
       {isActive && (
         <div className="flex-1 min-h-0 flex flex-col md:flex-row gap-4 w-full">
-          <div className="flex-1 min-h-0 flex flex-col items-center gap-2">
+          <div className="flex-1 min-h-0 flex flex-col items-center gap-y-6 gap-x-4">
             <Canvas canvasRef={canvasRef} mode={mode} overlay={streamHealthOverlay} />
             <div className="w-full flex items-center gap-2">
               <LiveStatusPanel mode={mode} speakerCount={speakerCount} isTransitioning={isTransitioning} />

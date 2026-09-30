@@ -38,7 +38,7 @@ export const Controls = memo(function Controls({
     // group: on the first line that's [play+mute] vs [mode toggle]; on
     // desktop the scrub bar's own flex-1 already fills the middle, so
     // this has no visible effect there (nothing left to distribute).
-    <div className="flex flex-wrap md:flex-nowrap items-center justify-between w-full md:px-2 gap-2">
+    <div className="flex flex-wrap md:flex-nowrap items-center justify-between w-full md:px-2 gap-y-6 gap-x-4">
       <div className="flex items-center gap-2 shrink-0">
         <button
           onClick={ended ? onReplay : onTogglePlay}

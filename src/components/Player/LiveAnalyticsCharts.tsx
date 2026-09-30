@@ -98,7 +98,7 @@ const COLOR = {
 
 export const LiveAnalyticsCharts = memo(function LiveAnalyticsCharts({ metrics }: LiveAnalyticsChartsProps) {
   return (
-    <div className="flex flex-col gap-3">
+    <div className="flex flex-col gap-4">
       <ChartRow
         label="FPS Trend"
         color={COLOR.fps}
