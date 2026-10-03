@@ -1,6 +1,7 @@
 # Vertix
 
 [![Live demo](https://img.shields.io/badge/demo-live-2dd4bf?style=flat-square)](https://pzanella.github.io/vertix/)
+[![License: Apache 2.0](https://img.shields.io/badge/license-Apache%202.0-blue?style=flat-square)](LICENSE)
 
 Turn a 16:9 video into 9:16, right in your browser. Vertix finds faces,
 works out how many speakers are on screen, and frames each one — a single
@@ -365,12 +366,8 @@ This runs `wasm-pack build --target web` and writes the bindings to
 
 Copyright (c) 2026 Pietro Zanella.
 
-Vertix is licensed under the [GNU AGPL-3.0](LICENSE). For commercial
-licensing, contact
-[pietrozanella22@gmail.com](mailto:pietrozanella22@gmail.com).
-
-Versions released before the switch to AGPL-3.0 remain available under
-the MIT license they were published with.
+Vertix is licensed under the [Apache License 2.0](LICENSE). See
+[NOTICE](NOTICE) for attribution requirements.
 
 The bundled face-detection model
 ([UltraFace](https://github.com/Linzaer/Ultra-Light-Fast-Generic-Face-Detector-1MB))

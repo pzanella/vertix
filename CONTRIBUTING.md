@@ -78,12 +78,11 @@ specific to your own file).
 
 ## License
 
-Vertix is dual-licensed under the [AGPL-3.0](LICENSE) and a separate
-commercial license (see [License](README.md#license)).
+Vertix is licensed under the [Apache License 2.0](LICENSE).
 
 Issues, bug reports and feature proposals are welcome at any time. By
-submitting a pull request, you agree that your contribution may be
-distributed under the AGPL-3.0 and under commercial licenses offered by
-the maintainer, and you confirm that you have the right to grant this
-(the work is your own, or you have permission to contribute it). You
-keep the copyright on your contribution.
+submitting a pull request, you agree that your contribution is licensed
+under the Apache License 2.0 (as described in section 5 of the license),
+and you confirm that you have the right to grant this (the work is your
+own, or you have permission to contribute it). You keep the copyright on
+your contribution.

@@ -1,0 +1,6 @@
+Vertix
+Copyright 2026 Pietro Zanella
+
+This product includes the UltraFace face-detection model
+(https://github.com/Linzaer/Ultra-Light-Fast-Generic-Face-Detector-1MB),
+licensed under the MIT License. See wasm/src/models/ATTRIBUTION.md.
