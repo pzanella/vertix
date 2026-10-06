@@ -10,7 +10,11 @@ import {
   Timeline,
   UrlSourceInput,
 } from "./components/Player";
+import { BenchmarkPanel, readBenchmarkConfig } from "./components/Benchmark";
 import { useWasmReframe } from "./hooks/useWasmReframe";
+
+// Read once: benchmark mode is opt-in via ?bench=1 and never changes during a session.
+const BENCHMARK_CONFIG = readBenchmarkConfig(window.location.search);
 
 export default function App() {
   const {
@@ -35,10 +39,12 @@ export default function App() {
     isBuffering,
     streamHealth,
     changeSource,
+    getEngine,
   } = useWasmReframe();
 
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const [dragging, setDragging] = useState(false);
+  const [benchmarkRunning, setBenchmarkRunning] = useState(false);
 
   const openFile = useCallback(
     (file: File | undefined) => {
@@ -62,6 +68,10 @@ export default function App() {
 
   const playing = state === "playing";
   const isActive = state === "ready" || state === "playing" || state === "paused" || state === "ended";
+  // A benchmark run switches sources back to back; keeping the player (and
+  // its canvas) mounted through each "loading" state avoids re-attaching
+  // the engine to a fresh canvas between clips.
+  const showPlayer = isActive || benchmarkRunning;
 
   // Memoized so Controls (memoized itself) only re-renders when the
   // timeline actually needs to — otherwise passing JSX inline as a prop
@@ -108,7 +118,18 @@ export default function App() {
 
       <video ref={videoRef} className="hidden" />
 
-      {!isActive && (
+      {BENCHMARK_CONFIG && (
+        <BenchmarkPanel
+          config={BENCHMARK_CONFIG}
+          getEngine={getEngine}
+          videoRef={videoRef}
+          load={load}
+          hasSource={isActive}
+          onRunningChange={setBenchmarkRunning}
+        />
+      )}
+
+      {!showPlayer && (
         <div className="flex-1 min-h-0 flex flex-col items-center justify-center gap-4">
           <SourceTabs
             upload={
@@ -165,7 +186,7 @@ export default function App() {
         </div>
       )}
 
-      {isActive && (
+      {showPlayer && (
         <div className="flex-1 min-h-0 flex flex-col md:flex-row gap-4 w-full">
           <div className="flex-1 min-h-0 flex flex-col items-center gap-y-6 gap-x-4">
             <Canvas canvasRef={canvasRef} mode={mode} overlay={streamHealthOverlay} />
