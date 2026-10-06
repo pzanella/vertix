@@ -5,7 +5,7 @@ import { benchmarkReportToCsv, benchmarkSummaryRows, buildBenchmarkReport, findP
 
 const environment: BenchmarkEnvironment = {
   collectedAt: "2026-01-01T00:00:00.000Z",
-  pageUrl: "http://localhost/?bench=1",
+  pageUrl: "http://localhost/",
   userAgent: "test",
   hardwareConcurrency: 8,
   deviceMemoryGb: null,

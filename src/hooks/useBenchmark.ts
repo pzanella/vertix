@@ -12,8 +12,19 @@ import {
   type VertixEngine,
 } from "../core";
 import { SAMPLE_CLIPS, sampleClipUrl } from "../components/Player/sampleClips";
+import { SETTLE_BETWEEN_CLIPS_MS } from "../components/Benchmark/benchmarkConfig";
 
 export type BenchmarkStatus = "idle" | "running" | "done" | "cancelled" | "error";
+
+/** Where a run currently is, for progress display. */
+export interface BenchmarkStage {
+  label: string;
+  /** Zero-based position of this stage within the run. */
+  index: number;
+  total: number;
+  /** Set for the unrecorded warm-up, which stops after this many seconds instead of at the clip's end. */
+  stopAtSec: number | null;
+}
 
 interface UseBenchmarkOptions {
   config: BenchmarkConfig;
@@ -26,6 +37,7 @@ interface UseBenchmarkReturn {
   status: BenchmarkStatus;
   /** Human-readable description of the step currently running. */
   step: string | null;
+  stage: BenchmarkStage | null;
   report: BenchmarkReport | null;
   error: string | null;
   runSuite: () => void;
@@ -34,10 +46,6 @@ interface UseBenchmarkReturn {
   downloadJson: () => void;
   downloadCsv: () => void;
 }
-
-// Idle gap between clips so teardown of the previous source (decoder,
-// Shaka, GC) does not land inside the next clip's measurements.
-const SETTLE_BETWEEN_CLIPS_MS = 1000;
 
 function delay(ms: number, signal: AbortSignal): Promise<void> {
   return new Promise((resolve, reject) => {
@@ -92,7 +100,7 @@ function publishReport(report: BenchmarkReport) {
 /** Runs benchmark suites against the app's engine and video element and keeps the last report. */
 export function useBenchmark({ config, getEngine, videoRef, load }: UseBenchmarkOptions): UseBenchmarkReturn {
   const [status, setStatus] = useState<BenchmarkStatus>("idle");
-  const [step, setStep] = useState<string | null>(null);
+  const [stage, setStage] = useState<BenchmarkStage | null>(null);
   const [report, setReport] = useState<BenchmarkReport | null>(null);
   const [error, setError] = useState<string | null>(null);
   const abortRef = useRef<AbortController | null>(null);
@@ -133,7 +141,7 @@ export function useBenchmark({ config, getEngine, videoRef, load }: UseBenchmark
       } finally {
         engine.setMode("9:16");
         abortRef.current = null;
-        setStep(null);
+        setStage(null);
       }
     },
     [config, getEngine, videoRef]
@@ -142,9 +150,15 @@ export function useBenchmark({ config, getEngine, videoRef, load }: UseBenchmark
   const runSuite = useCallback(() => {
     void run(async (engine, video, signal, results) => {
       const [firstClip] = SAMPLE_CLIPS;
+      const total = 1 + SAMPLE_CLIPS.length + (config.baseline ? 1 : 0);
       const loadClip = (file: string) => () => load(sampleClipUrl(file));
 
-      setStep(`WASM warm-up (${config.wasmWarmupSec}s of ${firstClip.file}, not recorded)`);
+      setStage({
+        label: `WASM warm-up (${config.wasmWarmupSec}s of ${firstClip.file}, not recorded)`,
+        index: 0,
+        total,
+        stopAtSec: config.wasmWarmupSec,
+      });
       await runUnrecordedWarmup(engine, video, {
         mode: "9:16",
         loadSource: loadClip(firstClip.file),
@@ -154,7 +168,12 @@ export function useBenchmark({ config, getEngine, videoRef, load }: UseBenchmark
 
       for (const [index, clip] of SAMPLE_CLIPS.entries()) {
         await delay(SETTLE_BETWEEN_CLIPS_MS, signal);
-        setStep(`Clip ${index + 1}/${SAMPLE_CLIPS.length}: ${clip.file} (9:16)`);
+        setStage({
+          label: `Clip ${index + 1}/${SAMPLE_CLIPS.length}: ${clip.file} (9:16)`,
+          index: index + 1,
+          total,
+          stopAtSec: null,
+        });
         results.push(
           await runBenchmarkClip(engine, video, {
             clipName: clip.file,
@@ -169,7 +188,12 @@ export function useBenchmark({ config, getEngine, videoRef, load }: UseBenchmark
 
       if (config.baseline) {
         await delay(SETTLE_BETWEEN_CLIPS_MS, signal);
-        setStep(`Baseline: ${firstClip.file} (16:9, no detection)`);
+        setStage({
+          label: `Baseline: ${firstClip.file} (16:9, no detection)`,
+          index: total - 1,
+          total,
+          stopAtSec: null,
+        });
         results.push(
           await runBenchmarkClip(engine, video, {
             clipName: firstClip.file,
@@ -188,7 +212,7 @@ export function useBenchmark({ config, getEngine, videoRef, load }: UseBenchmark
     void run(async (engine, video, signal, results) => {
       const clipName = currentClipName(video);
       const sample = SAMPLE_CLIPS.find((clip) => clip.file === clipName);
-      setStep(`${clipName} (9:16, rewound and replayed)`);
+      setStage({ label: `${clipName} (9:16, rewound and replayed)`, index: 0, total: 1, stopAtSec: null });
       results.push(
         await runBenchmarkClip(engine, video, {
           clipName,
@@ -213,5 +237,16 @@ export function useBenchmark({ config, getEngine, videoRef, load }: UseBenchmark
     downloadText(`vertix-bench-${fileStamp(report)}.csv`, benchmarkReportToCsv(report), "text/csv");
   }, [report]);
 
-  return { status, step, report, error, runSuite, runCurrentClip, cancel, downloadJson, downloadCsv };
+  return {
+    status,
+    step: stage?.label ?? null,
+    stage,
+    report,
+    error,
+    runSuite,
+    runCurrentClip,
+    cancel,
+    downloadJson,
+    downloadCsv,
+  };
 }

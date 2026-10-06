@@ -1,4 +1,5 @@
 import type { BenchmarkConfig } from "../../core";
+import { SAMPLE_CLIPS } from "../Player/sampleClips";
 
 export const DEFAULT_BENCHMARK_CONFIG: BenchmarkConfig = {
   wasmWarmupSec: 3,
@@ -6,27 +7,30 @@ export const DEFAULT_BENCHMARK_CONFIG: BenchmarkConfig = {
   baseline: true,
 };
 
-const MAX_WARMUP_SEC = 60;
-
-function readSeconds(params: URLSearchParams, name: string, fallback: number): number {
-  const raw = params.get(name);
-  if (raw === null || raw.trim() === "") return fallback;
-  const value = Number(raw);
-  return Number.isFinite(value) && value >= 0 ? Math.min(value, MAX_WARMUP_SEC) : fallback;
+export interface SecondsRange {
+  min: number;
+  max: number;
+  step: number;
 }
 
-/**
- * Benchmark mode is on only with `?bench=1`. Optional parameters:
- * `wasmWarmup` (seconds of unrecorded playback before the suite),
- * `clipWarmup` (recorded-but-excluded seconds at the start of each clip),
- * `baseline=0` (skip the 16:9 baseline run).
- */
-export function readBenchmarkConfig(search: string): BenchmarkConfig | null {
-  const params = new URLSearchParams(search);
-  if (params.get("bench") !== "1") return null;
-  return {
-    wasmWarmupSec: readSeconds(params, "wasmWarmup", DEFAULT_BENCHMARK_CONFIG.wasmWarmupSec),
-    clipWarmupSec: readSeconds(params, "clipWarmup", DEFAULT_BENCHMARK_CONFIG.clipWarmupSec),
-    baseline: params.get("baseline") !== "0",
-  };
+export const WASM_WARMUP_RANGE: SecondsRange = { min: 0, max: 10, step: 1 };
+export const CLIP_WARMUP_RANGE: SecondsRange = { min: 0, max: 3, step: 0.5 };
+
+// Idle gap between clips so teardown of the previous source (decoder,
+// Shaka, GC) does not land inside the next clip's measurements.
+export const SETTLE_BETWEEN_CLIPS_MS = 1000;
+
+/** Snaps `value` to the range's step and clamps it into the range. */
+export function clampToRange(value: number, { min, max, step }: SecondsRange): number {
+  if (!Number.isFinite(value)) return min;
+  const snapped = Math.round(value / step) * step;
+  return Math.min(max, Math.max(min, Number(snapped.toFixed(3))));
+}
+
+/** Rough wall-clock length of a full suite: warm-up, every clip at 1× plus settle gaps, and the optional baseline. */
+export function estimateSuiteSeconds(config: BenchmarkConfig): number {
+  const settleSec = SETTLE_BETWEEN_CLIPS_MS / 1000;
+  const clipsSec = SAMPLE_CLIPS.reduce((sum, clip) => sum + clip.durationSec + settleSec, 0);
+  const baselineSec = config.baseline ? SAMPLE_CLIPS[0].durationSec + settleSec : 0;
+  return config.wasmWarmupSec + clipsSec + baselineSec;
 }

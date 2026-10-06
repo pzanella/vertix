@@ -6,6 +6,8 @@ export interface SampleClip {
   speakers: number;
   /** Real frame rate of the file (from ffprobe) — used by the benchmark to count expected frames. */
   nominalFps: number;
+  /** File duration in seconds (from ffprobe) — used to estimate how long a benchmark suite takes. */
+  durationSec: number;
 }
 
 // Public assets, so paths must respect Vite's `base` (root in dev, a
@@ -24,6 +26,7 @@ export const SAMPLE_CLIPS: SampleClip[] = [
     subtitle: null,
     speakers: 1,
     nominalFps: 25,
+    durationSec: 34.92,
   },
   {
     file: "2-speakers-a.mp4",
@@ -32,6 +35,7 @@ export const SAMPLE_CLIPS: SampleClip[] = [
     subtitle: "example 1",
     speakers: 2,
     nominalFps: 25,
+    durationSec: 16.447,
   },
   {
     file: "2-speakers-b.mp4",
@@ -40,6 +44,7 @@ export const SAMPLE_CLIPS: SampleClip[] = [
     subtitle: "no audio / example 2",
     speakers: 2,
     nominalFps: 50,
+    durationSec: 10.22,
   },
   {
     file: "2-speakers-c.mp4",
@@ -48,6 +53,7 @@ export const SAMPLE_CLIPS: SampleClip[] = [
     subtitle: "no audio / example 3",
     speakers: 2,
     nominalFps: 24000 / 1001,
+    durationSec: 10.01,
   },
   {
     file: "2-speakers-d.mp4",
@@ -56,6 +62,7 @@ export const SAMPLE_CLIPS: SampleClip[] = [
     subtitle: "no audio / example 4",
     speakers: 2,
     nominalFps: 30000 / 1001,
+    durationSec: 7.808,
   },
   {
     file: "3-speakers.mp4",
@@ -64,5 +71,6 @@ export const SAMPLE_CLIPS: SampleClip[] = [
     subtitle: null,
     speakers: 3,
     nominalFps: 25,
+    durationSec: 11.733,
   },
 ];
