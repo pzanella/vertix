@@ -51,6 +51,8 @@ export interface FrameAccounting {
   droppedFramesEstimate: number | null;
   /** Frames that were presented but did not get their own callback: presentedFrames − (callbacks − 1). */
   missedCallbacks: number | null;
+  /** Callbacks whose presentedFrames equals the previous callback's — more than one render loop is running, so the run is not valid. */
+  duplicateCallbacks: number;
   fpsUsed: number | null;
   fpsSource: "nominal" | "estimated" | null;
   /** Increase of getVideoPlaybackQuality().droppedVideoFrames over the measured window, as a cross-check. */
@@ -134,6 +136,8 @@ export interface BenchmarkClipResult {
   video: { width: number; height: number; durationSec: number };
   /** Whether the video was muted at the end of the run (audio energy feeds the 3+ face layout decision). */
   muted: boolean;
+  /** True if the page was hidden at any point of the run — browsers throttle or stop frames then, so the run is not valid. */
+  pageHiddenDuringRun: boolean;
   summary: BenchmarkClipSummary;
   raw: BenchmarkClipRaw;
 }
@@ -342,6 +346,7 @@ export class BenchmarkRecorder implements BenchmarkProbe {
       warmupSec: this.warmupSec,
       video: { width: this.video.videoWidth, height: this.video.videoHeight, durationSec: this.video.duration },
       muted: this.video.muted,
+      pageHiddenDuringRun: false,
       summary: this.summarize(),
       raw: this.rawSamples(),
     };
@@ -441,6 +446,8 @@ export class BenchmarkRecorder implements BenchmarkProbe {
 
   private frameAccounting(mediaTime: Float64Array, presented: Float64Array): FrameAccounting {
     const callbacks = mediaTime.length;
+    let duplicateCallbacks = 0;
+    for (let i = 1; i < callbacks; i++) if (presented[i] === presented[i - 1]) duplicateCallbacks += 1;
     const quality = this.video.getVideoPlaybackQuality?.() ?? null;
     const qualityStart = this.qualityAtMeasureStart;
     const playbackQualityDroppedFrames =
@@ -455,6 +462,7 @@ export class BenchmarkRecorder implements BenchmarkProbe {
         expectedFrames: null,
         droppedFramesEstimate: null,
         missedCallbacks: null,
+        duplicateCallbacks,
         fpsUsed: null,
         fpsSource: null,
         playbackQualityDroppedFrames,
@@ -474,6 +482,7 @@ export class BenchmarkRecorder implements BenchmarkProbe {
       expectedFrames,
       droppedFramesEstimate: expectedFrames !== null ? Math.max(0, expectedFrames - presentedFrames) : null,
       missedCallbacks: presentedFrames - (callbacks - 1),
+      duplicateCallbacks,
       fpsUsed,
       fpsSource: fpsUsed === null ? null : this.nominalFps !== null ? "nominal" : "estimated",
       playbackQualityDroppedFrames,

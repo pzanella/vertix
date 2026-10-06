@@ -138,6 +138,11 @@ export async function runBenchmarkClip(
   options: BenchmarkClipOptions
 ): Promise<BenchmarkClipResult> {
   let recorder: BenchmarkRecorder | null = null;
+  let pageHidden = document.visibilityState !== "visible";
+  const onVisibilityChange = () => {
+    if (document.visibilityState !== "visible") pageHidden = true;
+  };
+  document.addEventListener("visibilitychange", onVisibilityChange);
   try {
     await playClip(engine, video, options, {
       onReady: () => {
@@ -155,8 +160,9 @@ export async function runBenchmarkClip(
     throw error;
   } finally {
     engine.setBenchmarkProbe(null);
+    document.removeEventListener("visibilitychange", onVisibilityChange);
   }
   const finished = recorder as BenchmarkRecorder | null;
   if (!finished) throw new Error("Benchmark clip ended before it started");
-  return finished.finish(options.mode);
+  return { ...finished.finish(options.mode), pageHiddenDuringRun: pageHidden };
 }

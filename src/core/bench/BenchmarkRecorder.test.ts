@@ -91,4 +91,13 @@ describe("BenchmarkRecorder", () => {
     expect(result.raw.frames.nowMs).toHaveLength(256);
     expect(result.summary.overflow.frames).toBe(44);
   });
+
+  it("counts duplicate callbacks for the same presented frame", () => {
+    const recorder = new BenchmarkRecorder({ clipName: "a", video: fakeVideo(10), warmupSec: 0, nominalFps: 25 });
+    for (let i = 0; i < 10; i++) {
+      recorder.recordFrame(i * 40, 1, i * 0.04, i);
+      recorder.recordFrame(i * 40 + 1, 1, i * 0.04, i);
+    }
+    expect(recorder.finish("9:16").summary.frames.duplicateCallbacks).toBe(10);
+  });
 });

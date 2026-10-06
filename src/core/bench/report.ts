@@ -188,7 +188,7 @@ export type BenchmarkTableRow = Record<string, string | number | null>;
 
 /** One compact row per clip, for console.table and the on-page results table. */
 export function benchmarkSummaryRows(report: BenchmarkReport): BenchmarkTableRow[] {
-  return report.results.map(({ clip, mode, summary }) => ({
+  return report.results.map(({ clip, mode, summary, pageHiddenDuringRun }) => ({
     clip,
     mode,
     "render fps": round(summary.effectiveFps, 1),
@@ -207,5 +207,7 @@ export function benchmarkSummaryRows(report: BenchmarkReport): BenchmarkTableRow
     "faces p50": round(summary.detection.keptFaces.p50, 1),
     "layout changes": summary.layoutChanges,
     "long tasks": summary.longTasks.supported ? summary.longTasks.count : "n/a",
+    "page hidden": pageHiddenDuringRun ? "yes (invalid)" : "no",
+    "duplicate callbacks": summary.frames.duplicateCallbacks,
   }));
 }
