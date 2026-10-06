@@ -6,49 +6,55 @@ means, how it is measured, and where the measurement stops being reliable.
 
 ## Running it
 
-Add `?bench=1` to the app URL:
+Open the app — locally after `npm run build && npm run preview`
+(`http://localhost:4173/`), or deployed at <https://pzanella.github.io/vertix/>
+— load any video (a sample clip is fine), then press the **gauge button** at
+the right end of the header. The button only appears once a video is loaded.
+It opens a panel (a popover on desktop, a bottom sheet on phones) with:
 
-- Local production build: `npm run build && npm run preview`, then open
-  `http://localhost:4173/?bench=1`.
-- Deployed: `https://pzanella.github.io/vertix/?bench=1`.
+- **Run suite**: the reproducible run. Use this for published numbers. It
+  replaces the video currently loaded with the sample clips.
+- **Run current clip**: rewinds and replays whatever is loaded (for example
+  your own file) and records it. There is no WASM warm-up before it, so run it
+  after the engine has already processed some video.
+- The run settings, editable before a run (see below), and an estimate of how
+  long the suite takes.
 
-A **Benchmark mode** panel appears under the header:
+When a run starts the panel closes so the player stays visible; the gauge's
+needle and ring show the progress, and tapping it shows the current stage and
+a **Stop** button. When the run ends the panel reopens on the results: summary
+cards, validity and precision warnings, a metric × clip table, the environment
+line, and **JSON** / **CSV** downloads. The summary is also printed with
+`console.table`, and the full report is available in DevTools as
+`window.vertixBenchmarkReport`.
 
-- **Run suite (6 clips)**: the reproducible run. Use this for published numbers.
-- **Run current clip**: rewinds and replays whatever is loaded (for example your
-  own file) and records it. There is no WASM warm-up before it, so run it after
-  the engine has already processed some video.
-- **Download JSON** / **Download CSV**: the last report.
+The engine's benchmark hooks only do work while a run is in progress: outside
+a run no recorder is attached and each hook is a single `null` check, so
+normal playback is unaffected by the button being there.
 
-When a run ends, the summary is also printed with `console.table`, and the
-full report is available in DevTools as `window.vertixBenchmarkReport`.
+### Settings
 
-Without `?bench=1` nothing is mounted. The engine's benchmark hooks are a
-single `null` check each.
+| Setting       | Default | Range      | Meaning                                                                                  |
+| ------------- | ------- | ---------- | ---------------------------------------------------------------------------------------- |
+| WASM warm-up  | 3 s     | 0–10 s     | Seconds of the first clip played **without recording** before the suite. 0 disables it. |
+| Clip warm-up  | 1 s     | 0–3 s      | Media-time seconds at the start of each clip that are recorded but excluded from stats. |
+| 16:9 baseline | on      | on / off   | Plays the first clip again in 16:9 (no detection) at the end of the suite.              |
 
-### URL parameters
-
-| Parameter    | Default | Meaning                                                                                       |
-| ------------ | ------- | --------------------------------------------------------------------------------------------- |
-| `bench`      | —       | `1` turns benchmark mode on.                                                                  |
-| `wasmWarmup` | `3`     | Seconds of the first clip played **without recording** before the suite. `0` disables it.    |
-| `clipWarmup` | `1`     | Media-time seconds at the start of each clip that are recorded but excluded from the summary. |
-| `baseline`   | `1`     | `0` skips the 16:9 baseline run at the end of the suite.                                      |
-
-Example: `?bench=1&wasmWarmup=5&clipWarmup=0.5`.
+The values used are stored in the report's `config`, so always quote them
+with the numbers.
 
 ### Protocol
 
 1. Collect the environment info. This includes a few milliseconds of
    busy-waiting to measure the timer resolution, so it happens before any
    playback.
-2. **WASM warm-up**: play the first `wasmWarmup` seconds of `1-speaker.mp4` in
+2. **WASM warm-up**: play the first *WASM warm-up* seconds of `1-speaker.mp4` in
    9:16, without recording. The first detection calls are slower (WASM
    instantiation, tract model optimization on first run, JIT tiering, worker
    start-up). This step keeps them out of the data.
 3. For each of the six clips in `public/samples/`, in order: wait 1 s, load
    the clip, and play it in 9:16 from start to end at 1× speed. Samples from
-   the first `clipWarmup` seconds of media time are flagged `warmup = 1`. They
+   the first *clip warm-up* seconds of media time are flagged `warmup = 1`. They
    stay in the raw data but are excluded from every summary.
 4. **Baseline** (optional): play `1-speaker.mp4` again in 16:9 mode. That mode
    runs no detection and draws the full frame unchanged.
@@ -59,9 +65,9 @@ Example: `?bench=1&wasmWarmup=5&clipWarmup=0.5`.
   `npm run dev`: dev mode is unminified and runs extra React checks.
 - Keep the tab **visible and in the foreground** for the whole run. Browsers
   stop presenting video frames in hidden tabs. A run where the page was hidden
-  is flagged `pageHiddenDuringRun` ("page hidden: yes (invalid)").
-- **Reload the page before a run**, and do not play anything first (see
-  "Duplicate callbacks" below).
+  is flagged `pageHiddenDuringRun` and shown as invalid in the results.
+- **Reload the page, load one video and start the run from there.** Do not
+  use "Change source" before the run (see "Duplicate render loops" below).
 - Close other tabs and apps, and plug in laptops. On phones, disable battery
   saver and let the device cool down between runs.
 - Run the suite at least 3 times and report the spread, not the best run.
@@ -254,7 +260,7 @@ results[] }`. Each result contains `summary` and `raw`, and `raw` holds
   - per frame: 2 `performance.now()` calls and one recorder call
   - per detection: 3–4 `performance.now()` calls on the main thread and 2 in
     the worker
-- Without `?bench=1`, no recorder exists. The worker still receives a
+- Outside a run no recorder exists. The worker still receives a
   `measureReadback: false` flag and skips its timers.
 
 ## Timer precision
@@ -298,9 +304,9 @@ What this means for the metrics:
   - With fewer than about 100 samples, p99 is effectively the maximum.
   - Prefer p50 and p95, and pool several runs for tail percentiles.
 - **Clip warm-up.** 1 s is meant to cover player start-up only. The WASM
-  warm-up happens once, before the suite. Choosing a different `clipWarmup`
+  warm-up happens once, before the suite. Choosing a different clip warm-up
   changes which samples are counted, so always quote the value used. It is in
-  `config`.
+  the report's `config`.
 - **requestVideoFrameCallback support.** The engine itself needs it: Chromium
   83+, Safari 15.4+, Firefox 132+. On browsers without it nothing renders, so
   there is nothing to measure.
@@ -311,6 +317,7 @@ What this means for the metrics:
 - **Duplicate render loops.** In the current app, playing one source,
   pressing "Change source" and playing another leaves two render loops
   running: every frame is drawn twice, and detection runs about twice as often.
-  This is an existing app bug, outside the benchmark. A suite started on a
-  freshly loaded page is not affected, because it keeps the player mounted
-  between clips. If it happens, the `duplicateCallbacks` field catches it.
+  This is an existing app bug, outside the benchmark. A suite started right
+  after the first video of a freshly loaded page is not affected, because it
+  keeps the player mounted between clips. If it happens, the
+  `duplicateCallbacks` field catches it and the run is marked invalid.

@@ -154,8 +154,8 @@ about this one.
 │   │       └── wasm_bg.wasm
 │   ├── hooks/
 │   │   ├── useWasmReframe.ts       # Thin React adapter: VertixEngine + Shaka Player
-│   │   └── useBenchmark.ts         # Runs benchmark suites (?bench=1) and keeps the report
-│   ├── components/Benchmark/       # Benchmark panel and ?bench=1 URL config
+│   │   └── useBenchmark.ts         # Runs benchmark suites and keeps the report
+│   ├── components/Benchmark/       # Gauge button, run/results panel, benchmark settings
 │   └── components/Player/
 │       ├── Canvas.tsx                 # <canvas> the video is drawn into, with an overlay slot
 │       ├── Controls.tsx               # Play/pause/replay, mute, mode toggle, scrub bar
@@ -289,21 +289,21 @@ Sourced from [Pexels](https://www.pexels.com/), free to use under the
 
 ## Performance
 
-Vertix has a built-in benchmark mode. Add `?bench=1` to the URL — for
-example <https://pzanella.github.io/vertix/?bench=1>, or
-`http://localhost:4173/?bench=1` after `npm run build && npm run preview` —
-then press **Run suite (6 clips)**. It plays a short unrecorded WASM warm-up,
+Vertix has a built-in benchmark. Load any video (a sample clip is fine), then
+press the **gauge button** that appears at the right end of the header (on <https://pzanella.github.io/vertix/>, or on
+`http://localhost:4173/` after `npm run build && npm run preview`), adjust the
+warm-ups if needed, then press **Run suite**. It plays a short unrecorded WASM warm-up,
 then every sample clip from start to end at normal speed in 9:16, then one
-16:9 baseline run without detection. At the end it prints a summary with
-`console.table` and offers the results as JSON (environment + summary + raw
-samples) and CSV (raw samples).
+16:9 baseline run without detection. At the end the panel reopens on the
+results, with JSON (environment + summary + raw samples) and CSV (raw samples)
+downloads; the summary is also printed with `console.table`.
 
 Keep the tab visible during the run and start from a freshly loaded page.
 What each metric measures, how, and its limits (timer precision,
 `requestVideoFrameCallback` support, warm-up) are in
 [`docs/benchmark.md`](docs/benchmark.md).
 
-Results (p50 / p95, production build, `clipWarmup=1`, `wasmWarmup=3`):
+Results (p50 / p95, production build, default settings: 3 s WASM warm-up, 1 s clip warm-up):
 
 | Device / browser | Render FPS | Dropped frames | Detection total (ms) | WASM call (ms) | Detection rate (Hz) | Skipped detections | Long tasks |
 | ---------------- | ---------- | -------------- | -------------------- | -------------- | ------------------- | ------------------ | ---------- |
