@@ -405,6 +405,11 @@ export class VertixEngine {
   private blurCanvas: OffscreenCanvas;
   private frameCounter = 0;
   private running = false;
+  // The one pending requestVideoFrameCallback of the render loop. detach()
+  // cancels it: otherwise a callback registered before a re-attach (e.g.
+  // after "Change source" mounts a new canvas) would keep firing next to
+  // the new loop's, drawing every frame twice and doubling detection.
+  private frameCallbackId: number | null = null;
 
   private mode: VertixMode = "9:16";
   private meta: VertixMeta | null = null;
@@ -512,6 +517,8 @@ export class VertixEngine {
     this.video.removeEventListener("play", this.boundOnPlay);
     this.video.removeEventListener("seeking", this.boundOnSeeking);
     this.video.removeEventListener("loadedmetadata", this.boundOnLoadedMetadata);
+    if (this.frameCallbackId !== null) this.video.cancelVideoFrameCallback(this.frameCallbackId);
+    this.frameCallbackId = null;
     this.running = false;
     this.video = null;
     this.canvas = null;
@@ -659,7 +666,11 @@ export class VertixEngine {
   private startLoop(): void {
     if (this.running || !this.video) return;
     this.running = true;
-    this.video.requestVideoFrameCallback(this.boundOnVideoFrame);
+    this.scheduleNextFrame(this.video);
+  }
+
+  private scheduleNextFrame(video: HTMLVideoElement): void {
+    this.frameCallbackId = video.requestVideoFrameCallback(this.boundOnVideoFrame);
   }
 
   /**
@@ -903,6 +914,7 @@ export class VertixEngine {
   // through any framework state) so playback stays perfectly in sync with
   // audio.
   private onVideoFrame(now: DOMHighResTimeStamp, metadata: VideoFrameCallbackMetadata): void {
+    this.frameCallbackId = null;
     const video = this.video;
     const canvas = this.canvas;
     if (!video || !canvas) {
@@ -917,7 +929,7 @@ export class VertixEngine {
       // synchronous with the "play" event) — treating that as a final
       // stop used to leave this loop off for good while the video kept
       // playing fine, a canvas freeze that looked like a real hang.
-      video.requestVideoFrameCallback(this.boundOnVideoFrame);
+      this.scheduleNextFrame(video);
       return;
     }
 
@@ -1083,6 +1095,6 @@ export class VertixEngine {
     }
 
     if (probe) probe.recordFrame(now, performance.now() - workStart, metadata.mediaTime, metadata.presentedFrames);
-    video.requestVideoFrameCallback(this.boundOnVideoFrame);
+    this.scheduleNextFrame(video);
   }
 }

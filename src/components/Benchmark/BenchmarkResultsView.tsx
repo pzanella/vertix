@@ -169,7 +169,7 @@ export function BenchmarkResultsView({
             <div role="listitem">
               <Callout tone="danger">
                 More than one render loop was running (duplicate frame callbacks), so {invalidCount} clip(s) are not
-                valid. Reload the page and run the benchmark before playing anything else.
+                valid. Reload the page and run the benchmark again.
               </Callout>
             </div>
           )}

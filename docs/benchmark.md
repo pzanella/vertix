@@ -66,8 +66,8 @@ with the numbers.
 - Keep the tab **visible and in the foreground** for the whole run. Browsers
   stop presenting video frames in hidden tabs. A run where the page was hidden
   is flagged `pageHiddenDuringRun` and shown as invalid in the results.
-- **Reload the page, load one video and start the run from there.** Do not
-  use "Change source" before the run (see "Duplicate render loops" below).
+- **Start from a freshly loaded page** when collecting numbers to publish, so
+  nothing from earlier playback (caches, JIT state, GC pressure) skews them.
 - Close other tabs and apps, and plug in laptops. On phones, disable battery
   saver and let the device cool down between runs.
 - Run the suite at least 3 times and report the spread, not the best run.
@@ -314,10 +314,8 @@ What this means for the metrics:
   `performance.now()` clocks. Only durations are mixed.
 - **Thermal and power state.** Phones throttle under sustained load; a second
   run right after the first one may be slower. Write down the device state.
-- **Duplicate render loops.** In the current app, playing one source,
-  pressing "Change source" and playing another leaves two render loops
-  running: every frame is drawn twice, and detection runs about twice as often.
-  This is an existing app bug, outside the benchmark. A suite started right
-  after the first video of a freshly loaded page is not affected, because it
-  keeps the player mounted between clips. If it happens, the
-  `duplicateCallbacks` field catches it and the run is marked invalid.
+- **Duplicate render loops.** Older versions of the app left a second render
+  loop running after "Change source" (every frame drawn twice, detection about
+  twice as often). The engine now cancels its pending frame callback when it
+  is re-attached, so this should not happen. `duplicateCallbacks` stays as a
+  guard: if it is ever above 0, the run is marked invalid.
