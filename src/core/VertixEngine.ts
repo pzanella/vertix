@@ -9,6 +9,7 @@ import {
   type PaneRect,
   type PaneTarget,
 } from "./layoutEngine";
+import type { BenchmarkProbe } from "./bench/BenchmarkRecorder";
 
 /**
  * Vertix's headless reframe engine — face detection (WASM/ONNX), the
@@ -152,7 +153,10 @@ let sharedWorker: Worker | null = null;
 let sharedWorkerReady = false;
 let sharedWorkerLoadPromise: Promise<boolean> | null = null;
 let nextDetectionRequestId = 0;
-const pendingDetectionCallbacks = new Map<number, (facesFlat: Float64Array, tookMs: number) => void>();
+const pendingDetectionCallbacks = new Map<
+  number,
+  (facesFlat: Float64Array, tookMs: number, readbackMs: number) => void
+>();
 
 /**
  * Creates the shared worker on first call and waits for it to report
@@ -212,6 +216,7 @@ function getSharedDetectionWorker(): Promise<boolean> {
         requestId?: number;
         faces?: ArrayBuffer;
         tookMs?: number;
+        readbackMs?: number;
         message?: string;
       };
       if (msg.type === "ready") {
@@ -229,7 +234,7 @@ function getSharedDetectionWorker(): Promise<boolean> {
       if (msg.type === "result" && msg.requestId !== undefined) {
         const callback = pendingDetectionCallbacks.get(msg.requestId);
         pendingDetectionCallbacks.delete(msg.requestId);
-        callback?.(new Float64Array(msg.faces!), msg.tookMs ?? 0);
+        callback?.(new Float64Array(msg.faces!), msg.tookMs ?? 0, msg.readbackMs ?? 0);
       }
     };
     worker.onerror = (e: ErrorEvent) => {
@@ -443,6 +448,10 @@ export class VertixEngine {
   private transitionSnapshotCanvas: OffscreenCanvas | null = null;
   private transitionStart: number | null = null;
 
+  // Benchmark mode only (see src/core/bench). Null in normal playback, where
+  // every instrumentation point below reduces to a single null check.
+  private benchmarkProbe: BenchmarkProbe | null = null;
+
   private boundOnVideoFrame = this.onVideoFrame.bind(this);
   private boundOnPlay = () => this.startLoop();
   private boundOnSeeking = () => this.resetTrackingState();
@@ -530,6 +539,11 @@ export class VertixEngine {
     this.engine?.reset();
     this.resetTrackingState();
     this.emitState();
+  }
+
+  /** Starts (or, with null, stops) reporting per-frame and per-detection timings to `probe`. Does not change rendering or detection. */
+  setBenchmarkProbe(probe: BenchmarkProbe | null): void {
+    this.benchmarkProbe = probe;
   }
 
   getMode(): VertixMode {
@@ -730,18 +744,35 @@ export class VertixEngine {
   }
 
   private dispatchDetection(video: HTMLVideoElement, srcW: number, srcH: number, cropW: number, cropH: number): void {
+    const probe = this.benchmarkProbe;
+    const dispatchedAt = probe ? performance.now() : 0;
     const audioEnergy = this.audioMonitor.energy();
 
     if (sharedWorkerReady && sharedWorker) {
       this.detectionInFlight = true;
       const generation = this.detectionRequestGeneration;
       const requestId = nextDetectionRequestId++;
-      pendingDetectionCallbacks.set(requestId, (facesFlat, tookMs) => {
+      let bitmapReadyAt = 0;
+      pendingDetectionCallbacks.set(requestId, (facesFlat, tookMs, readbackMs) => {
         this.detectionInFlight = false;
         // Belongs to a frame from before a reset (seek, mode change) —
         // discard it instead of feeding stale positions into the layout.
         if (generation !== this.detectionRequestGeneration) return;
+        const postStart = probe ? performance.now() : 0;
         this.processDetectionResult(facesFlat, audioEnergy, srcW, srcH, cropW, cropH, "worker", tookMs);
+        if (probe) {
+          const end = performance.now();
+          probe.recordDetection(
+            "worker",
+            bitmapReadyAt - dispatchedAt,
+            readbackMs,
+            tookMs,
+            end - postStart,
+            end - dispatchedAt,
+            facesFlat.length / 6,
+            this.lastFaces.length
+          );
+        }
       });
       // Resizing via createImageBitmap instead of drawImage+getImageData
       // here keeps the main thread from doing a synchronous GPU→CPU
@@ -749,11 +780,12 @@ export class VertixEngine {
       // (see faceDetectionWorker.ts).
       createImageBitmap(video, { resizeWidth: FACE_W, resizeHeight: FACE_H, resizeQuality: "low" })
         .then((bitmap) => {
+          if (probe) bitmapReadyAt = performance.now();
           if (generation !== this.detectionRequestGeneration || !sharedWorker) {
             bitmap.close();
             return;
           }
-          sharedWorker.postMessage({ type: "detect", requestId, bitmap }, [bitmap]);
+          sharedWorker.postMessage({ type: "detect", requestId, bitmap, measureReadback: probe !== null }, [bitmap]);
         })
         .catch(() => {
           this.detectionInFlight = false;
@@ -768,11 +800,25 @@ export class VertixEngine {
       this.ensureWasm();
       if (!this.engine) return;
       this.faceCtx.drawImage(video, 0, 0, FACE_W, FACE_H);
+      const drawnAt = probe ? performance.now() : 0;
       const faceImageData = this.faceCtx.getImageData(0, 0, FACE_W, FACE_H);
       const start = performance.now();
       const facesFlat = this.engine.update_faces(new Uint8Array(faceImageData.data.buffer));
       const tookMs = performance.now() - start;
       this.processDetectionResult(facesFlat, audioEnergy, srcW, srcH, cropW, cropH, "main-thread", tookMs);
+      if (probe) {
+        const end = performance.now();
+        probe.recordDetection(
+          "main-thread",
+          drawnAt - dispatchedAt,
+          start - drawnAt,
+          tookMs,
+          end - start - tookMs,
+          end - dispatchedAt,
+          facesFlat.length / 6,
+          this.lastFaces.length
+        );
+      }
     }
   }
 
@@ -875,6 +921,9 @@ export class VertixEngine {
       return;
     }
 
+    const probe = this.benchmarkProbe;
+    const workStart = probe ? performance.now() : 0;
+
     // FPS/frame-time, from the actual decoded-frame presentation
     // timestamps rVFC provides — smoothed every frame, pushed to
     // subscribers (and sampled into the trend history) only a few times a
@@ -939,8 +988,9 @@ export class VertixEngine {
       // committed once per debounced face-count change and held fixed;
       // within it, each pane's crop only drifts smoothly toward its target.
       this.frameCounter += 1;
-      if (this.frameCounter % FACE_DETECT_INTERVAL === 0 && !this.detectionInFlight) {
-        this.dispatchDetection(video, srcW, srcH, cropW, cropH);
+      if (this.frameCounter % FACE_DETECT_INTERVAL === 0) {
+        if (!this.detectionInFlight) this.dispatchDetection(video, srcW, srcH, cropW, cropH);
+        else probe?.recordSkippedDetection();
       }
 
       const targetSignature = this.stablePersonCount === 0 ? "broll" : `speakers:${this.stablePersonCount}`;
@@ -951,6 +1001,7 @@ export class VertixEngine {
         // commit — there's no prior frame to fade from.
         if (this.layoutSignature !== "") {
           this.sceneSwitchCount += 1;
+          probe?.recordLayoutChange(now);
           if (this.transitionStart === null) {
             if (
               !this.transitionSnapshotCanvas ||
@@ -1031,6 +1082,7 @@ export class VertixEngine {
       }
     }
 
+    if (probe) probe.recordFrame(now, performance.now() - workStart, metadata.mediaTime, metadata.presentedFrames);
     video.requestVideoFrameCallback(this.boundOnVideoFrame);
   }
 }

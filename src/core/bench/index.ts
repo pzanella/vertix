@@ -25,4 +25,6 @@ export {
   PRECISION_WARNING_FACTOR,
 } from "./report";
 export type { BenchmarkConfig, BenchmarkReport, BenchmarkTableRow, PrecisionWarning } from "./report";
+export { runBenchmarkClip, runUnrecordedWarmup } from "./runClip";
+export type { BenchmarkClipOptions, ClipPlaybackOptions } from "./runClip";
 export * from "./stats";
