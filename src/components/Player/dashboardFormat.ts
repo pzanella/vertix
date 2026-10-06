@@ -1,6 +1,6 @@
 // Plain formatting/tone helpers shared between AnalyticsDashboard and
-// StreamHealthOverlay — split out from dashboardPrimitives.tsx (components
-// only) so that file stays a clean Fast Refresh boundary.
+// StreamHealthOverlay — kept apart from MetricRow/MetricSection (components
+// only) so those files stay clean Fast Refresh boundaries.
 
 export const TONE_CLASS = {
   default: "text-neutral-200",
