@@ -64,8 +64,8 @@ manual pixel copying.
   for a real, intentional reposition, not every small gesture.
 - **Smooth transitions** — layout changes (single → split → b-roll, ...)
   cross-dissolve instead of cutting instantly.
-- **Live analytics dashboard** — FPS, detection confidence, motion
-  activity, render latency, detection-worker latency, and main-thread
+- **Live analytics dashboard** — frame callback rate, detection confidence,
+  motion activity, frame interval, detection-worker latency, and main-thread
   stalls, each with a live trend chart.
 - **Two views** — the original 16:9, or the reframed 9:16 — toggle at any
   time, even mid-playback.

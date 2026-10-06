@@ -36,9 +36,9 @@ export interface VertixMeta {
 }
 
 export interface VertixMetrics {
-  /** Smoothed frames-per-second, measured from actual decoded-frame timestamps. */
+  /** requestVideoFrameCallback calls per second: 1000 / (interval between consecutive callbacks' `now`), EMA-smoothed (alpha 0.15). Not the source frame rate, and not render cost. */
   fps: number;
-  /** Smoothed per-frame render latency, in ms. */
+  /** Interval between consecutive requestVideoFrameCallback calls, in ms, EMA-smoothed (alpha 0.15). Not render latency: it reads ~40ms at 25fps however cheap rendering is. */
   frameTimeMs: number;
   /** Bounding-box size (% of frame, max of width/height) of each current valid speaker face. */
   faceSizes: number[];
@@ -924,10 +924,10 @@ export class VertixEngine {
     const probe = this.benchmarkProbe;
     const workStart = probe ? performance.now() : 0;
 
-    // FPS/frame-time, from the actual decoded-frame presentation
-    // timestamps rVFC provides — smoothed every frame, pushed to
-    // subscribers (and sampled into the trend history) only a few times a
-    // second.
+    // Callback rate and interval, from the `now` timestamp rVFC passes to
+    // each callback (when the callback runs, not the frame's media time) —
+    // EMA-smoothed every frame, pushed to subscribers (and sampled into the
+    // trend history) only a few times a second.
     if (this.lastFrameTime !== null) {
       const dt = now - this.lastFrameTime;
       if (dt > 0) {
