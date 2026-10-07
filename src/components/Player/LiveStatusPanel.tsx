@@ -34,7 +34,7 @@ export const LiveStatusPanel = memo(function LiveStatusPanel({
   const bucket = classifyLayout(mode, speakerCount, isTransitioning);
 
   return (
-    <div className="flex items-center gap-2 px-3 py-1.5 rounded-full bg-neutral-900 border border-neutral-800 text-base text-neutral-300 w-fit">
+    <div className="flex items-center gap-2 px-2.5 py-1 rounded-full bg-neutral-900 border border-neutral-800 text-xs text-neutral-300 w-fit">
       <span
         className={`w-1.5 h-1.5 rounded-full transition-colors duration-300 ${DOT[bucket]} ${isTransitioning ? "animate-pulse" : ""}`}
       />

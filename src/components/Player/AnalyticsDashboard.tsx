@@ -3,7 +3,8 @@ import type { ReframeMeta, ReframeMetrics, ReframeMode } from "../../hooks/useWa
 import { classifyLayout } from "./layoutStatus";
 import { LiveAnalyticsCharts } from "./LiveAnalyticsCharts";
 import { TONE_CLASS } from "./dashboardFormat";
-import { Row, Section } from "./dashboardPrimitives";
+import { MetricRow } from "./MetricRow";
+import { MetricSection } from "./MetricSection";
 
 interface AnalyticsDashboardProps {
   mode: ReframeMode;
@@ -63,8 +64,8 @@ export const AnalyticsDashboard = memo(function AnalyticsDashboard({
   const currentTime = duration * progress;
 
   return (
-    <div className="flex flex-col gap-4 p-4 rounded-xl bg-neutral-950 border border-neutral-800/60 shadow-[inset_0_1px_0_0_rgba(255,255,255,0.04),0_8px_24px_-12px_rgba(0,0,0,0.6)] w-full md:w-[28rem] md:shrink-0 md:max-h-full md:overflow-y-auto">
-      <h2 className="text-base font-display font-semibold text-neutral-300 tracking-wide">
+    <aside className="flex flex-col gap-3 w-full md:w-[22rem] md:shrink-0 md:h-full md:overflow-y-auto md:overscroll-contain md:pr-2 [scrollbar-width:thin] [scrollbar-color:theme(colors.neutral.800)_transparent]">
+      <h2 className="md:sticky md:top-0 md:z-10 md:bg-neutral-950 md:pb-1 text-sm font-display font-semibold text-neutral-300 tracking-wide">
         Live <span className="text-brand-400">Analytics</span>
       </h2>
 
@@ -72,41 +73,44 @@ export const AnalyticsDashboard = memo(function AnalyticsDashboard({
         <LiveAnalyticsCharts metrics={metrics} />
       </div>
 
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-x-4 gap-y-8">
-        <Section title="Video">
-          <Row label="Resolution" value={meta ? `${meta.width}×${meta.height}` : "—"} />
-          <Row label="Aspect" value={mode} />
-          <Row label="Time" value={`${formatTime(currentTime)} / ${formatTime(duration)}`} />
-        </Section>
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-x-4 gap-y-4">
+        <MetricSection title="Video">
+          <MetricRow label="Resolution" value={meta ? `${meta.width}×${meta.height}` : "—"} />
+          <MetricRow label="Aspect" value={mode} />
+          <MetricRow label="Time" value={`${formatTime(currentTime)} / ${formatTime(duration)}`} />
+        </MetricSection>
 
-        <Section title="Detection">
-          <Row label="Speakers" value={String(speakerCount)} />
-          <Row label="Layout" value={LAYOUT_LABEL[bucket](speakerCount)} />
-          <Row
+        <MetricSection title="Detection">
+          <MetricRow label="Speakers" value={String(speakerCount)} />
+          <MetricRow label="Layout" value={LAYOUT_LABEL[bucket](speakerCount)} />
+          <MetricRow
             label="Crop Scale"
             value={metrics.cropScaleFactor !== null ? `${metrics.cropScaleFactor.toFixed(2)}×` : "—"}
           />
-        </Section>
+        </MetricSection>
 
-        <Section title="Face Boxes">
-          <Row
+        <MetricSection title="Face Boxes">
+          <MetricRow
             label="Sizes"
             value={metrics.faceSizes.length > 0 ? metrics.faceSizes.map((s) => `${s.toFixed(1)}%`).join(", ") : "—"}
           />
-        </Section>
+        </MetricSection>
 
-        <Section title="Voice Activity">
-          <Row label="Audio Track" value={metrics.audioAvailable ? "readable" : "unavailable"} />
-          <Row label="Energy" value={metrics.audioEnergy !== null ? metrics.audioEnergy.toFixed(3) : "—"} />
-        </Section>
+        <MetricSection title="Voice Activity">
+          <MetricRow label="Audio Track" value={metrics.audioAvailable ? "readable" : "unavailable"} />
+          <MetricRow label="Energy" value={metrics.audioEnergy !== null ? metrics.audioEnergy.toFixed(3) : "—"} />
+        </MetricSection>
 
-        <Section title="Scene">
-          <Row label="Stable For" value={metrics.layoutCommittedAt !== null ? `${stableSeconds.toFixed(1)}s` : "—"} />
-          <Row label="Switch Count" value={String(metrics.sceneSwitchCount)} />
-        </Section>
+        <MetricSection title="Scene">
+          <MetricRow
+            label="Stable For"
+            value={metrics.layoutCommittedAt !== null ? `${stableSeconds.toFixed(1)}s` : "—"}
+          />
+          <MetricRow label="Switch Count" value={String(metrics.sceneSwitchCount)} />
+        </MetricSection>
 
-        <Section title="Performance">
-          <Row
+        <MetricSection title="Performance">
+          <MetricRow
             label="Detection"
             value={
               metrics.detectionMode === "worker"
@@ -119,13 +123,13 @@ export const AnalyticsDashboard = memo(function AnalyticsDashboard({
               metrics.detectionMode === "worker" ? "good" : metrics.detectionMode === "main-thread" ? "warn" : "default"
             }
           />
-          <Row
+          <MetricRow
             label="Main Thread"
             value={metrics.longTasksSupported ? `${metrics.longTaskMs.toFixed(0)}ms / 3s` : "n/a"}
             tone={metrics.longTasksSupported ? longTaskTone(metrics.longTaskMs) : "default"}
           />
-        </Section>
+        </MetricSection>
       </div>
-    </div>
+    </aside>
   );
 });

@@ -92,28 +92,28 @@ export const Controls = memo(function Controls({
 
       <button
         onClick={() => onSetMode(mode === "16:9" ? "9:16" : "16:9")}
-        className="shrink-0 relative flex h-10 w-32 rounded-full bg-neutral-800 border border-neutral-700 transition"
+        className="shrink-0 relative flex h-8 w-24 rounded-full bg-neutral-800 border border-neutral-700 transition"
         aria-label={`Switch to ${mode === "16:9" ? "9:16" : "16:9"}`}
       >
-        {/* Positioned purely from its own inset (inset-y-1 left-1), not
+        {/* Positioned purely from its own inset (inset-y-0.5 left-0.5), not
             from the button's own padding — so it can't drift out of sync
             with the label cells below, which are centered the same way
             (each exactly half the button via flex-1), regardless of any
             padding tweak on the button itself. */}
         <span
-          className={`absolute inset-y-1 left-1 w-[calc(50%-4px)] rounded-full bg-brand-600 transition-transform duration-200 ease-out ${
+          className={`absolute inset-y-0.5 left-0.5 w-[calc(50%-2px)] rounded-full bg-brand-600 transition-transform duration-200 ease-out ${
             mode === "9:16" ? "translate-x-full" : "translate-x-0"
           }`}
         />
         <span
-          className={`relative z-10 flex-1 flex items-center justify-center text-base font-medium whitespace-nowrap transition-colors ${
+          className={`relative z-10 flex-1 flex items-center justify-center text-xs font-semibold tabular-nums whitespace-nowrap transition-colors ${
             mode === "16:9" ? "text-white" : "text-neutral-500"
           }`}
         >
           16:9
         </span>
         <span
-          className={`relative z-10 flex-1 flex items-center justify-center text-base font-medium whitespace-nowrap transition-colors ${
+          className={`relative z-10 flex-1 flex items-center justify-center text-xs font-semibold tabular-nums whitespace-nowrap transition-colors ${
             mode === "9:16" ? "text-white" : "text-neutral-500"
           }`}
         >

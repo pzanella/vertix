@@ -15,7 +15,7 @@ interface ChartSpec {
 /** A minimal inline SVG trend line — no charting library, just a polyline scaled to its own data range. */
 function Sparkline({ data, color }: { data: number[]; color: string }) {
   const width = 220;
-  const height = 44;
+  const height = 32;
 
   if (data.length < 2) {
     return (
@@ -74,7 +74,7 @@ function Sparkline({ data, color }: { data: number[]; color: string }) {
 function ChartRow({ label, color, data, value }: ChartSpec) {
   return (
     <div className="flex flex-col gap-1">
-      <div className="flex items-baseline justify-between text-base">
+      <div className="flex items-baseline justify-between text-xs">
         <span className="text-neutral-500">{label}</span>
         <span className="font-mono tabular-nums" style={{ color }}>
           {value}
@@ -98,7 +98,7 @@ const COLOR = {
 
 export const LiveAnalyticsCharts = memo(function LiveAnalyticsCharts({ metrics }: LiveAnalyticsChartsProps) {
   return (
-    <div className="flex flex-col gap-4">
+    <div className="flex flex-col gap-3">
       <ChartRow
         label="Frame Callback Rate (EMA)"
         color={COLOR.fps}

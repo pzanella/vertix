@@ -1,7 +1,8 @@
 import { memo, useState } from "react";
 import type { StreamHealth } from "../../hooks/useWasmReframe";
 import { bufferHealthTone, droppedFramesTone, formatBytes } from "./dashboardFormat";
-import { Row, Section } from "./dashboardPrimitives";
+import { MetricRow } from "./MetricRow";
+import { MetricSection } from "./MetricSection";
 
 interface StreamHealthOverlayProps {
   streamHealth: StreamHealth | null;
@@ -62,31 +63,34 @@ export const StreamHealthOverlay = memo(function StreamHealthOverlay({ streamHea
       {open && (
         <div className="w-56 rounded-lg border border-neutral-800/60 bg-neutral-950/95 backdrop-blur-sm shadow-[0_8px_24px_-12px_rgba(0,0,0,0.8)] p-3">
           {manifestType === "LOCAL" ? (
-            <p className="text-base text-neutral-600">Local file — no network metrics.</p>
+            <p className="text-xs text-neutral-600">Local file — no network metrics.</p>
           ) : (
-            <Section title="Stream Health">
-              <Row
+            <MetricSection title="Stream Health">
+              <MetricRow
                 label="Buffer Health"
                 value={`${bufferHealthSec.toFixed(1)}s ahead`}
                 tone={bufferHealthTone(bufferHealthSec)}
               />
               {isAdaptive && bandwidthEstimateKbps !== null && (
-                <Row label="Bandwidth Est." value={`${bandwidthEstimateKbps} kbps`} />
+                <MetricRow label="Bandwidth Est." value={`${bandwidthEstimateKbps} kbps`} />
               )}
-              <Row
+              <MetricRow
                 label="Dropped Frames"
                 value={`${droppedFrames} / ${totalDecodedFrames}`}
                 tone={droppedFramesTone(droppedFrames, totalDecodedFrames)}
               />
               {isAdaptive && activeVariant && (
-                <Row label="Active Variant" value={`${activeVariant.height}p @ ${activeVariant.bitrateKbps}kbps`} />
+                <MetricRow
+                  label="Active Variant"
+                  value={`${activeVariant.height}p @ ${activeVariant.bitrateKbps}kbps`}
+                />
               )}
-              <Row label="Downloaded" value={formatBytes(bytesDownloaded)} />
-              <Row label="Stalls" value={String(stallsDetected)} tone={stallsDetected > 0 ? "warn" : "default"} />
+              <MetricRow label="Downloaded" value={formatBytes(bytesDownloaded)} />
+              <MetricRow label="Stalls" value={String(stallsDetected)} tone={stallsDetected > 0 ? "warn" : "default"} />
               {isAdaptive && qualitySwitches !== null && (
-                <Row label="Quality Switches" value={String(qualitySwitches)} />
+                <MetricRow label="Quality Switches" value={String(qualitySwitches)} />
               )}
-            </Section>
+            </MetricSection>
           )}
         </div>
       )}

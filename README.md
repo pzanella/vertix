@@ -168,7 +168,8 @@ about this one.
 │       ├── AnalyticsDashboard.tsx     # Live metrics sidebar panel
 │       ├── LiveAnalyticsCharts.tsx    # Sparkline trend charts
 │       ├── StreamHealthOverlay.tsx    # Network-telemetry button+panel overlaid on the video
-│       ├── dashboardPrimitives.tsx    # Shared Section/Row components
+│       ├── MetricSection.tsx          # Titled group of metric rows (dashboard + stream health)
+│       ├── MetricRow.tsx              # One label/value metric line
 │       └── dashboardFormat.ts         # Shared formatting/tone helpers
 ├── wasm/
 │   ├── Cargo.toml
