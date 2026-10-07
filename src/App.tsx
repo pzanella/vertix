@@ -10,6 +10,7 @@ import {
   Timeline,
   UrlSourceInput,
 } from "./components/Player";
+import { BenchmarkLauncher } from "./components/Benchmark";
 import { useWasmReframe } from "./hooks/useWasmReframe";
 
 export default function App() {
@@ -35,10 +36,12 @@ export default function App() {
     isBuffering,
     streamHealth,
     changeSource,
+    getEngine,
   } = useWasmReframe();
 
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const [dragging, setDragging] = useState(false);
+  const [benchmarkRunning, setBenchmarkRunning] = useState(false);
 
   const openFile = useCallback(
     (file: File | undefined) => {
@@ -62,6 +65,10 @@ export default function App() {
 
   const playing = state === "playing";
   const isActive = state === "ready" || state === "playing" || state === "paused" || state === "ended";
+  // A benchmark run switches sources back to back; keeping the player (and
+  // its canvas) mounted through each "loading" state avoids re-attaching
+  // the engine to a fresh canvas between clips.
+  const showPlayer = isActive || benchmarkRunning;
 
   // Memoized so Controls (memoized itself) only re-renders when the
   // timeline actually needs to — otherwise passing JSX inline as a prop
@@ -79,16 +86,16 @@ export default function App() {
 
   return (
     <div className="min-h-screen md:h-screen w-screen flex flex-col overflow-y-auto md:overflow-hidden p-4 gap-3">
-      <header className="shrink-0 flex items-center justify-between gap-2 border-b border-white/5 pb-3">
-        <div className="flex items-center gap-2">
+      <header className="shrink-0 flex flex-wrap items-center gap-x-3 gap-y-2 border-b border-white/5 pb-3">
+        <div className="flex flex-1 min-w-0 items-center gap-2">
           <svg viewBox="0 0 24 24" className="w-5 h-5 shrink-0" fill="none" stroke="currentColor" strokeWidth={1.5}>
             <rect x="2" y="6" width="14" height="8" rx="1" className="text-neutral-600" />
             <rect x="9" y="3" width="7" height="18" rx="1" className="text-brand-400" />
           </svg>
-          <h1 className="text-lg font-display font-semibold tracking-tight">
+          <h1 className="shrink-0 text-lg font-display font-semibold tracking-tight">
             <span className="text-brand-400">Ver</span>tix
           </h1>
-          <p className="hidden sm:block text-base text-neutral-500">
+          <p className="hidden sm:block min-w-0 truncate text-base text-neutral-500">
             Turn 16:9 video into 9:16. The camera follows the action for you.
           </p>
         </div>
@@ -96,7 +103,7 @@ export default function App() {
         {isActive && (
           <button
             onClick={changeSource}
-            className="flex items-center gap-1.5 px-3 py-1.5 rounded-full border border-neutral-800 text-base text-neutral-400 hover:text-neutral-100 hover:border-neutral-600 active:scale-95 transition"
+            className="shrink-0 flex items-center gap-1.5 px-3 py-1.5 rounded-full border border-neutral-800 text-base text-neutral-400 hover:text-neutral-100 hover:border-neutral-600 active:scale-95 transition"
           >
             <svg viewBox="0 0 24 24" className="w-3.5 h-3.5" fill="currentColor">
               <path d="M12 4l6 6h-4v6h-4v-6H6l6-6zM5 19h14v2H5z" />
@@ -104,11 +111,18 @@ export default function App() {
             Change source
           </button>
         )}
+        <BenchmarkLauncher
+          getEngine={getEngine}
+          videoRef={videoRef}
+          load={load}
+          hasSource={isActive}
+          onRunningChange={setBenchmarkRunning}
+        />
       </header>
 
       <video ref={videoRef} className="hidden" />
 
-      {!isActive && (
+      {!showPlayer && (
         <div className="flex-1 min-h-0 flex flex-col items-center justify-center gap-4">
           <SourceTabs
             upload={
@@ -165,7 +179,7 @@ export default function App() {
         </div>
       )}
 
-      {isActive && (
+      {showPlayer && (
         <div className="flex-1 min-h-0 flex flex-col md:flex-row gap-4 w-full">
           <div className="flex-1 min-h-0 flex flex-col items-center gap-y-6 gap-x-4">
             <Canvas canvasRef={canvasRef} mode={mode} overlay={streamHealthOverlay} />

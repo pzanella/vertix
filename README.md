@@ -64,8 +64,8 @@ manual pixel copying.
   for a real, intentional reposition, not every small gesture.
 - **Smooth transitions** — layout changes (single → split → b-roll, ...)
   cross-dissolve instead of cutting instantly.
-- **Live analytics dashboard** — FPS, detection confidence, motion
-  activity, render latency, detection-worker latency, and main-thread
+- **Live analytics dashboard** — frame callback rate, detection confidence,
+  motion activity, frame interval, detection-worker latency, and main-thread
   stalls, each with a live trend chart.
 - **Two views** — the original 16:9, or the reframed 9:16 — toggle at any
   time, even mid-playback.
@@ -146,13 +146,16 @@ about this one.
 │   │   ├── layoutEngine.ts           # Pure layout math: crop rects, dead zone, smoothing
 │   │   ├── faceDetectionWorker.ts     # Runs WASM inference + pixel readback off the main thread
 │   │   ├── audioActivity.ts          # Voice-activity signal from the video's own audio track
+│   │   ├── bench/                    # Benchmark mode: recorder, stats, environment, report, clip runner
 │   │   ├── index.ts                  # Public exports
 │   │   └── wasm/                     # Generated bindings (wasm-pack output, gitignored)
 │   │       ├── wasm.js
 │   │       ├── wasm.d.ts
 │   │       └── wasm_bg.wasm
 │   ├── hooks/
-│   │   └── useWasmReframe.ts       # Thin React adapter: VertixEngine + Shaka Player
+│   │   ├── useWasmReframe.ts       # Thin React adapter: VertixEngine + Shaka Player
+│   │   └── useBenchmark.ts         # Runs benchmark suites and keeps the report
+│   ├── components/Benchmark/       # Gauge button, run/results panel, benchmark settings
 │   └── components/Player/
 │       ├── Canvas.tsx                 # <canvas> the video is drawn into, with an overlay slot
 │       ├── Controls.tsx               # Play/pause/replay, mute, mode toggle, scrub bar
@@ -160,6 +163,7 @@ about this one.
 │       ├── LiveStatusPanel.tsx        # Small "Status: ..." badge
 │       ├── SourceTabs.tsx             # Upload / Sample / URL source picker tabs
 │       ├── SamplePicker.tsx           # Sample-clip card grid, with poster thumbnails
+│       ├── sampleClips.ts             # Sample-clip list (files, posters, frame rates)
 │       ├── UrlSourceInput.tsx         # Direct video / HLS / DASH URL input
 │       ├── AnalyticsDashboard.tsx     # Live metrics sidebar panel
 │       ├── LiveAnalyticsCharts.tsx    # Sparkline trend charts
@@ -176,6 +180,7 @@ about this one.
 │           └── ATTRIBUTION.md
 └── docs/
     ├── architecture-pipeline.svg  # Diagram: frame processing pipeline
+    ├── benchmark.md               # Benchmark mode: metrics, method, limits
     └── player-integration.md      # How to attach the engine to Shaka Player / hls.js / Video.js
 ```
 
@@ -242,6 +247,7 @@ Sourced from [Pexels](https://www.pexels.com/), free to use under the
 | `npm run preview`      | Serve the production build locally                     |
 | `npm run build:wasm`   | Rebuild the Rust crate with `wasm-pack`                 |
 | `npm run build:worker` | Rebuild the face-detection worker bundle with esbuild   |
+| `npm test`             | Run the unit tests (Vitest)                            |
 
 ## How It Works
 
@@ -280,6 +286,28 @@ Sourced from [Pexels](https://www.pexels.com/), free to use under the
    snapping.
 6. When the layout itself changes, the engine cross-dissolves from the old
    framing into the new one instead of cutting instantly.
+
+## Performance
+
+Vertix has a built-in benchmark. Load any video (a sample clip is fine), then
+press the **gauge button** that appears at the right end of the header (on <https://pzanella.github.io/vertix/>, or on
+`http://localhost:4173/` after `npm run build && npm run preview`), adjust the
+warm-ups if needed, then press **Run suite**. It plays a short unrecorded WASM warm-up,
+then every sample clip from start to end at normal speed in 9:16, then one
+16:9 baseline run without detection. At the end the panel reopens on the
+results, with JSON (environment + summary + raw samples) and CSV (raw samples)
+downloads; the summary is also printed with `console.table`.
+
+Keep the tab visible during the run and start from a freshly loaded page.
+What each metric measures, how, and its limits (timer precision,
+`requestVideoFrameCallback` support, warm-up) are in
+[`docs/benchmark.md`](docs/benchmark.md).
+
+Results (p50 / p95, production build, default settings: 3 s WASM warm-up, 1 s clip warm-up):
+
+| Device / browser | Render FPS | Dropped frames | Detection total (ms) | WASM call (ms) | Detection rate (Hz) | Skipped detections | Long tasks |
+| ---------------- | ---------- | -------------- | -------------------- | -------------- | ------------------- | ------------------ | ---------- |
+|                  |            |                |                      |                |                     |                    |            |
 
 ## Known Limitations
 

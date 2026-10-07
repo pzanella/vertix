@@ -100,7 +100,7 @@ export const LiveAnalyticsCharts = memo(function LiveAnalyticsCharts({ metrics }
   return (
     <div className="flex flex-col gap-4">
       <ChartRow
-        label="FPS Trend"
+        label="Frame Callback Rate (EMA)"
         color={COLOR.fps}
         data={metrics.fpsHistory}
         value={metrics.fps > 0 ? metrics.fps.toFixed(1) : "—"}
@@ -118,7 +118,7 @@ export const LiveAnalyticsCharts = memo(function LiveAnalyticsCharts({ metrics }
         value={metrics.motionScore !== null ? metrics.motionScore.toFixed(1) : "—"}
       />
       <ChartRow
-        label="Render Latency"
+        label="Frame Interval (EMA)"
         color={COLOR.latency}
         data={metrics.frameTimeHistory}
         value={metrics.frameTimeMs > 0 ? `${metrics.frameTimeMs.toFixed(1)}ms` : "—"}

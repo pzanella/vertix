@@ -42,6 +42,8 @@ interface DetectMessage {
   type: "detect";
   requestId: number;
   bitmap: ImageBitmap;
+  /** Benchmark mode only: also time the pixel readback below. */
+  measureReadback?: boolean;
 }
 interface ResetMessage {
   type: "reset";
@@ -72,15 +74,17 @@ ctx.onmessage = (e: MessageEvent<DetectMessage | ResetMessage>) => {
       detectCanvas = new OffscreenCanvas(msg.bitmap.width, msg.bitmap.height);
       detectCtx = detectCanvas.getContext("2d", { willReadFrequently: true });
     }
+    const readbackStart = msg.measureReadback ? performance.now() : 0;
     detectCtx!.drawImage(msg.bitmap, 0, 0);
     msg.bitmap.close();
     const rgba = detectCtx!.getImageData(0, 0, detectCanvas.width, detectCanvas.height).data;
+    const readbackMs = msg.measureReadback ? performance.now() - readbackStart : 0;
 
     // Timed around inference only, not the surrounding readback/postMessage
     // — this is what shows up as "Worker Latency" in the analytics panel.
     const start = performance.now();
     const faces = engine.update_faces(new Uint8Array(rgba.buffer));
     const tookMs = performance.now() - start;
-    ctx.postMessage({ type: "result", requestId: msg.requestId, faces, tookMs }, [faces.buffer]);
+    ctx.postMessage({ type: "result", requestId: msg.requestId, faces, tookMs, readbackMs }, [faces.buffer]);
   }
 };

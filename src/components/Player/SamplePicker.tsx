@@ -1,61 +1,4 @@
-interface SampleClip {
-  file: string;
-  poster: string;
-  title: string;
-  subtitle: string | null;
-  speakers: number;
-}
-
-// Public assets, so paths must respect Vite's `base` (root in dev, a
-// subpath like "/vertix/" when deployed to a GitHub Pages project site) —
-// a hardcoded absolute path would 404 as soon as the app isn't served
-// from the domain root.
-const asset = (path: string) => `${import.meta.env.BASE_URL}${path}`;
-
-const SAMPLE_CLIPS: SampleClip[] = [
-  {
-    file: "1-speaker.mp4",
-    poster: asset("samples/posters/1-speaker.jpg"),
-    title: "One speaker",
-    subtitle: null,
-    speakers: 1,
-  },
-  {
-    file: "2-speakers-a.mp4",
-    poster: asset("samples/posters/2-speakers-a.jpg"),
-    title: "2 speakers",
-    subtitle: "example 1",
-    speakers: 2,
-  },
-  {
-    file: "2-speakers-b.mp4",
-    poster: asset("samples/posters/2-speakers-b.jpg"),
-    title: "2 speakers",
-    subtitle: "no audio / example 2",
-    speakers: 2,
-  },
-  {
-    file: "2-speakers-c.mp4",
-    poster: asset("samples/posters/2-speakers-c.jpg"),
-    title: "2 speakers",
-    subtitle: "no audio / example 3",
-    speakers: 2,
-  },
-  {
-    file: "2-speakers-d.mp4",
-    poster: asset("samples/posters/2-speakers-d.jpg"),
-    title: "2 speakers",
-    subtitle: "no audio / example 4",
-    speakers: 2,
-  },
-  {
-    file: "3-speakers.mp4",
-    poster: asset("samples/posters/3-speakers.jpg"),
-    title: "3 speakers",
-    subtitle: null,
-    speakers: 3,
-  },
-];
+import { SAMPLE_CLIPS, sampleClipUrl } from "./sampleClips";
 
 interface SamplePickerProps {
   onSelect: (url: string) => void;
@@ -67,7 +10,7 @@ export function SamplePicker({ onSelect }: SamplePickerProps) {
       {SAMPLE_CLIPS.map((clip) => (
         <button
           key={clip.file}
-          onClick={() => onSelect(asset(`samples/${clip.file}`))}
+          onClick={() => onSelect(sampleClipUrl(clip.file))}
           className="flex flex-col gap-2 rounded-lg border border-neutral-800 bg-neutral-900/60 p-2.5 text-left hover:border-brand-500 hover:bg-neutral-900 hover:-translate-y-0.5 hover:shadow-[0_4px_16px_-8px_rgba(0,0,0,0.6)] transition duration-150 ease-out"
         >
           <div className="relative aspect-video w-full rounded-md overflow-hidden">

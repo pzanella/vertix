@@ -218,6 +218,8 @@ interface UseWasmReframeReturn {
   streamHealth: StreamHealth | null;
   /** Resets playback back to the idle/source-picker state, discarding the currently loaded source. */
   changeSource: () => void;
+  /** The underlying engine, for opt-in tooling such as benchmark mode. Null before mount or after unmount. */
+  getEngine: () => VertixEngine | null;
 }
 
 /**
@@ -538,6 +540,8 @@ export function useWasmReframe(): UseWasmReframeReturn {
     setProgress(0);
   }, []);
 
+  const getEngine = useCallback(() => engineRef.current, []);
+
   return {
     canvasRef,
     videoRef,
@@ -560,5 +564,6 @@ export function useWasmReframe(): UseWasmReframeReturn {
     isBuffering,
     streamHealth,
     changeSource,
+    getEngine,
   };
 }
