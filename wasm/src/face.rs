@@ -178,6 +178,10 @@ pub struct FaceObservation {
     pub h: f32,
     pub score: f32,
     pub motion: f64,
+    /// Failed only the skin-tone check. Reported (not dropped) so the caller
+    /// can measure how often the skin filter rejects a detection; it must
+    /// not be used for the layout.
+    pub skin_rejected: bool,
 }
 
 /// Tracks the previous frame across calls so it can score mouth motion.
@@ -195,29 +199,28 @@ impl FaceTracker {
     }
 
     /// Runs detection on a 320x240 stretched RGBA frame and returns every
-    /// face that survives the skin-tone/aspect-ratio filters.
+    /// face that survives the aspect-ratio filter. Faces that then fail the
+    /// skin-tone check are returned too, flagged `skin_rejected`.
     pub fn observe(&mut self, rgba: &[u8]) -> Vec<FaceObservation> {
         let candidates = detect(rgba);
 
         let mut obs = Vec::new();
         for c in &candidates {
-            if skin_ratio(rgba, c) < MIN_SKIN_RATIO {
-                continue;
-            }
             let w = c.x2 - c.x1;
             let h = c.y2 - c.y1;
             // This model's boxes are often narrower/taller than a real face
             // (observed real detections range roughly 0.38-1.14) — this is
             // only here to reject degenerate slivers, not to judge "faceness"
-            // (skin-tone ratio above is what actually filters false positives).
+            // (the skin-tone ratio below is what actually filters false positives).
             if h <= 0.0 || w <= 0.0 || !(0.25..=3.0).contains(&(w / h)) {
                 continue;
             }
+            let skin_rejected = skin_ratio(rgba, c) < MIN_SKIN_RATIO;
 
-            let motion = if self.has_prev {
-                mouth_motion(rgba, &self.prev_frame, c)
-            } else {
+            let motion = if skin_rejected || !self.has_prev {
                 0.0
+            } else {
+                mouth_motion(rgba, &self.prev_frame, c)
             };
 
             obs.push(FaceObservation {
@@ -227,6 +230,7 @@ impl FaceTracker {
                 h,
                 score: c.score,
                 motion,
+                skin_rejected,
             });
         }
 

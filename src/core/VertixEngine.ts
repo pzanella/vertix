@@ -6,7 +6,7 @@ import {
   faceVisibleFraction,
   lerpPaneRectInto,
   paneSmoothingAlpha,
-  unpackFaces,
+  unpackDetections,
   type FaceBox,
   type PaneRect,
   type PaneTarget,
@@ -63,6 +63,10 @@ export interface VertixMetrics {
   frameTimeHistory: number[];
   motionHistory: number[];
   confidenceHistory: number[];
+  /** Detections the WASM skin-tone filter rejected since this source was loaded (seeks don't reset it). For judging that filter, not used by the layout. */
+  skinRejectedTotal: number;
+  /** The part of skinRejectedTotal that would also have passed the size/visibility filter — the ones that could have been a real speaker. */
+  skinRejectedSpeakerSized: number;
   /** Completed detections per media-time second, EMA-smoothed (alpha 0.2). Lower than fps / 5 when detections are skipped because the previous one is still running. Null before the second detection. */
   detectionRateHz: number | null;
   /** Whether the last detection tick ran in the shared worker or fell back to the main thread. Null before the first tick. */
@@ -106,6 +110,8 @@ export const INITIAL_METRICS: VertixMetrics = {
   frameTimeHistory: [],
   motionHistory: [],
   confidenceHistory: [],
+  skinRejectedTotal: 0,
+  skinRejectedSpeakerSized: 0,
   detectionRateHz: null,
   detectionMode: null,
   workerInferenceMs: null,
@@ -260,9 +266,23 @@ const MIN_SPEAKER_FACE_SIZE = 0.12;
 // at an edge) to count — see faceVisibleFraction.
 const MIN_FACE_VISIBLE_FRACTION = 0.8;
 
+// Background people (crowd, players on a pitch) still get detected by the
+// model — only close-up, unclipped faces count as an actual speaker.
+function isSpeakerSized(f: FaceBox): boolean {
+  return (
+    (f.h >= MIN_SPEAKER_FACE_SIZE || f.w >= MIN_SPEAKER_FACE_SIZE) &&
+    faceVisibleFraction(f) >= MIN_FACE_VISIBLE_FRACTION
+  );
+}
+
 // A face must drift more than this (a fraction of frame width/height) from
 // where its pane's crop was last aimed before the crop moves at all.
 const DEADZONE_FRACTION = 0.04;
+
+// Skin-rejection overlay style: dashed, so it can't be mistaken for a crop.
+const SKIN_REJECTED_STROKE = "#f97316";
+const SKIN_REJECTED_LINE_WIDTH = 3;
+const SKIN_REJECTED_DASH = [10, 6];
 
 // How long a layout change (0 -> 2 speakers, 2 -> 3, etc.) takes to
 // cross-dissolve from the old framing into the new one, instead of cutting
@@ -366,6 +386,13 @@ export class VertixEngine {
   private srcDimsInitialized = false;
 
   private lastFaces: FaceBox[] = [];
+  // Per-detection counts for the benchmark probe, and the boxes for the
+  // skin-rejection overlay.
+  private lastDetectedFaceCount = 0;
+  private lastSkinRejectedFaces: FaceBox[] = [];
+  private lastSkinRejectedSpeakerSizedCount = 0;
+  private skinRejectionOverlay: HTMLCanvasElement | null = null;
+  private skinRejectionOverlayCtx: CanvasRenderingContext2D | null = null;
   private lastResolvedFaces: FaceBox[] = [];
   private personCount = new PersonCountDebouncer();
 
@@ -474,6 +501,17 @@ export class VertixEngine {
     this.emitState();
   }
 
+  /**
+   * Draws detections the skin-tone filter rejected as dashed boxes on
+   * `canvas`, which the host lays exactly over the output canvas. They are
+   * never drawn on the output itself, so they can't leak into the video or
+   * a layout-change snapshot. Pass null to stop.
+   */
+  setSkinRejectionOverlay(canvas: HTMLCanvasElement | null): void {
+    this.skinRejectionOverlay = canvas;
+    this.skinRejectionOverlayCtx = null;
+  }
+
   /** Starts (or, with null, stops) reporting per-frame and per-detection timings to `probe`. Does not change rendering or detection. */
   setBenchmarkProbe(probe: BenchmarkProbe | null): void {
     this.benchmarkProbe = probe;
@@ -565,6 +603,7 @@ export class VertixEngine {
     this.detectionInFlight = false;
     this.detectionRequestGeneration += 1;
     this.lastFaces = [];
+    this.lastSkinRejectedFaces = [];
     this.lastResolvedFaces = [];
     this.lastDetectionMediaTime = null;
     this.detectionIntervalEma = 0;
@@ -596,6 +635,54 @@ export class VertixEngine {
 
   private scheduleNextFrame(video: HTMLVideoElement): void {
     this.frameCallbackId = video.requestVideoFrameCallback(this.boundOnVideoFrame);
+  }
+
+  /** Maps each skin-rejected box through what is on screen now: every pane's current crop, or the fitted full frame in B-roll. */
+  private drawSkinRejectionOverlay(overlay: HTMLCanvasElement, outW: number, outH: number): void {
+    if (overlay.width !== outW || overlay.height !== outH) {
+      overlay.width = outW;
+      overlay.height = outH;
+      this.skinRejectionOverlayCtx = null;
+    }
+    this.skinRejectionOverlayCtx ??= overlay.getContext("2d");
+    const ctx = this.skinRejectionOverlayCtx;
+    if (!ctx) return;
+    ctx.clearRect(0, 0, outW, outH);
+    const faces = this.lastSkinRejectedFaces;
+    if (faces.length === 0 || this.mode === "16:9") return;
+
+    const { w: srcW, h: srcH } = this.srcDims;
+    const fittedHeight = Math.round(srcH * (outW / srcW));
+    const views: { source: PaneRect; dest: PaneRect }[] =
+      this.personCount.stableCount === 0
+        ? [
+            {
+              source: { x: 0, y: 0, w: srcW, h: srcH },
+              dest: { x: 0, y: Math.round((outH - fittedHeight) / 2), w: outW, h: fittedHeight },
+            },
+          ]
+        : this.targetPanes.map((p, i) => ({ source: this.smoothedPanes[i], dest: p.pane.dest }));
+
+    ctx.strokeStyle = SKIN_REJECTED_STROKE;
+    ctx.lineWidth = SKIN_REJECTED_LINE_WIDTH;
+    ctx.setLineDash(SKIN_REJECTED_DASH);
+    for (const { source, dest } of views) {
+      const scaleX = dest.w / source.w;
+      const scaleY = dest.h / source.h;
+      ctx.save();
+      ctx.beginPath();
+      ctx.rect(dest.x, dest.y, dest.w, dest.h);
+      ctx.clip();
+      for (const f of faces) {
+        ctx.strokeRect(
+          dest.x + ((f.cx - f.w / 2) * srcW - source.x) * scaleX,
+          dest.y + ((f.cy - f.h / 2) * srcH - source.y) * scaleY,
+          f.w * srcW * scaleX,
+          f.h * srcH * scaleY
+        );
+      }
+      ctx.restore();
+    }
   }
 
   private dispatchDetection(
@@ -631,8 +718,10 @@ export class VertixEngine {
             tookMs,
             end - postStart,
             end - dispatchedAt,
-            facesFlat.length / 6,
-            this.lastFaces.length
+            this.lastDetectedFaceCount,
+            this.lastFaces.length,
+            this.lastSkinRejectedFaces.length,
+            this.lastSkinRejectedSpeakerSizedCount
           );
         }
       });
@@ -687,8 +776,10 @@ export class VertixEngine {
           tookMs,
           end - start - tookMs,
           end - dispatchedAt,
-          facesFlat.length / 6,
-          this.lastFaces.length
+          this.lastDetectedFaceCount,
+          this.lastFaces.length,
+          this.lastSkinRejectedFaces.length,
+          this.lastSkinRejectedSpeakerSizedCount
         );
       }
     }
@@ -705,13 +796,11 @@ export class VertixEngine {
     detectionMode: "worker" | "main-thread",
     inferenceMs: number
   ): void {
-    // Background people (crowd, players on a pitch) still get detected by
-    // the model — only close-up, unclipped faces count as an actual speaker.
-    this.lastFaces = unpackFaces(facesFlat).filter(
-      (f) =>
-        (f.h >= MIN_SPEAKER_FACE_SIZE || f.w >= MIN_SPEAKER_FACE_SIZE) &&
-        faceVisibleFraction(f) >= MIN_FACE_VISIBLE_FRACTION
-    );
+    const detections = unpackDetections(facesFlat);
+    this.lastDetectedFaceCount = detections.faces.length;
+    this.lastFaces = detections.faces.filter(isSpeakerSized);
+    this.lastSkinRejectedFaces = detections.skinRejected;
+    this.lastSkinRejectedSpeakerSizedCount = detections.skinRejected.filter(isSpeakerSized).length;
 
     this.lastResolvedFaces = this.activeSpeaker.resolve(this.lastFaces, audioEnergy, mediaTimeSec);
     const count = this.lastResolvedFaces.length;
@@ -736,6 +825,8 @@ export class VertixEngine {
       faceSizes,
       motionScore,
       faceConfidence,
+      skinRejectedTotal: this.metrics.skinRejectedTotal + this.lastSkinRejectedFaces.length,
+      skinRejectedSpeakerSized: this.metrics.skinRejectedSpeakerSized + this.lastSkinRejectedSpeakerSizedCount,
       detectionRateHz: this.detectionIntervalEma > 0 ? 1 / this.detectionIntervalEma : null,
       audioAvailable: this.audioMonitor.available,
       audioEnergy,
@@ -954,6 +1045,8 @@ export class VertixEngine {
         }
       }
     }
+
+    if (this.skinRejectionOverlay) this.drawSkinRejectionOverlay(this.skinRejectionOverlay, targetW, targetH);
 
     if (probe) probe.recordFrame(now, performance.now() - workStart, metadata.mediaTime, metadata.presentedFrames);
     this.scheduleNextFrame(video);

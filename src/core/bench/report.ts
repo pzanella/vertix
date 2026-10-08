@@ -20,7 +20,7 @@ export interface PrecisionWarning {
 
 export interface BenchmarkReport {
   tool: "vertix-benchmark";
-  schemaVersion: 1;
+  schemaVersion: 2;
   config: BenchmarkConfig;
   environment: BenchmarkEnvironment;
   /** Timing metrics whose median is within PRECISION_WARNING_FACTOR × the measured timer resolution. */
@@ -65,7 +65,7 @@ export function buildBenchmarkReport(
 ): BenchmarkReport {
   return {
     tool: "vertix-benchmark",
-    schemaVersion: 1,
+    schemaVersion: 2,
     config,
     environment,
     precisionWarnings: findPrecisionWarnings(results, environment.timerResolutionMs),
@@ -91,6 +91,8 @@ const CSV_COLUMNS = [
   "total_ms",
   "raw_faces",
   "kept_faces",
+  "skin_rejected",
+  "skin_rejected_speaker_sized",
   "duration_ms",
 ] as const;
 
@@ -140,6 +142,8 @@ export function benchmarkReportToCsv(report: BenchmarkReport): string {
         total_ms: detections.totalMs[i],
         raw_faces: detections.rawFaces[i],
         kept_faces: detections.keptFaces[i],
+        skin_rejected: detections.skinRejected[i],
+        skin_rejected_speaker_sized: detections.skinRejectedSpeakerSized[i],
       })
     );
     skippedDetections.mediaTimeSec.forEach((_, i) =>
@@ -205,6 +209,8 @@ export function benchmarkSummaryRows(report: BenchmarkReport): BenchmarkTableRow
     "wasm p50 ms": round(summary.detection.wasmMs.p50),
     "wasm p95 ms": round(summary.detection.wasmMs.p95),
     "faces p50": round(summary.detection.keptFaces.p50, 1),
+    "skin rejected": summary.detection.skinRejected.total,
+    "skin rejected (speaker-sized)": summary.detection.skinRejected.speakerSized,
     "layout changes": summary.layoutChanges,
     "long tasks": summary.longTasks.supported ? summary.longTasks.count : "n/a",
     "page hidden": pageHiddenDuringRun ? "yes (invalid)" : "no",

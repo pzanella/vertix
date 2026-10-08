@@ -155,6 +155,7 @@ interface TestFace {
   cy: number;
   size: number;
   motion?: number;
+  skinRejected?: boolean;
 }
 
 /** Engine internals the speaker-tracking tests drive directly, bypassing the worker. */
@@ -174,7 +175,9 @@ interface EngineInternals {
 }
 
 function packFaces(faces: TestFace[]): Float64Array {
-  return new Float64Array(faces.flatMap((f) => [f.cx, f.cy, f.size, f.size, f.motion ?? 0, 0.9]));
+  return new Float64Array(
+    faces.flatMap((f) => [f.cx, f.cy, f.size, f.size, f.motion ?? 0, 0.9, f.skinRejected ? 1 : 0])
+  );
 }
 
 const FRAMES_PER_DETECTION = 5;
@@ -212,7 +215,7 @@ function setUpTracking(fps: number) {
   };
   const speakerCount = () => engine.getState().speakerCount;
   const resolved = () => internals.lastResolvedFaces;
-  return { engine, detect, secondsUntil, speakerCount, resolved };
+  return { engine, video, asElement, detect, secondsUntil, speakerCount, resolved };
 }
 
 const LEFT = { cx: 0.2, cy: 0.5, size: 0.15 };
@@ -266,6 +269,37 @@ describe.each([25, 50])("VertixEngine speaker tracking at %i fps", (fps) => {
     secondsUntil([LEFT, BIG_MIDDLE, RIGHT], () => resolved().length === 1);
     detect([LEFT, MIDDLE, RIGHT]);
     expect(resolved()).toEqual([expect.objectContaining({ cx: MIDDLE.cx })]);
+    engine.destroy();
+  });
+});
+
+describe("VertixEngine skin-filter rejections", () => {
+  const REJECTED_SPEAKER = { cx: 0.5, cy: 0.5, size: 0.2, skinRejected: true };
+  const REJECTED_BACKGROUND = { cx: 0.5, cy: 0.2, size: 0.05, skinRejected: true };
+
+  it("keeps rejected detections out of the layout", () => {
+    const { engine, secondsUntil, speakerCount, resolved } = setUpTracking(25);
+    secondsUntil([LEFT, REJECTED_SPEAKER], () => speakerCount() === 1);
+    expect(resolved()).toEqual([expect.objectContaining({ cx: LEFT.cx })]);
+    engine.destroy();
+  });
+
+  it("counts rejections per clip, and how many were speaker-sized", () => {
+    const { engine, detect } = setUpTracking(25);
+    detect([LEFT, REJECTED_SPEAKER, REJECTED_BACKGROUND]);
+    detect([LEFT, REJECTED_SPEAKER]);
+    expect(engine.getMetrics()).toMatchObject({ skinRejectedTotal: 3, skinRejectedSpeakerSized: 2 });
+    engine.destroy();
+  });
+
+  it("keeps the count across a seek but resets it for a new source", () => {
+    const { engine, video, asElement, detect } = setUpTracking(25);
+    detect([REJECTED_SPEAKER]);
+    (engine as unknown as { resetTrackingState(): void }).resetTrackingState();
+    expect(engine.getMetrics().skinRejectedTotal).toBe(1);
+    engine.attach(asElement, fakeCanvas());
+    video.presentFrame();
+    expect(engine.getMetrics().skinRejectedTotal).toBe(0);
     engine.destroy();
   });
 });
