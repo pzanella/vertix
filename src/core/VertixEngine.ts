@@ -5,6 +5,7 @@ import {
   computeSpeakerLayout,
   faceVisibleFraction,
   lerpPaneRectInto,
+  paneSmoothingAlpha,
   unpackFaces,
   type FaceBox,
   type PaneRect,
@@ -62,6 +63,8 @@ export interface VertixMetrics {
   frameTimeHistory: number[];
   motionHistory: number[];
   confidenceHistory: number[];
+  /** Completed detections per media-time second, EMA-smoothed (alpha 0.2). Lower than fps / 5 when detections are skipped because the previous one is still running. Null before the second detection. */
+  detectionRateHz: number | null;
   /** Whether the last detection tick ran in the shared worker or fell back to the main thread. Null before the first tick. */
   detectionMode: "worker" | "main-thread" | null;
   /** How long the last detection call itself took (WASM inference only, not the surrounding postMessage/bitmap overhead), in ms. Null before the first tick. */
@@ -103,6 +106,7 @@ export const INITIAL_METRICS: VertixMetrics = {
   frameTimeHistory: [],
   motionHistory: [],
   confidenceHistory: [],
+  detectionRateHz: null,
   detectionMode: null,
   workerInferenceMs: null,
   workerInferenceHistory: [],
@@ -256,12 +260,6 @@ const MIN_SPEAKER_FACE_SIZE = 0.12;
 // at an edge) to count — see faceVisibleFraction.
 const MIN_FACE_VISIBLE_FRACTION = 0.8;
 
-// How much each pane's crop glides toward its subject's latest detected
-// position per rendered frame (0-1) — gentle camera-follow *within* an
-// already-stable layout (same face count), not a trigger for changing the
-// layout itself. Lower = slower, calmer follow.
-const PANE_SMOOTHING_ALPHA = 0.06;
-
 // A face must drift more than this (a fraction of frame width/height) from
 // where its pane's crop was last aimed before the crop moves at all.
 const DEADZONE_FRACTION = 0.04;
@@ -350,6 +348,8 @@ export class VertixEngine {
 
   // FPS/frame-time measurement.
   private lastFrameTime: number | null = null;
+  private lastDetectionMediaTime: number | null = null;
+  private detectionIntervalEma = 0;
   private fpsEma = 0;
   private frameTimeEma = 0;
   private lastMetricsPush = 0;
@@ -566,6 +566,8 @@ export class VertixEngine {
     this.detectionRequestGeneration += 1;
     this.lastFaces = [];
     this.lastResolvedFaces = [];
+    this.lastDetectionMediaTime = null;
+    this.detectionIntervalEma = 0;
     this.personCount.reset();
     this.activeSpeaker.reset();
     this.smoothedPanes = [];
@@ -580,6 +582,7 @@ export class VertixEngine {
       audioEnergy: null,
       cropScaleFactor: null,
       layoutCommittedAt: null,
+      detectionRateHz: null,
     };
     this.emitState();
     this.emitMetrics();
@@ -595,7 +598,14 @@ export class VertixEngine {
     this.frameCallbackId = video.requestVideoFrameCallback(this.boundOnVideoFrame);
   }
 
-  private dispatchDetection(video: HTMLVideoElement, srcW: number, srcH: number, cropW: number, cropH: number): void {
+  private dispatchDetection(
+    video: HTMLVideoElement,
+    mediaTimeSec: number,
+    srcW: number,
+    srcH: number,
+    cropW: number,
+    cropH: number
+  ): void {
     const probe = this.benchmarkProbe;
     const dispatchedAt = probe ? performance.now() : 0;
     const audioEnergy = this.audioMonitor.energy();
@@ -611,7 +621,7 @@ export class VertixEngine {
         // discard it instead of feeding stale positions into the layout.
         if (generation !== this.detectionRequestGeneration) return;
         const postStart = probe ? performance.now() : 0;
-        this.processDetectionResult(facesFlat, audioEnergy, srcW, srcH, cropW, cropH, "worker", tookMs);
+        this.processDetectionResult(facesFlat, audioEnergy, mediaTimeSec, srcW, srcH, cropW, cropH, "worker", tookMs);
         if (probe) {
           const end = performance.now();
           probe.recordDetection(
@@ -657,7 +667,17 @@ export class VertixEngine {
       const start = performance.now();
       const facesFlat = this.engine.update_faces(new Uint8Array(faceImageData.data.buffer));
       const tookMs = performance.now() - start;
-      this.processDetectionResult(facesFlat, audioEnergy, srcW, srcH, cropW, cropH, "main-thread", tookMs);
+      this.processDetectionResult(
+        facesFlat,
+        audioEnergy,
+        mediaTimeSec,
+        srcW,
+        srcH,
+        cropW,
+        cropH,
+        "main-thread",
+        tookMs
+      );
       if (probe) {
         const end = performance.now();
         probe.recordDetection(
@@ -677,6 +697,7 @@ export class VertixEngine {
   private processDetectionResult(
     facesFlat: Float64Array,
     audioEnergy: number | null,
+    mediaTimeSec: number,
     srcW: number,
     srcH: number,
     cropW: number,
@@ -692,10 +713,19 @@ export class VertixEngine {
         faceVisibleFraction(f) >= MIN_FACE_VISIBLE_FRACTION
     );
 
-    this.lastResolvedFaces = this.activeSpeaker.resolve(this.lastFaces, audioEnergy);
+    this.lastResolvedFaces = this.activeSpeaker.resolve(this.lastFaces, audioEnergy, mediaTimeSec);
     const count = this.lastResolvedFaces.length;
-    const stablePersonCount = this.personCount.observe(count, this.layoutSignature !== "");
+    const stablePersonCount = this.personCount.observe(count, this.layoutSignature !== "", mediaTimeSec);
     this.emitState();
+
+    if (this.lastDetectionMediaTime !== null && mediaTimeSec > this.lastDetectionMediaTime) {
+      const interval = mediaTimeSec - this.lastDetectionMediaTime;
+      this.detectionIntervalEma =
+        this.detectionIntervalEma === 0
+          ? interval
+          : this.detectionIntervalEma + (interval - this.detectionIntervalEma) * 0.2;
+    }
+    this.lastDetectionMediaTime = mediaTimeSec;
 
     const faces = this.lastFaces;
     const faceSizes = faces.map((f) => Math.round(Math.max(f.w, f.h) * 1000) / 10);
@@ -706,6 +736,7 @@ export class VertixEngine {
       faceSizes,
       motionScore,
       faceConfidence,
+      detectionRateHz: this.detectionIntervalEma > 0 ? 1 / this.detectionIntervalEma : null,
       audioAvailable: this.audioMonitor.available,
       audioEnergy,
       detectionMode,
@@ -767,6 +798,7 @@ export class VertixEngine {
     // each callback (when the callback runs, not the frame's media time) —
     // EMA-smoothed every frame, pushed to subscribers (and sampled into the
     // trend history) only a few times a second.
+    const frameDtSec = this.lastFrameTime !== null ? Math.max(0, now - this.lastFrameTime) / 1000 : 0;
     if (this.lastFrameTime !== null) {
       const dt = now - this.lastFrameTime;
       if (dt > 0) {
@@ -828,7 +860,7 @@ export class VertixEngine {
       // within it, each pane's crop only drifts smoothly toward its target.
       this.frameCounter += 1;
       if (this.frameCounter % FACE_DETECT_INTERVAL === 0) {
-        if (!this.detectionInFlight) this.dispatchDetection(video, srcW, srcH, cropW, cropH);
+        if (!this.detectionInFlight) this.dispatchDetection(video, metadata.mediaTime, srcW, srcH, cropW, cropH);
         else probe?.recordSkippedDetection();
       }
 
@@ -890,9 +922,10 @@ export class VertixEngine {
         // target and draw with integer coordinates (avoids sub-pixel blit
         // interpolation). No new objects, no layout math — that only runs
         // at detection ticks, above.
+        const smoothingAlpha = paneSmoothingAlpha(frameDtSec);
         for (let i = 0; i < this.targetPanes.length; i++) {
           const target = this.targetPanes[i].pane;
-          const smoothed = lerpPaneRectInto(this.smoothedPanes[i], target.source, PANE_SMOOTHING_ALPHA);
+          const smoothed = lerpPaneRectInto(this.smoothedPanes[i], target.source, smoothingAlpha);
           ctx.drawImage(
             video,
             Math.round(smoothed.x),

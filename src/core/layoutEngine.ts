@@ -104,6 +104,21 @@ function centeredCoverCrop(
   return { x, y, w, h };
 }
 
+// Time constant of each pane's camera-follow glide toward its subject's
+// latest detected position — gentle follow *within* an already-stable
+// layout, not a trigger for changing the layout itself. Higher = slower,
+// calmer follow. 0.646s reproduces the old fixed 0.06-per-frame blend at
+// 25fps: -0.04 / ln(1 - 0.06).
+const PANE_SMOOTHING_TAU_SEC = 0.646;
+// Longer gaps (a pause, a hidden tab) count as this long, so the pane takes
+// one bounded step toward its target instead of jumping straight there.
+const PANE_SMOOTHING_MAX_DT_SEC = 0.25;
+
+/** Per-frame blend factor for lerpPaneRectInto after `dtSec` seconds, so the glide takes the same time at any frame rate. */
+export function paneSmoothingAlpha(dtSec: number): number {
+  return 1 - Math.exp(-Math.min(Math.max(dtSec, 0), PANE_SMOOTHING_MAX_DT_SEC) / PANE_SMOOTHING_TAU_SEC);
+}
+
 /**
  * Blends `out` toward `target` by `alpha` (0-1 per call), in place — lets a
  * pane glide toward a subject's new position between detection ticks

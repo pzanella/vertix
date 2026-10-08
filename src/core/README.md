@@ -108,12 +108,13 @@ initial-load failure — is recovered from the same way: `fail()` (inside
 never needed its own WASM engine before.
 
 The layout only changes when the speaker *count* changes, debounced over a
-few detection ticks (dropping to zero speakers reacts faster than any
+short time in seconds (dropping to zero speakers reacts faster than any
 other change, since staying cropped over a shot with no one in it looks
 worse than briefly widening out). Within a stable layout, individual crops
 move only past a dead zone, then glide; the full layout decision never
 reruns. This two-layer design, a stable layout plus independently-smoothed
 positions within it, came out of several rounds of tuning against real
 footage. If camera movement still feels off, look at the constants in
-`VertixEngine.ts` (`PANE_SMOOTHING_ALPHA`, `DEADZONE_FRACTION`,
-`PERSON_COUNT_STABLE_TICKS`), not the layout math itself.
+`layoutEngine.ts` (`PANE_SMOOTHING_TAU_SEC`), `VertixEngine.ts`
+(`DEADZONE_FRACTION`) and `speakerTracking.ts` (`PERSON_COUNT_STABLE_SEC`),
+not the layout math itself.

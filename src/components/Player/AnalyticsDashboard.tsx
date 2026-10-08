@@ -124,6 +124,10 @@ export const AnalyticsDashboard = memo(function AnalyticsDashboard({
             }
           />
           <MetricRow
+            label="Detect Rate"
+            value={metrics.detectionRateHz !== null ? `${metrics.detectionRateHz.toFixed(1)} Hz` : "—"}
+          />
+          <MetricRow
             label="Main Thread"
             value={metrics.longTasksSupported ? `${metrics.longTaskMs.toFixed(0)}ms / 3s` : "n/a"}
             tone={metrics.longTasksSupported ? longTaskTone(metrics.longTaskMs) : "default"}
