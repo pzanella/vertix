@@ -149,3 +149,110 @@ describe("VertixEngine render loop", () => {
     engine.destroy();
   });
 });
+
+interface TestFace {
+  cx: number;
+  cy: number;
+  size: number;
+  motion?: number;
+}
+
+/** Engine internals the speaker-tracking tests drive directly, bypassing the worker. */
+interface EngineInternals {
+  lastResolvedFaces: { cx: number; cy: number }[];
+  processDetectionResult(
+    facesFlat: Float64Array,
+    audioEnergy: number | null,
+    srcW: number,
+    srcH: number,
+    cropW: number,
+    cropH: number,
+    detectionMode: "worker" | "main-thread",
+    inferenceMs: number
+  ): void;
+}
+
+function packFaces(faces: TestFace[]): Float64Array {
+  return new Float64Array(faces.flatMap((f) => [f.cx, f.cy, f.size, f.size, f.motion ?? 0, 0.9]));
+}
+
+function setUpTracking() {
+  const { engine, video, asElement } = setUp();
+  engine.attach(asElement, fakeCanvas());
+  const internals = engine as unknown as EngineInternals;
+  /** One detection result, followed by one rendered frame (which commits the layout). */
+  const detect = (faces: TestFace[]) => {
+    internals.processDetectionResult(packFaces(faces), null, 1280, 720, 405, 720, "worker", 1);
+    video.presentFrame();
+  };
+  const speakerCount = () => engine.getState().speakerCount;
+  const resolved = () => internals.lastResolvedFaces;
+  return { engine, detect, speakerCount, resolved };
+}
+
+const LEFT = { cx: 0.2, cy: 0.5, size: 0.15 };
+const MIDDLE = { cx: 0.5, cy: 0.5, size: 0.15 };
+const RIGHT = { cx: 0.8, cy: 0.5, size: 0.15 };
+const FAR_RIGHT = { cx: 0.9, cy: 0.2, size: 0.15 };
+const BIG_MIDDLE = { cx: 0.5, cy: 0.5, size: 0.3 };
+
+describe("VertixEngine speaker tracking (25 fps detection cadence)", () => {
+  it("commits the first layout after 6 agreeing detections, because the first rendered frame already commits the no-crop layout", () => {
+    const { engine, detect, speakerCount } = setUpTracking();
+    for (let i = 0; i < 5; i++) {
+      detect([LEFT]);
+      expect(speakerCount()).toBe(0);
+    }
+    detect([LEFT]);
+    expect(speakerCount()).toBe(1);
+    engine.destroy();
+  });
+
+  it("needs 6 agreeing detections to change an existing layout", () => {
+    const { engine, detect, speakerCount } = setUpTracking();
+    for (let i = 0; i < 6; i++) detect([LEFT]);
+    for (let i = 0; i < 5; i++) {
+      detect([LEFT, RIGHT]);
+      expect(speakerCount()).toBe(1);
+    }
+    detect([LEFT, RIGHT]);
+    expect(speakerCount()).toBe(2);
+    engine.destroy();
+  });
+
+  it("drops to no crop after 2 detections without faces", () => {
+    const { engine, detect, speakerCount } = setUpTracking();
+    for (let i = 0; i < 6; i++) detect([LEFT]);
+    detect([]);
+    expect(speakerCount()).toBe(1);
+    detect([]);
+    expect(speakerCount()).toBe(0);
+    engine.destroy();
+  });
+
+  it("shows the 3-face grid until a size-dominant face has won 5 detections in a row", () => {
+    const { engine, detect, resolved } = setUpTracking();
+    for (let i = 0; i < 4; i++) {
+      detect([LEFT, BIG_MIDDLE, RIGHT]);
+      expect(resolved()).toHaveLength(3);
+    }
+    detect([LEFT, BIG_MIDDLE, RIGHT]);
+    expect(resolved()).toEqual([expect.objectContaining({ cx: BIG_MIDDLE.cx })]);
+    engine.destroy();
+  });
+
+  it("frames nobody when 4+ faces have no clear winner", () => {
+    const { engine, detect, resolved } = setUpTracking();
+    detect([LEFT, MIDDLE, RIGHT, FAR_RIGHT]);
+    expect(resolved()).toEqual([]);
+    engine.destroy();
+  });
+
+  it("keeps the lock while no face clearly wins", () => {
+    const { engine, detect, resolved } = setUpTracking();
+    for (let i = 0; i < 5; i++) detect([LEFT, BIG_MIDDLE, RIGHT]);
+    detect([LEFT, MIDDLE, RIGHT]);
+    expect(resolved()).toEqual([expect.objectContaining({ cx: MIDDLE.cx })]);
+    engine.destroy();
+  });
+});
