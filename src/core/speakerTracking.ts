@@ -67,6 +67,16 @@ const ACTIVE_SPEAKER_LOCK_SEC = 0.8;
 // its streak started counts as "the same person". It is a distance, not a
 // speed: it bounds drift over the whole lock window, which is already time-based.
 const SAME_PERSON_DISTANCE = 0.08;
+// The locked face is followed from one detection to the next. If no face is
+// within this straight-line distance (fraction of frame) of where it was,
+// the locked person is gone (or the camera cut) and the lock is released
+// instead of jumping onto whoever is nearest.
+const MAX_LOCK_DISTANCE = 0.15;
+// Below ACTIVE_SPEAKER_THRESHOLD faces, the lock is only released once the
+// count has stayed low for this long. On slow devices (3-5 detections per
+// second, with skips) a single missed face is common, and relocking takes
+// ACTIVE_SPEAKER_LOCK_SEC, too close to the count debounce to hide.
+const LOCK_GRACE_BELOW_THRESHOLD_SEC = 0.4;
 
 interface FacePosition {
   cx: number;
@@ -114,12 +124,16 @@ class AgreementStreak {
   }
 }
 
-function closestFaceTo(faces: FaceBox[], pos: FacePosition): FaceBox {
-  return faces.reduce((best, f) => {
-    const d = (f.cx - pos.cx) ** 2 + (f.cy - pos.cy) ** 2;
-    const bd = (best.cx - pos.cx) ** 2 + (best.cy - pos.cy) ** 2;
-    return d < bd ? f : best;
-  });
+function distanceBetween(a: FacePosition, b: FacePosition): number {
+  return Math.hypot(a.cx - b.cx, a.cy - b.cy);
+}
+
+function closestFaceTo(faces: FaceBox[], pos: FacePosition): FaceBox | null {
+  let best: FaceBox | null = null;
+  for (const f of faces) {
+    if (best === null || distanceBetween(f, pos) < distanceBetween(best, pos)) best = f;
+  }
+  return best;
 }
 
 /** Holds back person-count changes until consecutive detections have agreed long enough. */
@@ -170,6 +184,11 @@ export class PersonCountDebouncer {
  * hold for ACTIVE_SPEAKER_LOCK_SEC before the resolver actually locks onto them, so
  * one noisy read doesn't flip the framing.
  *
+ * Once locked, the lock follows that face from detection to detection. It
+ * is released when the face is gone (no face within MAX_LOCK_DISTANCE), or
+ * when fewer than ACTIVE_SPEAKER_THRESHOLD faces remain for
+ * LOCK_GRACE_BELOW_THRESHOLD_SEC.
+ *
  * If neither signal is confident, falls back to the raw faces (today's
  * ordinary split/grid) at AMBIGUOUS_GRID_FALLBACK_FACES or below, or to
  * showing nothing above it — better to punt on a scene we can't read
@@ -179,10 +198,13 @@ export class ActiveSpeakerResolver {
   private lockedPos: FacePosition | null = null;
   private pendingPos: FacePosition | null = null;
   private pendingStreak = new AgreementStreak();
+  private belowThresholdSinceSec: number | null = null;
 
   /** `energy` is the audio reading for the same detection, or null when there is no usable audio; `atSec` is its media time. */
   resolve(rawFaces: FaceBox[], energy: number | null, atSec: number): FaceBox[] {
-    if (rawFaces.length < ACTIVE_SPEAKER_THRESHOLD) return rawFaces;
+    if (rawFaces.length < ACTIVE_SPEAKER_THRESHOLD) return this.resolveBelowThreshold(rawFaces, atSec);
+    this.belowThresholdSinceSec = null;
+    this.followLock(rawFaces);
     const ambiguousFallback = rawFaces.length <= AMBIGUOUS_GRID_FALLBACK_FACES ? rawFaces : [];
 
     // Size doesn't need audio — playback is often muted or has no audio
@@ -207,7 +229,7 @@ export class ActiveSpeakerResolver {
       // on, if anyone.
       this.pendingPos = null;
       this.pendingStreak.clear();
-      return this.lockedPos ? [closestFaceTo(rawFaces, this.lockedPos)] : ambiguousFallback;
+      return this.lockedFaceIn(rawFaces) ?? ambiguousFallback;
     }
 
     const candidate = { cx: winner.cx, cy: winner.cy };
@@ -221,12 +243,44 @@ export class ActiveSpeakerResolver {
       this.lockedPos = candidate;
     }
 
-    return this.lockedPos ? [closestFaceTo(rawFaces, this.lockedPos)] : ambiguousFallback;
+    return this.lockedFaceIn(rawFaces) ?? ambiguousFallback;
   }
 
   reset(): void {
     this.lockedPos = null;
     this.pendingPos = null;
     this.pendingStreak.clear();
+    this.belowThresholdSinceSec = null;
+  }
+
+  /** Too few faces for a lock to be needed: keeps an existing lock through a short gap, then releases it. */
+  private resolveBelowThreshold(rawFaces: FaceBox[], atSec: number): FaceBox[] {
+    if (this.lockedPos === null) return rawFaces;
+    if (this.belowThresholdSinceSec === null || atSec < this.belowThresholdSinceSec) {
+      this.belowThresholdSinceSec = atSec;
+    }
+    if (atSec - this.belowThresholdSinceSec >= LOCK_GRACE_BELOW_THRESHOLD_SEC - TIME_EPSILON_SEC) {
+      this.reset();
+      return rawFaces;
+    }
+    this.followLock(rawFaces);
+    return this.lockedFaceIn(rawFaces) ?? rawFaces;
+  }
+
+  /** Moves the lock to the locked person's new position, or releases it if they are gone. */
+  private followLock(rawFaces: FaceBox[]): void {
+    if (this.lockedPos === null) return;
+    const nearest = closestFaceTo(rawFaces, this.lockedPos);
+    if (nearest === null || distanceBetween(nearest, this.lockedPos) > MAX_LOCK_DISTANCE) {
+      this.reset();
+      return;
+    }
+    this.lockedPos = { cx: nearest.cx, cy: nearest.cy };
+  }
+
+  private lockedFaceIn(rawFaces: FaceBox[]): FaceBox[] | null {
+    if (this.lockedPos === null) return null;
+    const face = closestFaceTo(rawFaces, this.lockedPos);
+    return face ? [face] : null;
   }
 }
