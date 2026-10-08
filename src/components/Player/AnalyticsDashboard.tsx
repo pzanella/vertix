@@ -87,6 +87,12 @@ export const AnalyticsDashboard = memo(function AnalyticsDashboard({
             label="Crop Scale"
             value={metrics.cropScaleFactor !== null ? `${metrics.cropScaleFactor.toFixed(2)}×` : "—"}
           />
+          <MetricRow label="Skin-Rejected" value={String(metrics.skinRejectedTotal)} />
+          <MetricRow
+            label="…Speaker-Sized"
+            value={String(metrics.skinRejectedSpeakerSized)}
+            tone={metrics.skinRejectedSpeakerSized > 0 ? "warn" : "default"}
+          />
         </MetricSection>
 
         <MetricSection title="Face Boxes">

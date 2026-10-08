@@ -16,6 +16,7 @@ import { useWasmReframe } from "./hooks/useWasmReframe";
 export default function App() {
   const {
     canvasRef,
+    skinRejectionOverlayRef,
     videoRef,
     mode,
     setMode,
@@ -182,7 +183,12 @@ export default function App() {
       {showPlayer && (
         <div className="flex-1 min-h-0 flex flex-col md:flex-row gap-4 w-full">
           <div className="flex-1 min-h-0 flex flex-col items-center gap-y-6 gap-x-4">
-            <Canvas canvasRef={canvasRef} mode={mode} overlay={streamHealthOverlay} />
+            <Canvas
+              canvasRef={canvasRef}
+              skinRejectionOverlayRef={skinRejectionOverlayRef}
+              mode={mode}
+              overlay={streamHealthOverlay}
+            />
             <div className="w-full flex items-center gap-2">
               <LiveStatusPanel mode={mode} speakerCount={speakerCount} isTransitioning={isTransitioning} />
               {isBuffering && (

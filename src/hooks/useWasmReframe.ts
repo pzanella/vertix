@@ -190,6 +190,8 @@ const STREAM_HEALTH_POLL_MS = 300;
 
 interface UseWasmReframeReturn {
   canvasRef: React.RefObject<HTMLCanvasElement | null>;
+  /** Callback ref for a canvas laid over the output canvas, where the engine draws skin-rejected detections. */
+  skinRejectionOverlayRef: (canvas: HTMLCanvasElement | null) => void;
   videoRef: React.RefObject<HTMLVideoElement | null>;
   state: PlayerState;
   meta: VertixMeta | null;
@@ -233,6 +235,7 @@ export function useWasmReframe(): UseWasmReframeReturn {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const attachedCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const skinRejectionOverlayElementRef = useRef<HTMLCanvasElement | null>(null);
   const shakaAttachedRef = useRef(false);
   const currentSrcRef = useRef<string | null>(null);
   const loadGenerationRef = useRef(0);
@@ -265,6 +268,7 @@ export function useWasmReframe(): UseWasmReframeReturn {
   useEffect(() => {
     const engine = new VertixEngine();
     engineRef.current = engine;
+    engine.setSkinRejectionOverlay(skinRejectionOverlayElementRef.current);
     const unsubState = engine.onStateChange((s) => {
       setModeState(s.mode);
       setMeta(s.meta);
@@ -542,8 +546,16 @@ export function useWasmReframe(): UseWasmReframeReturn {
 
   const getEngine = useCallback(() => engineRef.current, []);
 
+  // Remembered as well as forwarded, in case the overlay canvas mounts
+  // before the engine exists (the engine is created in an effect).
+  const skinRejectionOverlayRef = useCallback((canvas: HTMLCanvasElement | null) => {
+    skinRejectionOverlayElementRef.current = canvas;
+    engineRef.current?.setSkinRejectionOverlay(canvas);
+  }, []);
+
   return {
     canvasRef,
+    skinRejectionOverlayRef,
     videoRef,
     state,
     meta,
