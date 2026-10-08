@@ -1,4 +1,5 @@
-//! Finds faces in a small letterboxed frame using a pretrained model
+//! Finds faces in a small 320x240 frame (the source video stretched to fit,
+//! not letterboxed) using a pretrained model
 //! (UltraFace slim-320, see `models/ATTRIBUTION.md`).
 
 use std::sync::OnceLock;
@@ -166,9 +167,9 @@ fn mouth_motion(rgba: &[u8], prev: &[u8], c: &Candidate) -> f64 {
 }
 
 /// One detected, filtered face — position and size as fractions (0..1) of
-/// the letterboxed detection frame, which is a plain stretch-fill of the
-/// source video, so these fractions map directly onto source-frame fractions
-/// too (see the comment on `FACE_W`/`FACE_H` in `useWasmReframe.ts`).
+/// the detection frame, which is a plain stretch of the source video, so
+/// these fractions map directly onto source-frame fractions too (see the
+/// comment on `FACE_W`/`FACE_H` in `VertixEngine.ts`).
 #[derive(Clone, Copy)]
 pub struct FaceObservation {
     pub cx: f32,
@@ -193,7 +194,7 @@ impl FaceTracker {
         }
     }
 
-    /// Runs detection on a 320x240 letterboxed RGBA frame and returns every
+    /// Runs detection on a 320x240 stretched RGBA frame and returns every
     /// face that survives the skin-tone/aspect-ratio filters.
     pub fn observe(&mut self, rgba: &[u8]) -> Vec<FaceObservation> {
         let candidates = detect(rgba);
