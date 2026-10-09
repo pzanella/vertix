@@ -236,9 +236,9 @@ source picker:
 | `3-speakers.mp4`      | 3        | yes   | ~12s     |
 
 `1-speaker.mp4` exercises the single chest-up crop, the four `2-speakers-*`
-clips exercise the stacked split (and are the best set for testing the
-b-roll/split debounce on cuts), and `3-speakers.mp4` exercises the grid
-layout. They're served straight from `public/`, so they also work as-is
+clips exercise the stacked split, and `3-speakers.mp4` exercises the grid
+layout. None of them contains a cut; `node scripts/make-cut-clips.mjs`
+builds test clips with known cuts from them. They're served straight from `public/`, so they also work as-is
 once the app is deployed — no separate hosting needed.
 
 Sourced from [Pexels](https://www.pexels.com/), free to use under the
