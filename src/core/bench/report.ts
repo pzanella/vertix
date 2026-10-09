@@ -31,7 +31,7 @@ export interface WasmBuildComparison {
 
 export interface BenchmarkReport {
   tool: "vertix-benchmark";
-  schemaVersion: 3;
+  schemaVersion: 4;
   config: BenchmarkConfig;
   environment: BenchmarkEnvironment;
   wasmBuildComparison: WasmBuildComparison;
@@ -78,7 +78,7 @@ export function buildBenchmarkReport(
 ): BenchmarkReport {
   return {
     tool: "vertix-benchmark",
-    schemaVersion: 3,
+    schemaVersion: 4,
     config,
     environment,
     wasmBuildComparison,
@@ -110,6 +110,10 @@ const CSV_COLUMNS = [
   "skin_rejected",
   "skin_rejected_speaker_sized",
   "duration_ms",
+  "frame_media_time_s",
+  "scene_cut_hist",
+  "scene_cut_grid",
+  "scene_cut",
 ] as const;
 
 type CsvColumn = (typeof CSV_COLUMNS)[number];
@@ -163,6 +167,10 @@ export function benchmarkReportToCsv(report: BenchmarkReport): string {
         kept_faces: detections.keptFaces[i],
         skin_rejected: detections.skinRejected[i],
         skin_rejected_speaker_sized: detections.skinRejectedSpeakerSized[i],
+        frame_media_time_s: detections.frameMediaTimeSec[i],
+        scene_cut_hist: detections.sceneCutHist[i],
+        scene_cut_grid: detections.sceneCutGrid[i],
+        scene_cut: detections.sceneCut[i],
       })
     );
     skippedDetections.mediaTimeSec.forEach((_, i) =>
@@ -236,6 +244,7 @@ export function benchmarkSummaryRows(report: BenchmarkReport): BenchmarkTableRow
     "skin rejected": summary.detection.skinRejected.total,
     "skin rejected (speaker-sized)": summary.detection.skinRejected.speakerSized,
     "layout changes": summary.layoutChanges,
+    "scene cuts": summary.sceneCutCount,
     "long tasks": summary.longTasks.supported ? summary.longTasks.count : "n/a",
     "page hidden": pageHiddenDuringRun ? "yes (invalid)" : "no",
     "duplicate callbacks": summary.frames.duplicateCallbacks,

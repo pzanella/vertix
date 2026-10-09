@@ -5,6 +5,7 @@ import {
   faceVisibleFraction,
   lerpPaneRectInto,
   paneSmoothingAlpha,
+  NO_SCENE_CUT,
   unpackDetections,
   unpackSceneCutScores,
   type FaceBox,
@@ -470,6 +471,7 @@ export class VertixEngine {
   private lastDetectedFaceCount = 0;
   private lastSkinRejectedFaces: FaceBox[] = [];
   private lastSkinRejectedSpeakerSizedCount = 0;
+  private lastSceneCut: SceneCutScores = NO_SCENE_CUT;
   private skinRejectionOverlay: HTMLCanvasElement | null = null;
   private skinRejectionOverlayCtx: CanvasRenderingContext2D | null = null;
   private lastResolvedFaces: FaceBox[] = [];
@@ -825,7 +827,11 @@ export class VertixEngine {
             this.lastDetectedFaceCount,
             this.lastFaces.length,
             this.lastSkinRejectedFaces.length,
-            this.lastSkinRejectedSpeakerSizedCount
+            this.lastSkinRejectedSpeakerSizedCount,
+            mediaTimeSec,
+            this.lastSceneCut.hist,
+            this.lastSceneCut.grid,
+            this.lastSceneCut.isCut
           );
         }
       };
@@ -887,7 +893,11 @@ export class VertixEngine {
           this.lastDetectedFaceCount,
           this.lastFaces.length,
           this.lastSkinRejectedFaces.length,
-          this.lastSkinRejectedSpeakerSizedCount
+          this.lastSkinRejectedSpeakerSizedCount,
+          mediaTimeSec,
+          this.lastSceneCut.hist,
+          this.lastSceneCut.grid,
+          this.lastSceneCut.isCut
         );
       }
     }
@@ -906,6 +916,7 @@ export class VertixEngine {
     inferenceMs: number
   ): void {
     const detections = unpackDetections(facesFlat);
+    this.lastSceneCut = sceneCut;
     this.lastDetectedFaceCount = detections.faces.length;
     this.lastFaces = detections.faces.filter(isSpeakerSized);
     this.lastSkinRejectedFaces = detections.skinRejected;

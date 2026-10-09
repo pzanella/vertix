@@ -58,11 +58,12 @@ describe("BenchmarkRecorder", () => {
   it("summarizes detection stages, rate and skipped detections after warm-up", () => {
     const recorder = new BenchmarkRecorder({ clipName: "a", video: fakeVideo(10), warmupSec: 1, nominalFps: 25 });
     recorder.recordFrame(0, 1, 0, 0);
-    recorder.recordDetection("worker", 50, 50, 500, 50, 700, 1, 1, 5, 5);
+    recorder.recordDetection("worker", 50, 50, 500, 50, 700, 1, 1, 5, 5, 0, 0, 0, false);
     recorder.recordSkippedDetection();
     for (let i = 1; i <= 75; i++) {
       recorder.recordFrame(i * 40, 1, i * 0.04, i);
-      if (i > 25 && i % 5 === 0) recorder.recordDetection("worker", 2, 3, 40, 1, 50, 2, 1, 2, 1);
+      if (i > 25 && i % 5 === 0)
+        recorder.recordDetection("worker", 2, 3, 40, 1, 50, 2, 1, 2, 1, i / 25, 0.01, 0.02, false);
       if (i === 70) recorder.recordSkippedDetection();
     }
 
@@ -75,6 +76,26 @@ describe("BenchmarkRecorder", () => {
     expect(detection.wasmMs.max).toBe(40);
     expect(detection.rateHz).toBeCloseTo(5);
     expect(detection.skinRejected).toEqual({ total: 20, speakerSized: 10 });
+  });
+
+  it("lists detected scene cuts with the analysed frame's media time and keeps every detection's scores", () => {
+    const recorder = new BenchmarkRecorder({ clipName: "a", video: fakeVideo(10), warmupSec: 1, nominalFps: 25 });
+    recorder.recordFrame(0, 1, 0, 0);
+    recorder.recordDetection("worker", 2, 3, 40, 1, 50, 1, 1, 0, 0, 0, 0.5, 0.4, true);
+    recorder.recordFrame(1200, 1, 1.2, 30);
+    recorder.recordDetection("worker", 2, 3, 40, 1, 50, 1, 1, 0, 0, 1.0, 0.02, 0.03, false);
+    recorder.recordDetection("worker", 2, 3, 40, 1, 50, 1, 1, 0, 0, 1.2, 0.3, 0.2, true);
+
+    const { summary, raw } = recorder.finish("9:16");
+    expect(summary.sceneCutCount).toBe(2);
+    expect(summary.sceneCuts).toEqual([
+      { mediaTimeSec: 0, histScore: 0.5, gridScore: 0.4, warmup: true },
+      { mediaTimeSec: 1.2, histScore: 0.3, gridScore: 0.2, warmup: false },
+    ]);
+    expect(raw.detections.sceneCutHist).toEqual([0.5, 0.02, 0.3]);
+    expect(raw.detections.sceneCutGrid).toEqual([0.4, 0.03, 0.2]);
+    expect(raw.detections.sceneCut).toEqual([1, 0, 1]);
+    expect(raw.detections.frameMediaTimeSec).toEqual([0, 1.0, 1.2]);
   });
 
   it("ignores samples recorded after finish", () => {

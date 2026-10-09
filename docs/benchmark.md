@@ -306,9 +306,16 @@ Each clip result adds:
 - **JSON**: `{ tool, schemaVersion, config, environment, wasmBuildComparison,
 precisionWarnings, results[] }`. Each result contains `summary` and `raw`,
   and `raw` holds column arrays of every sample.
-  - `schemaVersion` is 3. Every v2 field is still there with the same
-    meaning, except `environment.wasmBuiltWithSimd` (see
-    [Environment info](#environment-info)).
+  - `schemaVersion` is 4. Every v3 field is still there with the same
+    meaning. Every v2 field is too, except `environment.wasmBuiltWithSimd`
+    (see [Environment info](#environment-info)).
+  - New in v4: `summary.sceneCutCount` and `summary.sceneCuts[]`
+    (`{ mediaTimeSec, histScore, gridScore, warmup }`, the hard cuts the
+    detector found, warm-up included), and per-detection columns in
+    `raw.detections`: `frameMediaTimeSec` (media time of the analysed frame),
+    `sceneCutHist`, `sceneCutGrid` (cut scores, 0..1) and `sceneCut` (1 on a
+    detected cut). The CSV has the same four as `frame_media_time_s`,
+    `scene_cut_hist`, `scene_cut_grid` and `scene_cut`.
   - `wasmBuildComparison`: `{ builds, order, simdSkippedReason }`. `builds`
     lists the builds measured; `order` is `alternating-per-clip` for the A/B
     suite; `simdSkippedReason` is `not-supported` when the browser could not

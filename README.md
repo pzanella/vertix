@@ -63,7 +63,8 @@ manual pixel copying.
 - **Stable camera** — a dead zone plus smoothing means the crop only moves
   for a real, intentional reposition, not every small gesture.
 - **Smooth transitions** — layout changes (single → split → b-roll, ...)
-  cross-dissolve instead of cutting instantly.
+  cross-dissolve instead of cutting instantly. After a hard cut in the
+  source video, the crop snaps to the new shot instead.
 - **Live analytics dashboard** — frame callback rate, detection confidence,
   motion activity, frame interval, detection-worker latency, and main-thread
   stalls, each with a live trend chart.
@@ -285,13 +286,15 @@ Sourced from [Pexels](https://www.pexels.com/), free to use under the
    panes; 3+ → a grid. This only re-runs when the face *count* changes —
    not on every detection tick — and only takes effect once that count has
    held steady for a few ticks, so a single misdetection doesn't flip the
-   layout and back.
+   layout and back. On a detected hard cut in the source, the new count
+   applies at once and the crop snaps to the new shot.
 5. Within a stable layout, each pane's crop position only moves once its
    face has drifted past a small dead zone (ordinary gestures are ignored
    completely), and then glides toward the new position instead of
    snapping.
-6. When the layout itself changes, the engine cross-dissolves from the old
-   framing into the new one instead of cutting instantly.
+6. When the layout itself changes, or the active speaker switches to
+   someone on the other side of the frame, the engine cross-dissolves from
+   the old framing into the new one instead of cutting instantly or panning.
 
 ## Performance
 
