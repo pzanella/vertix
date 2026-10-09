@@ -210,6 +210,8 @@ What one `update_faces()` call contains:
 - score threshold and NMS
 - skin-tone filter
 - mouth-motion difference
+- scene-cut scores (colour histogram and luma grid against the previous
+  call)
 - copy of the frame for the next call
 
 These cannot be split further without timing code inside Rust, so `wasmMs`

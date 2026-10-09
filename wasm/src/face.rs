@@ -208,8 +208,8 @@ impl FaceTracker {
     /// face that survives the aspect-ratio filter. Faces that then fail the
     /// skin-tone check are returned too, flagged `skin_rejected`. On a hard
     /// cut, mouth motion is 0: the previous frame belongs to another shot.
-    pub fn observe(&mut self, rgba: &[u8]) -> Vec<FaceObservation> {
-        self.last_cut = self.scene_cut.observe(rgba);
+    pub fn observe(&mut self, rgba: &[u8], media_time_sec: f64) -> Vec<FaceObservation> {
+        self.last_cut = self.scene_cut.observe(rgba, media_time_sec);
         let candidates = detect(rgba);
 
         let mut obs = Vec::new();

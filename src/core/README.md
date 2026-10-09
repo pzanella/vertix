@@ -115,8 +115,10 @@ The layout only changes when the speaker *count* changes, debounced over a
 short time in seconds (dropping to zero speakers reacts faster than any
 other change, since staying cropped over a shot with no one in it looks
 worse than briefly widening out), or on a hard cut in the source, which
-the WASM detector reports (`wasm/src/scene_cut.rs`) and which commits the
-new count at once and snaps the crop. Within a stable layout, individual
+the WASM detector reports (`wasm/src/scene_cut.rs`: a colour or layout
+score of at least 0.12 that is also 3x its recent median, and at least
+1.0 s of media time after the previous cut) and which commits the new
+count at once and snaps the crop. Within a stable layout, individual
 crops move only past a dead zone, then glide; the full layout decision
 never reruns, except when the active speaker switches to someone far
 away, which cross-dissolves instead of panning. This two-layer design, a stable layout plus independently-smoothed

@@ -28,11 +28,13 @@ pub const CUT_SPIKE_FACTOR: f64 = 3.0;
 /// Number of past detections the spike median uses. Until this many exist
 /// (start of playback, after a seek) only the absolute threshold applies.
 pub const CUT_SPIKE_HISTORY: usize = 10;
-/// After a cut, the next this many detections (~1 s at 25 fps) can't be
-/// cuts. A flash or fast fade between two takes crosses the threshold on
-/// several detections in a row; without this gap each one would snap the
-/// crop and reset tracking again.
-pub const CUT_MIN_GAP_DETECTIONS: u32 = 5;
+/// No second cut within this many media-time seconds of the last one. A
+/// flash or fast fade between two takes crosses the threshold on several
+/// detections in a row; without this gap each one would snap the crop and
+/// reset tracking again.
+pub const CUT_MIN_GAP_SEC: f64 = 1.0;
+/// Absorbs float rounding in media timestamps (0.2 * 5 != 1.0).
+const TIME_EPSILON_SEC: f64 = 1e-3;
 
 #[derive(Clone, Copy, Default)]
 pub struct CutScores {
@@ -49,7 +51,7 @@ pub struct SceneCutDetector {
     has_prev: bool,
     hist_history: VecDeque<f64>,
     grid_history: VecDeque<f64>,
-    detections_since_cut: u32,
+    last_cut_sec: Option<f64>,
 }
 
 impl SceneCutDetector {
@@ -60,13 +62,14 @@ impl SceneCutDetector {
             has_prev: false,
             hist_history: VecDeque::with_capacity(CUT_SPIKE_HISTORY),
             grid_history: VecDeque::with_capacity(CUT_SPIKE_HISTORY),
-            detections_since_cut: CUT_MIN_GAP_DETECTIONS,
+            last_cut_sec: None,
         }
     }
 
-    /// Scores `rgba` against the previous frame passed in, then keeps it as
-    /// the new previous frame. The first frame after a reset scores 0.
-    pub fn observe(&mut self, rgba: &[u8]) -> CutScores {
+    /// Scores `rgba` (shown at `media_time_sec`) against the previous frame
+    /// passed in, then keeps it as the new previous frame. The first frame
+    /// after a reset scores 0.
+    pub fn observe(&mut self, rgba: &[u8], media_time_sec: f64) -> CutScores {
         let (hist, grid) = frame_signature(rgba);
         if !self.has_prev {
             self.prev_hist = hist;
@@ -81,8 +84,10 @@ impl SceneCutDetector {
         let grid_score = grid_l1 as f64 / (GRID_CELLS as u64 * MAX_BLOCK_SUM as u64) as f64;
 
         let is_spike_now = is_spike(hist_score, &self.hist_history) || is_spike(grid_score, &self.grid_history);
-        let is_cut = is_spike_now && self.detections_since_cut >= CUT_MIN_GAP_DETECTIONS;
-        self.detections_since_cut = if is_cut { 0 } else { self.detections_since_cut.saturating_add(1) };
+        let is_cut = is_spike_now && self.gap_elapsed(media_time_sec);
+        if is_cut {
+            self.last_cut_sec = Some(media_time_sec);
+        }
 
         push_capped(&mut self.hist_history, hist_score);
         push_capped(&mut self.grid_history, grid_score);
@@ -96,7 +101,16 @@ impl SceneCutDetector {
         self.has_prev = false;
         self.hist_history.clear();
         self.grid_history.clear();
-        self.detections_since_cut = CUT_MIN_GAP_DETECTIONS;
+        self.last_cut_sec = None;
+    }
+
+    /// True once CUT_MIN_GAP_SEC has passed since the last cut, or if media
+    /// time went backwards (a seek normally resets the detector first).
+    fn gap_elapsed(&self, media_time_sec: f64) -> bool {
+        match self.last_cut_sec {
+            None => true,
+            Some(last) => media_time_sec < last || media_time_sec - last >= CUT_MIN_GAP_SEC - TIME_EPSILON_SEC,
+        }
     }
 }
 
@@ -144,6 +158,26 @@ fn push_capped(history: &mut VecDeque<f64>, value: f64) {
 mod tests {
     use super::*;
 
+    /// Detection interval at 25 fps, detecting every 5th frame.
+    const STEP_SEC: f64 = 0.2;
+
+    /// Feeds frames one detection interval apart.
+    struct Clock {
+        detector: SceneCutDetector,
+        now_sec: f64,
+    }
+
+    impl Clock {
+        fn new() -> Self {
+            Self { detector: SceneCutDetector::new(), now_sec: 0.0 }
+        }
+
+        fn observe(&mut self, rgba: &[u8]) -> CutScores {
+            self.now_sec += STEP_SEC;
+            self.detector.observe(rgba, self.now_sec)
+        }
+    }
+
     fn solid(r: u8, g: u8, b: u8) -> Vec<u8> {
         [r, g, b, 255].repeat(FRAME_W * FRAME_H)
     }
@@ -162,7 +196,7 @@ mod tests {
 
     #[test]
     fn first_frame_is_never_a_cut() {
-        let mut detector = SceneCutDetector::new();
+        let mut detector = Clock::new();
         let scores = detector.observe(&solid(200, 30, 30));
         assert!(!scores.is_cut);
         assert_eq!(scores.hist, 0.0);
@@ -170,7 +204,7 @@ mod tests {
 
     #[test]
     fn identical_frames_score_zero() {
-        let mut detector = SceneCutDetector::new();
+        let mut detector = Clock::new();
         detector.observe(&solid(120, 120, 120));
         let scores = detector.observe(&solid(120, 120, 120));
         assert_eq!((scores.hist, scores.grid, scores.is_cut), (0.0, 0.0, false));
@@ -178,7 +212,7 @@ mod tests {
 
     #[test]
     fn colour_change_is_a_cut() {
-        let mut detector = SceneCutDetector::new();
+        let mut detector = Clock::new();
         detector.observe(&solid(200, 30, 30));
         let scores = detector.observe(&solid(30, 30, 200));
         assert_eq!(scores.hist, 1.0);
@@ -187,7 +221,7 @@ mod tests {
 
     #[test]
     fn layout_change_with_same_colours_is_a_cut_by_grid() {
-        let mut detector = SceneCutDetector::new();
+        let mut detector = Clock::new();
         let dark = [20, 20, 20];
         let light = [230, 230, 230];
         detector.observe(&split(dark, light));
@@ -199,7 +233,7 @@ mod tests {
 
     #[test]
     fn steady_high_scores_are_not_spikes() {
-        let mut detector = SceneCutDetector::new();
+        let mut detector = Clock::new();
         let a = solid(200, 30, 30);
         let b = solid(30, 30, 200);
         detector.observe(&a);
@@ -214,22 +248,37 @@ mod tests {
 
     #[test]
     fn no_second_cut_within_the_gap() {
-        let mut detector = SceneCutDetector::new();
+        let mut detector = Clock::new();
         let a = solid(200, 30, 30);
         let b = solid(30, 30, 200);
         detector.observe(&a);
         assert!(detector.observe(&b).is_cut);
-        for _ in 0..CUT_MIN_GAP_DETECTIONS {
-            assert!(!detector.observe(&b).is_cut);
+        let cut_sec = detector.now_sec;
+        let mut frame_is_a = true;
+        while detector.now_sec + STEP_SEC < cut_sec + CUT_MIN_GAP_SEC - TIME_EPSILON_SEC {
+            assert!(!detector.observe(if frame_is_a { &a } else { &b }).is_cut);
+            frame_is_a = !frame_is_a;
         }
-        assert!(detector.observe(&a).is_cut);
+        assert!(detector.observe(if frame_is_a { &a } else { &b }).is_cut);
+        assert!((detector.now_sec - cut_sec - CUT_MIN_GAP_SEC).abs() < TIME_EPSILON_SEC);
+    }
+
+    #[test]
+    fn gap_is_in_media_time_not_detections() {
+        let mut detector = SceneCutDetector::new();
+        let a = solid(200, 30, 30);
+        let b = solid(30, 30, 200);
+        detector.observe(&a, 0.0);
+        assert!(detector.observe(&b, 0.1).is_cut);
+        assert!(!detector.observe(&a, 0.6).is_cut);
+        assert!(detector.observe(&b, 1.1).is_cut);
     }
 
     #[test]
     fn reset_forgets_previous_frame() {
-        let mut detector = SceneCutDetector::new();
+        let mut detector = Clock::new();
         detector.observe(&solid(200, 30, 30));
-        detector.reset();
+        detector.detector.reset();
         assert!(!detector.observe(&solid(30, 30, 200)).is_cut);
     }
 }

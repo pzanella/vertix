@@ -195,10 +195,11 @@ for (const clip of clips) {
   const frames = extractFrames(clip);
   frames.forEach((rgba, frame) => {
     frameCount += 1;
-    const simdFaces = unpack(simdEngine.update_faces(rgba));
-    const scalarFaces = unpack(scalarEngine.update_faces(rgba));
+    const mediaTimeSec = frame / framesPerSecond;
+    const simdFaces = unpack(simdEngine.update_faces(rgba, mediaTimeSec));
+    const scalarFaces = unpack(scalarEngine.update_faces(rgba, mediaTimeSec));
     detectionCount += simdFaces.length;
-    const where = { clip, frame, mediaTimeSec: frame / framesPerSecond };
+    const where = { clip, frame, mediaTimeSec };
 
     const simdCut = simdEngine.last_cut_scores();
     const scalarCut = scalarEngine.last_cut_scores();

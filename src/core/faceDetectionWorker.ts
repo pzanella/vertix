@@ -50,6 +50,8 @@ interface DetectMessage {
   type: "detect";
   requestId: number;
   bitmap: ImageBitmap;
+  /** Media time of the frame in `bitmap`, for the scene-cut detector's minimum gap. */
+  mediaTimeSec: number;
   /** Benchmark mode only: also time the pixel readback below. */
   measureReadback?: boolean;
 }
@@ -95,7 +97,7 @@ ctx.onmessage = (e: MessageEvent<InitMessage | DetectMessage | ResetMessage>) =>
     // Timed around inference only, not the surrounding readback/postMessage
     // — this is what shows up as "Worker Latency" in the analytics panel.
     const start = performance.now();
-    const faces = engine.update_faces(new Uint8Array(rgba.buffer));
+    const faces = engine.update_faces(new Uint8Array(rgba.buffer), msg.mediaTimeSec);
     const tookMs = performance.now() - start;
     const cutScores = engine.last_cut_scores();
     ctx.postMessage({ type: "result", requestId: msg.requestId, faces, cutScores, tookMs, readbackMs }, [

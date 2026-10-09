@@ -5,7 +5,8 @@
 // times are the ground truth instead. Every 5th frame (the app's detection
 // interval) is decoded in memory as 320x240 RGBA and fed to a fresh
 // ReframeEngine of each build. Reported per input: hits, misses and false
-// cuts for the shipped rule (threshold + spike + minimum gap), for
+// cuts for the shipped rule (threshold + spike + minimum gap in media
+// time), for
 // threshold + spike without the gap, and for the threshold alone, plus the
 // highest scores on non-cut detections.
 //
@@ -120,15 +121,16 @@ async function scoreDetections(source, fps, engines, keepStderr) {
   let buffered = Buffer.alloc(0);
   let mismatches = 0;
   const handleFrame = (rgba) => {
+    const timeSec = (detections.length * DETECT_INTERVAL_FRAMES) / fps;
     const scores = {};
     for (const [build, engine] of Object.entries(engines)) {
-      engine.update_faces(rgba);
+      engine.update_faces(rgba, timeSec);
       scores[build] = [...engine.last_cut_scores()];
     }
     const [first, ...others] = Object.values(scores);
     if (others.some((other) => other.some((value, i) => value !== first[i]))) mismatches += 1;
     const [hist, grid, isCut] = first;
-    detections.push({ timeSec: (detections.length * DETECT_INTERVAL_FRAMES) / fps, hist, grid, isCut: isCut === 1 });
+    detections.push({ timeSec, hist, grid, isCut: isCut === 1 });
   };
   await runFfmpeg(
     [

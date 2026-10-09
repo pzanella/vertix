@@ -847,7 +847,10 @@ export class VertixEngine {
             bitmap.close();
             return;
           }
-          sharedWorker.postMessage({ type: "detect", requestId, bitmap, measureReadback: probe !== null }, [bitmap]);
+          sharedWorker.postMessage(
+            { type: "detect", requestId, bitmap, mediaTimeSec, measureReadback: probe !== null },
+            [bitmap]
+          );
         })
         .catch(() => {
           this.detectionInFlight = false;
@@ -867,7 +870,7 @@ export class VertixEngine {
       const drawnAt = probe ? performance.now() : 0;
       const faceImageData = this.faceCtx.getImageData(0, 0, FACE_W, FACE_H);
       const start = performance.now();
-      const facesFlat = this.engine.update_faces(new Uint8Array(faceImageData.data.buffer));
+      const facesFlat = this.engine.update_faces(new Uint8Array(faceImageData.data.buffer), mediaTimeSec);
       const tookMs = performance.now() - start;
       this.processDetectionResult(
         facesFlat,
