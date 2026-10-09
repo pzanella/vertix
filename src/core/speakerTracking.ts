@@ -15,6 +15,10 @@ const TIME_EPSILON_SEC = 1e-3;
 const PERSON_COUNT_STABLE_SEC_INITIAL = 0.2;
 const PERSON_COUNT_STABLE_SEC = 1.0;
 const PERSON_COUNT_DROP_TO_ZERO_SEC = 0.2;
+// After a scene cut the new count is committed from a single detection.
+// For this long afterwards, count changes use the short initial debounce,
+// so a wrong first reading is corrected in ~0.2s instead of ~1s.
+const POST_CUT_SHORT_DEBOUNCE_SEC = 1.0;
 
 // --- Active-speaker resolution ----------------------------------------
 // From this many raw faces up, a plain split/grid stops being a safe
@@ -77,6 +81,13 @@ const MAX_LOCK_DISTANCE = 0.15;
 // second, with skips) a single missed face is common, and relocking takes
 // ACTIVE_SPEAKER_LOCK_SEC, too close to the count debounce to hide.
 const LOCK_GRACE_BELOW_THRESHOLD_SEC = 0.4;
+// When the lock moves to a person at least this far (straight-line,
+// fraction of frame) from the previously locked one, the framing changes
+// with a short cross-dissolve instead of panning across the room. Same as
+// MAX_LOCK_DISTANCE: beyond it the lock already treats a face as someone
+// else. It is also about half the width of a 9:16 crop of a 16:9 frame,
+// so the new speaker would sit near the edge of the old crop.
+const SPEAKER_SWITCH_DISTANCE = MAX_LOCK_DISTANCE;
 
 interface FacePosition {
   cx: number;
@@ -107,6 +118,10 @@ class AgreementStreak {
   restart(atSec: number): void {
     this.startSec = atSec;
     this.detections = 1;
+  }
+
+  get startedAtSec(): number {
+    return this.startSec;
   }
 
   /** Adds an agreeing detection; restarts instead after a clear or if media time went backwards. */
@@ -141,8 +156,18 @@ export class PersonCountDebouncer {
   private stable = 0;
   private pendingCount = 0;
   private pendingStreak = new AgreementStreak();
+  private lastCutSec: number | null = null;
 
   get stableCount(): number {
+    return this.stable;
+  }
+
+  /** Commits `count` right away, without debounce: the first detection after a scene cut, at media time `atSec`. */
+  commitNow(count: number, atSec: number): number {
+    this.stable = count;
+    this.pendingCount = count;
+    this.pendingStreak.restart(atSec);
+    this.lastCutSec = atSec;
     return this.stable;
   }
 
@@ -157,7 +182,7 @@ export class PersonCountDebouncer {
     const requiredSec =
       count === 0
         ? PERSON_COUNT_DROP_TO_ZERO_SEC
-        : hasCommittedLayout
+        : hasCommittedLayout && !this.startedSoonAfterCut()
           ? PERSON_COUNT_STABLE_SEC
           : PERSON_COUNT_STABLE_SEC_INITIAL;
     if (this.pendingStreak.hasHeldFor(requiredSec, atSec)) this.stable = count;
@@ -168,6 +193,13 @@ export class PersonCountDebouncer {
     this.stable = 0;
     this.pendingCount = 0;
     this.pendingStreak.clear();
+    this.lastCutSec = null;
+  }
+
+  private startedSoonAfterCut(): boolean {
+    if (this.lastCutSec === null) return false;
+    const sinceCutSec = this.pendingStreak.startedAtSec - this.lastCutSec;
+    return sinceCutSec >= 0 && sinceCutSec < POST_CUT_SHORT_DEBOUNCE_SEC - TIME_EPSILON_SEC;
   }
 }
 
@@ -187,7 +219,9 @@ export class PersonCountDebouncer {
  * Once locked, the lock follows that face from detection to detection. It
  * is released when the face is gone (no face within MAX_LOCK_DISTANCE), or
  * when fewer than ACTIVE_SPEAKER_THRESHOLD faces remain for
- * LOCK_GRACE_BELOW_THRESHOLD_SEC.
+ * LOCK_GRACE_BELOW_THRESHOLD_SEC. When a new winner takes the lock from
+ * someone at least SPEAKER_SWITCH_DISTANCE away, `switchedSpeaker` is
+ * true for that detection, so the caller can change framing without a pan.
  *
  * If neither signal is confident, falls back to the raw faces (today's
  * ordinary split/grid) at AMBIGUOUS_GRID_FALLBACK_FACES or below, or to
@@ -199,9 +233,16 @@ export class ActiveSpeakerResolver {
   private pendingPos: FacePosition | null = null;
   private pendingStreak = new AgreementStreak();
   private belowThresholdSinceSec: number | null = null;
+  private switched = false;
+
+  /** Whether the last `resolve` moved the lock to a different person, at least SPEAKER_SWITCH_DISTANCE away. */
+  get switchedSpeaker(): boolean {
+    return this.switched;
+  }
 
   /** `energy` is the audio reading for the same detection, or null when there is no usable audio; `atSec` is its media time. */
   resolve(rawFaces: FaceBox[], energy: number | null, atSec: number): FaceBox[] {
+    this.switched = false;
     if (rawFaces.length < ACTIVE_SPEAKER_THRESHOLD) return this.resolveBelowThreshold(rawFaces, atSec);
     this.belowThresholdSinceSec = null;
     this.followLock(rawFaces);
@@ -240,6 +281,7 @@ export class ActiveSpeakerResolver {
       this.pendingStreak.restart(atSec);
     }
     if (this.pendingStreak.hasHeldFor(ACTIVE_SPEAKER_LOCK_SEC, atSec)) {
+      this.switched = this.lockedPos !== null && distanceBetween(this.lockedPos, candidate) >= SPEAKER_SWITCH_DISTANCE;
       this.lockedPos = candidate;
     }
 
@@ -251,6 +293,7 @@ export class ActiveSpeakerResolver {
     this.pendingPos = null;
     this.pendingStreak.clear();
     this.belowThresholdSinceSec = null;
+    this.switched = false;
   }
 
   /** Too few faces for a lock to be needed: keeps an existing lock through a short gap, then releases it. */

@@ -114,9 +114,14 @@ never needed its own WASM engine before.
 The layout only changes when the speaker *count* changes, debounced over a
 short time in seconds (dropping to zero speakers reacts faster than any
 other change, since staying cropped over a shot with no one in it looks
-worse than briefly widening out). Within a stable layout, individual crops
-move only past a dead zone, then glide; the full layout decision never
-reruns. This two-layer design, a stable layout plus independently-smoothed
+worse than briefly widening out), or on a hard cut in the source, which
+the WASM detector reports (`wasm/src/scene_cut.rs`: a colour or layout
+score of at least 0.12 that is also 3x its recent median, and at least
+1.0 s of media time after the previous cut) and which commits the new
+count at once and snaps the crop. Within a stable layout, individual
+crops move only past a dead zone, then glide; the full layout decision
+never reruns, except when the active speaker switches to someone far
+away, which cross-dissolves instead of panning. This two-layer design, a stable layout plus independently-smoothed
 positions within it, came out of several rounds of tuning against real
 footage. If camera movement still feels off, look at the constants in
 `layoutEngine.ts` (`PANE_SMOOTHING_TAU_SEC`), `VertixEngine.ts`

@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { VertixEngine } from "./VertixEngine";
+import type { PaneRect, PaneTarget, SceneCutScores } from "./layoutEngine";
 
 vi.mock("./wasm/simd/wasm.js", () => ({
   default: () => new Promise(() => {}),
@@ -165,8 +166,12 @@ interface TestFace {
 /** Engine internals the speaker-tracking tests drive directly, bypassing the worker. */
 interface EngineInternals {
   lastResolvedFaces: { cx: number; cy: number }[];
+  smoothedPanes: PaneRect[];
+  targetPanes: PaneTarget[];
+  transitionStart: number | null;
   processDetectionResult(
     facesFlat: Float64Array,
+    sceneCut: SceneCutScores,
     audioEnergy: number | null,
     mediaTimeSec: number,
     srcW: number,
@@ -193,10 +198,11 @@ function setUpTracking(fps: number) {
   const internals = engine as unknown as EngineInternals;
   const intervalSec = FRAMES_PER_DETECTION / fps;
   let detections = 0;
-  const detect = (faces: TestFace[]) => {
+  const detect = (faces: TestFace[], { cut = false } = {}) => {
     detections += 1;
     internals.processDetectionResult(
       packFaces(faces),
+      { hist: cut ? 0.5 : 0, grid: cut ? 0.5 : 0, isCut: cut },
       null,
       detections * intervalSec,
       1280,
@@ -219,7 +225,30 @@ function setUpTracking(fps: number) {
   };
   const speakerCount = () => engine.getState().speakerCount;
   const resolved = () => internals.lastResolvedFaces;
-  return { engine, video, asElement, detect, secondsUntil, speakerCount, resolved };
+  /** True while each pane's drawn crop is still gliding toward its target. */
+  const isGliding = () =>
+    internals.targetPanes.some((target, i) => {
+      const drawn = internals.smoothedPanes[i];
+      const aim = target.pane.source;
+      return Math.abs(drawn.x - aim.x) > 1 || Math.abs(drawn.y - aim.y) > 1;
+    });
+  const isDissolving = () => internals.transitionStart !== null;
+  const paneCenterX = () => {
+    const source = internals.targetPanes[0].pane.source;
+    return (source.x + source.w / 2) / 1280;
+  };
+  return {
+    engine,
+    video,
+    asElement,
+    detect,
+    secondsUntil,
+    speakerCount,
+    resolved,
+    isGliding,
+    isDissolving,
+    paneCenterX,
+  };
 }
 
 const LEFT = { cx: 0.2, cy: 0.5, size: 0.15 };
@@ -304,6 +333,100 @@ describe("VertixEngine skin-filter rejections", () => {
     engine.attach(asElement, fakeCanvas());
     video.presentFrame();
     expect(engine.getMetrics().skinRejectedTotal).toBe(0);
+    engine.destroy();
+  });
+});
+
+describe("VertixEngine scene cuts", () => {
+  it("resets the active-speaker lock and counts the cut", () => {
+    const { engine, detect, secondsUntil, resolved } = setUpTracking(25);
+    secondsUntil([LEFT, BIG_MIDDLE, RIGHT], () => resolved().length === 1);
+    detect([LEFT, MIDDLE, RIGHT], { cut: true });
+    expect(resolved()).toHaveLength(3);
+    expect(engine.getMetrics().sceneCutCount).toBe(1);
+    engine.destroy();
+  });
+
+  it("commits the new face count on the cut detection, without the debounce", () => {
+    const { engine, detect, secondsUntil, speakerCount } = setUpTracking(25);
+    secondsUntil([LEFT], () => speakerCount() === 1);
+    detect([LEFT, RIGHT], { cut: true });
+    expect(speakerCount()).toBe(2);
+    engine.destroy();
+  });
+
+  it("corrects a wrong first count after a cut in 0.2s instead of 1.0s", () => {
+    const { engine, detect, secondsUntil, speakerCount } = setUpTracking(25);
+    secondsUntil([LEFT, RIGHT], () => speakerCount() === 2);
+    detect([LEFT], { cut: true });
+    expect(speakerCount()).toBe(1);
+    expect(secondsUntil([LEFT, RIGHT], () => speakerCount() === 2)).toBe(0.2);
+    engine.destroy();
+  });
+
+  it("uses the normal 1.0s debounce again once 1.0s has passed since the cut", () => {
+    const { engine, detect, secondsUntil, speakerCount } = setUpTracking(25);
+    secondsUntil([LEFT], () => speakerCount() === 1);
+    detect([LEFT], { cut: true });
+    for (let i = 0; i < 5; i++) detect([LEFT]);
+    expect(secondsUntil([LEFT, RIGHT], () => speakerCount() === 2)).toBe(1);
+    engine.destroy();
+  });
+
+  it("snaps the crop to the new shot instead of gliding across the cut", () => {
+    const { engine, detect, secondsUntil, speakerCount, isGliding, isDissolving, paneCenterX } = setUpTracking(25);
+    secondsUntil([LEFT], () => speakerCount() === 1);
+    for (let i = 0; i < 20; i++) detect([LEFT]);
+    detect([RIGHT], { cut: true });
+    expect(paneCenterX()).toBeCloseTo(RIGHT.cx, 1);
+    expect(isGliding()).toBe(false);
+    expect(isDissolving()).toBe(false);
+    engine.destroy();
+  });
+
+  it("still glides when the same face moves without a cut", () => {
+    const { engine, detect, secondsUntil, speakerCount, isGliding } = setUpTracking(25);
+    secondsUntil([LEFT], () => speakerCount() === 1);
+    for (let i = 0; i < 20; i++) detect([LEFT]);
+    detect([{ ...LEFT, cx: LEFT.cx + 0.1 }]);
+    expect(isGliding()).toBe(true);
+    engine.destroy();
+  });
+});
+
+describe("VertixEngine active-speaker switch", () => {
+  const BIG_LEFT = { ...LEFT, size: 0.3 };
+  const BIG_MIDDLE_MOVED = { ...BIG_MIDDLE, cx: BIG_MIDDLE.cx + 0.1 };
+
+  /** Locked onto BIG_MIDDLE, with the single-pane layout committed and settled. */
+  function lockedOnMiddle() {
+    const tracking = setUpTracking(25);
+    const { secondsUntil, speakerCount, resolved, isGliding, isDissolving } = tracking;
+    secondsUntil(
+      [LEFT, BIG_MIDDLE, RIGHT],
+      () => speakerCount() === 1 && resolved()[0].cx === BIG_MIDDLE.cx && !isGliding() && !isDissolving()
+    );
+    return tracking;
+  }
+
+  it("cross-dissolves to a speaker on the other side of the room instead of panning", () => {
+    const { engine, secondsUntil, resolved, isGliding, isDissolving, paneCenterX } = lockedOnMiddle();
+    secondsUntil([BIG_LEFT, MIDDLE, RIGHT], () => resolved()[0].cx === BIG_LEFT.cx);
+    expect(paneCenterX()).toBeLessThan(0.3);
+    expect(isDissolving()).toBe(true);
+    expect(isGliding()).toBe(false);
+    engine.destroy();
+  });
+
+  it("still glides when the locked speaker moves a little", () => {
+    const { engine, detect, resolved, isGliding, isDissolving } = lockedOnMiddle();
+    detect([LEFT, BIG_MIDDLE_MOVED, RIGHT]);
+    expect(isGliding()).toBe(true);
+    for (let i = 0; i < 10; i++) {
+      detect([LEFT, BIG_MIDDLE_MOVED, RIGHT]);
+      expect(isDissolving()).toBe(false);
+    }
+    expect(resolved()[0].cx).toBe(BIG_MIDDLE_MOVED.cx);
     engine.destroy();
   });
 });

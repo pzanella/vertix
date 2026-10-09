@@ -6,6 +6,7 @@ use std::sync::OnceLock;
 use tract_onnx::prelude::*;
 
 use crate::is_skin_tone;
+use crate::scene_cut::{CutScores, SceneCutDetector};
 
 const MODEL_W: usize = 320;
 const MODEL_H: usize = 240;
@@ -184,10 +185,13 @@ pub struct FaceObservation {
     pub skin_rejected: bool,
 }
 
-/// Tracks the previous frame across calls so it can score mouth motion.
+/// Tracks the previous frame across calls so it can score mouth motion and
+/// detect hard cuts.
 pub struct FaceTracker {
     prev_frame: Vec<u8>,
     has_prev: bool,
+    scene_cut: SceneCutDetector,
+    last_cut: CutScores,
 }
 
 impl FaceTracker {
@@ -195,13 +199,17 @@ impl FaceTracker {
         Self {
             prev_frame: Vec::new(),
             has_prev: false,
+            scene_cut: SceneCutDetector::new(),
+            last_cut: CutScores::default(),
         }
     }
 
     /// Runs detection on a 320x240 stretched RGBA frame and returns every
     /// face that survives the aspect-ratio filter. Faces that then fail the
-    /// skin-tone check are returned too, flagged `skin_rejected`.
-    pub fn observe(&mut self, rgba: &[u8]) -> Vec<FaceObservation> {
+    /// skin-tone check are returned too, flagged `skin_rejected`. On a hard
+    /// cut, mouth motion is 0: the previous frame belongs to another shot.
+    pub fn observe(&mut self, rgba: &[u8], media_time_sec: f64) -> Vec<FaceObservation> {
+        self.last_cut = self.scene_cut.observe(rgba, media_time_sec);
         let candidates = detect(rgba);
 
         let mut obs = Vec::new();
@@ -217,7 +225,7 @@ impl FaceTracker {
             }
             let skin_rejected = skin_ratio(rgba, c) < MIN_SKIN_RATIO;
 
-            let motion = if skin_rejected || !self.has_prev {
+            let motion = if skin_rejected || !self.has_prev || self.last_cut.is_cut {
                 0.0
             } else {
                 mouth_motion(rgba, &self.prev_frame, c)
@@ -244,7 +252,14 @@ impl FaceTracker {
         obs
     }
 
+    /// Cut scores of the last `observe` call.
+    pub fn last_cut(&self) -> CutScores {
+        self.last_cut
+    }
+
     pub fn reset(&mut self) {
         self.has_prev = false;
+        self.scene_cut.reset();
+        self.last_cut = CutScores::default();
     }
 }

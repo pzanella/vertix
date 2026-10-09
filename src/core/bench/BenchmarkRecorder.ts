@@ -28,7 +28,11 @@ export interface BenchmarkProbe {
     rawFaceCount: number,
     keptFaceCount: number,
     skinRejectedCount: number,
-    skinRejectedSpeakerSizedCount: number
+    skinRejectedSpeakerSizedCount: number,
+    frameMediaTimeSec: number,
+    sceneCutHist: number,
+    sceneCutGrid: number,
+    sceneCut: boolean
   ): void;
   /** A detection was due on this frame but skipped because the previous one had not returned yet. */
   recordSkippedDetection(): void;
@@ -87,6 +91,16 @@ export interface DetectionSummary {
   skinRejected: { total: number; speakerSized: number };
 }
 
+/** A hard cut the WASM detector found in the source (schema v4). */
+export interface SceneCutEvent {
+  /** Media time of the detection frame the cut was found on (up to one detection interval after the real cut). */
+  mediaTimeSec: number;
+  histScore: number;
+  gridScore: number;
+  /** Found during the clip's warm-up. */
+  warmup: boolean;
+}
+
 export interface LongTaskSummary {
   supported: boolean;
   count: number;
@@ -103,6 +117,9 @@ export interface BenchmarkClipSummary {
   frames: FrameAccounting;
   detection: DetectionSummary;
   layoutChanges: number;
+  /** Every detected cut, warm-up included (schema v4). */
+  sceneCutCount: number;
+  sceneCuts: SceneCutEvent[];
   longTasks: LongTaskSummary;
   /** Samples that did not fit in the preallocated buffers (should always be 0). */
   overflow: { frames: number; detections: number; layoutChanges: number; longTasks: number };
@@ -130,6 +147,12 @@ export interface BenchmarkClipRaw {
     skinRejected: number[];
     skinRejectedSpeakerSized: number[];
     warmup: number[];
+    /** Schema v4: media time of the analysed frame (mediaTimeSec above is the time the result arrived). */
+    frameMediaTimeSec: number[];
+    /** Schema v4: scene-cut scores of every detection (0..1), and 1 where the detector called a cut. */
+    sceneCutHist: number[];
+    sceneCutGrid: number[];
+    sceneCut: number[];
   };
   skippedDetections: { mediaTimeSec: number[]; warmup: number[] };
   layoutChanges: { nowMs: number[]; mediaTimeSec: number[]; warmup: number[] };
@@ -202,6 +225,10 @@ export class BenchmarkRecorder implements BenchmarkProbe {
   private readonly detectionSkinRejected: Float64Array;
   private readonly detectionSkinRejectedSpeakerSized: Float64Array;
   private readonly detectionWarmup: Uint8Array;
+  private readonly detectionFrameMediaTime: Float64Array;
+  private readonly detectionCutHist: Float64Array;
+  private readonly detectionCutGrid: Float64Array;
+  private readonly detectionCut: Uint8Array;
   private detectionCount = 0;
   private detectionOverflow = 0;
 
@@ -256,6 +283,10 @@ export class BenchmarkRecorder implements BenchmarkProbe {
     this.detectionSkinRejected = new Float64Array(detectionCapacity);
     this.detectionSkinRejectedSpeakerSized = new Float64Array(detectionCapacity);
     this.detectionWarmup = new Uint8Array(detectionCapacity);
+    this.detectionFrameMediaTime = new Float64Array(detectionCapacity);
+    this.detectionCutHist = new Float64Array(detectionCapacity);
+    this.detectionCutGrid = new Float64Array(detectionCapacity);
+    this.detectionCut = new Uint8Array(detectionCapacity);
     this.skippedMediaTime = new Float64Array(detectionCapacity);
     this.skippedWarmup = new Uint8Array(detectionCapacity);
 
@@ -302,7 +333,11 @@ export class BenchmarkRecorder implements BenchmarkProbe {
     rawFaceCount: number,
     keptFaceCount: number,
     skinRejectedCount: number,
-    skinRejectedSpeakerSizedCount: number
+    skinRejectedSpeakerSizedCount: number,
+    frameMediaTimeSec: number,
+    sceneCutHist: number,
+    sceneCutGrid: number,
+    sceneCut: boolean
   ): void {
     if (this.finished) return;
     const i = this.detectionCount;
@@ -323,6 +358,10 @@ export class BenchmarkRecorder implements BenchmarkProbe {
     this.detectionSkinRejected[i] = skinRejectedCount;
     this.detectionSkinRejectedSpeakerSized[i] = skinRejectedSpeakerSizedCount;
     this.detectionWarmup[i] = this.inWarmup ? 1 : 0;
+    this.detectionFrameMediaTime[i] = frameMediaTimeSec;
+    this.detectionCutHist[i] = sceneCutHist;
+    this.detectionCutGrid[i] = sceneCutGrid;
+    this.detectionCut[i] = sceneCut ? 1 : 0;
     this.detectionCount = i + 1;
   }
 
@@ -425,6 +464,17 @@ export class BenchmarkRecorder implements BenchmarkProbe {
     let layoutChanges = 0;
     for (let i = 0; i < this.layoutCount; i++) if (this.layoutWarmup[i] === 0) layoutChanges += 1;
 
+    const sceneCuts: SceneCutEvent[] = [];
+    for (let i = 0; i < detectionCount; i++) {
+      if (this.detectionCut[i] === 0) continue;
+      sceneCuts.push({
+        mediaTimeSec: this.detectionFrameMediaTime[i],
+        histScore: this.detectionCutHist[i],
+        gridScore: this.detectionCutGrid[i],
+        warmup: this.detectionWarmup[i] === 1,
+      });
+    }
+
     const measuredSeconds = now.length >= 2 ? (now[now.length - 1] - now[0]) / 1000 : 0;
 
     return {
@@ -454,6 +504,8 @@ export class BenchmarkRecorder implements BenchmarkProbe {
         },
       },
       layoutChanges,
+      sceneCutCount: sceneCuts.length,
+      sceneCuts,
       longTasks: {
         supported: this.longTaskObserver !== null,
         count: longTaskCount,
@@ -545,6 +597,10 @@ export class BenchmarkRecorder implements BenchmarkProbe {
         skinRejected: toArray(this.detectionSkinRejected, d),
         skinRejectedSpeakerSized: toArray(this.detectionSkinRejectedSpeakerSized, d),
         warmup: toArray(this.detectionWarmup, d),
+        frameMediaTimeSec: toArray(this.detectionFrameMediaTime, d),
+        sceneCutHist: toArray(this.detectionCutHist, d),
+        sceneCutGrid: toArray(this.detectionCutGrid, d),
+        sceneCut: toArray(this.detectionCut, d),
       },
       skippedDetections: {
         mediaTimeSec: toArray(this.skippedMediaTime, s),

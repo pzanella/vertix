@@ -121,6 +121,7 @@ export const AnalyticsDashboard = memo(function AnalyticsDashboard({
             value={metrics.layoutCommittedAt !== null ? `${stableSeconds.toFixed(1)}s` : "—"}
           />
           <MetricRow label="Switch Count" value={String(metrics.sceneSwitchCount)} />
+          <MetricRow label="Cuts Detected" value={String(metrics.sceneCutCount)} />
         </MetricSection>
 
         <MetricSection title="Performance">

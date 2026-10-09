@@ -5,6 +5,7 @@
 // order to a fresh ReframeEngine of each build, and compares the outputs:
 // maximum absolute differences, face-count changes, and detections that
 // cross one of the pipeline's thresholds in one build but not the other.
+// Scene-cut scores (last_cut_scores) must match exactly.
 //
 // Usage (after `npm run build:wasm`, needs ffmpeg on PATH):
 //   node scripts/compare-wasm-builds.mjs [framesPerSecond=2] [maxFramesPerClip=60]
@@ -181,7 +182,7 @@ function thresholdMargins(face, sameBuildFaces, rgba) {
 const simdEngine = await loadEngine("simd");
 const scalarEngine = await loadEngine("scalar");
 
-const maxDiff = { box: 0, score: 0, motion: 0 };
+const maxDiff = { box: 0, score: 0, motion: 0, cutScores: 0 };
 const minMargin = { confidence: Infinity, skinRatio: Infinity };
 const crossings = [];
 let frameCount = 0;
@@ -194,10 +195,20 @@ for (const clip of clips) {
   const frames = extractFrames(clip);
   frames.forEach((rgba, frame) => {
     frameCount += 1;
-    const simdFaces = unpack(simdEngine.update_faces(rgba));
-    const scalarFaces = unpack(scalarEngine.update_faces(rgba));
+    const mediaTimeSec = frame / framesPerSecond;
+    const simdFaces = unpack(simdEngine.update_faces(rgba, mediaTimeSec));
+    const scalarFaces = unpack(scalarEngine.update_faces(rgba, mediaTimeSec));
     detectionCount += simdFaces.length;
-    const where = { clip, frame, mediaTimeSec: frame / framesPerSecond };
+    const where = { clip, frame, mediaTimeSec };
+
+    const simdCut = simdEngine.last_cut_scores();
+    const scalarCut = scalarEngine.last_cut_scores();
+    simdCut.forEach((value, i) => {
+      maxDiff.cutScores = Math.max(maxDiff.cutScores, Math.abs(value - scalarCut[i]));
+    });
+    if (simdCut[2] !== scalarCut[2]) {
+      crossings.push({ ...where, kind: "scene cut", simd: [...simdCut], scalar: [...scalarCut] });
+    }
 
     for (const face of simdFaces) {
       minMargin.confidence = Math.min(minMargin.confidence, face.score - CONF_THRESHOLD);
