@@ -15,8 +15,9 @@ It opens a panel (a popover on desktop, a bottom sheet on phones) with:
 - **Run suite**: the reproducible run. Use this for published numbers. It
   replaces the video currently loaded with the sample clips.
 - **Run current clip**: rewinds and replays whatever is loaded (for example
-  your own file) and records it. There is no WASM warm-up before it, so run it
-  after the engine has already processed some video.
+  your own file) and records it with the WASM build already loaded. There is
+  no WASM warm-up before it, so run it after the engine has already processed
+  some video.
 - The run settings, editable before a run (see below), and an estimate of how
   long the suite takes.
 
@@ -36,7 +37,7 @@ normal playback is unaffected by the button being there.
 
 | Setting       | Default | Range      | Meaning                                                                                  |
 | ------------- | ------- | ---------- | ---------------------------------------------------------------------------------------- |
-| WASM warm-up  | 3 s     | 0–10 s     | Seconds of the first clip played **without recording** before the suite. 0 disables it. |
+| WASM warm-up  | 3 s     | 0–10 s     | Seconds played **without recording** after every WASM build switch. 0 disables it.        |
 | Clip warm-up  | 1 s     | 0–3 s      | Media-time seconds at the start of each clip that are recorded but excluded from stats. |
 | 16:9 baseline | on      | on / off   | Plays the first clip again in 16:9 (no detection) at the end of the suite.              |
 
@@ -48,16 +49,27 @@ with the numbers.
 1. Collect the environment info. This includes a few milliseconds of
    busy-waiting to measure the timer resolution, so it happens before any
    playback.
-2. **WASM warm-up**: play the first *WASM warm-up* seconds of `1-speaker.mp4` in
-   9:16, without recording. The first detection calls are slower (WASM
-   instantiation, tract model optimization on first run, JIT tiering, worker
-   start-up). This step keeps them out of the data.
-3. For each of the six clips in `public/samples/`, in order: wait 1 s, load
-   the clip, and play it in 9:16 from start to end at 1× speed. Samples from
-   the first *clip warm-up* seconds of media time are flagged `warmup = 1`. They
-   stay in the raw data but are excluded from every summary.
-4. **Baseline** (optional): play `1-speaker.mp4` again in 16:9 mode. That mode
-   runs no detection and draws the full frame unchanged.
+2. For each of the six clips in `public/samples/`, in order, run the clip once
+   per WASM build (see [WASM builds](#wasm-builds-simd-and-scalar)): SIMD then
+   scalar on the 1st, 3rd and 5th clip, scalar then SIMD on the 2nd, 4th and
+   6th. Without SIMD support, each clip runs once with the scalar build.
+3. **Build switch and WASM warm-up**: whenever the next run needs the other
+   build, the suite replaces the detection worker with a new one that loads
+   that build, then plays the first *WASM warm-up* seconds of the next clip in
+   9:16 without recording. The first detection calls after a switch are
+   slower (WASM instantiation, tract model optimization on first run, JIT
+   tiering, worker start-up). This step keeps them out of the data. The suite
+   always starts with a switch, so the first run also gets a fresh worker.
+4. **Clip run**: wait 1 s, load the clip, and play it in 9:16 from start to
+   end at 1× speed. Samples from the first *clip warm-up* seconds of media
+   time are flagged `warmup = 1`. They stay in the raw data but are excluded
+   from every summary.
+5. **Baseline** (optional): play `1-speaker.mp4` again in 16:9 mode. That mode
+   runs no detection and draws the full frame unchanged, so it runs once,
+   with whichever build is loaded.
+
+When the suite ends (finished, stopped or failed), the app switches back to
+the build it picks on its own.
 
 ### Getting reproducible numbers
 
@@ -75,6 +87,42 @@ with the numbers.
   or more faces, audio energy is an input to the layout decision. The suite
   starts from your click, so it normally plays unmuted. If the browser forced
   muted playback, the result says `muted: true`.
+
+## WASM builds (SIMD and scalar)
+
+The detector is compiled twice from the same Rust code, with the same JS API
+(`update_faces` returns 7 values per face, skin-rejected boxes included):
+
+- **SIMD**: built with `-C target-feature=+simd128`. tract then uses its
+  hand-written wasm32 SIMD kernel for f32 matrix multiplication, and the
+  compiler may auto-vectorize other loops.
+- **Scalar**: the same build without `simd128`, for browsers without
+  WebAssembly SIMD.
+
+`npm run build:wasm` builds both (see `scripts/build-wasm.mjs`) and fails if
+the scalar build contains a SIMD instruction or the SIMD build contains
+none.
+
+Outside the benchmark, the app picks one build at start-up: SIMD when
+`WebAssembly.validate` accepts a tiny SIMD module, else scalar. Only that
+build's `.wasm` is downloaded, both by the worker and by the main-thread
+fallback.
+
+The suite measures both builds on the same device in the same session, with
+no URL parameter: it switches the build between runs as described in
+[Protocol](#protocol). The order alternates per clip, so if a phone heats up
+and slows down during the run, neither build is always the one measured on
+the hotter device. Compare the two builds clip by clip, using the runs of
+the same clip (`clip` and `wasmBuild.variant` in each result), and pool
+several suites before drawing conclusions.
+
+SIMD only changes the WASM call itself (`wasmMs`). The downscale, the pixel
+readback, the messaging between threads, post-processing, layout and drawing
+run the same code in both builds.
+
+`npm run compare:wasm` checks that both builds produce the same detections:
+it feeds the same frames from `public/samples/` to both and lists any
+difference in boxes, scores, face counts or threshold decisions.
 
 ## Metrics
 
@@ -223,8 +271,15 @@ Each report includes:
 - `crossOriginIsolated`
 - `wasmSimdSupported`: `WebAssembly.validate` on a 31-byte module that uses
   `i8x16.popcnt`
-- `wasmBuiltWithSimd`: currently **false**, because the Rust build does not
-  enable `simd128`
+- `wasmBuiltWithSimd`: kept from schema v2 with a new meaning. Since v3 there
+  are two builds, and this is `true` when the build this device loads by
+  default is the SIMD one (so it now equals `wasmSimdSupported`). It does
+  not say which build a run used; read each result's `wasmBuild` for that.
+- `wasmBuild`: `{ defaultVariant, defaultReason }`, the build this device
+  loads outside the benchmark (`simd` / `scalar`) and why (`supported` /
+  `not-supported`)
+- `wasmBinarySizes`: `{ simd, scalar }`, the size in bytes of each `.wasm`
+  file, recorded at build time
 - `requestVideoFrameCallbackSupported` and `longTasksSupported`
 - `timerResolutionMs`: the measured `performance.now()` step
 
@@ -236,17 +291,33 @@ Each clip result adds:
 - `muted` and `pageHiddenDuringRun`
 - `overflow`: the number of samples that did not fit in the preallocated
   buffers. It should always be 0.
+- `wasmBuild`: `{ variant, reason, runOrder }`
+  - `variant`: `simd` or `scalar`, the build that ran
+  - `reason`: `benchmark-suite` (the suite chose it for the comparison),
+    `supported` (the default SIMD build, for example in *Run current clip*)
+    or `not-supported` (the scalar build, because this browser has no SIMD)
+  - `runOrder`: `{ position, sequence }` in the A/B suite, for example
+    `{ position: 2, sequence: ["scalar", "simd"] }` for the second run of an
+    even-numbered clip; `null` otherwise. For the 16:9 baseline, `variant`
+    is just the build that happened to be loaded.
 
 ## Output files
 
-- **JSON**: `{ tool, schemaVersion, config, environment, precisionWarnings,
-results[] }`. Each result contains `summary` and `raw`, and `raw` holds
-  column arrays of every sample.
+- **JSON**: `{ tool, schemaVersion, config, environment, wasmBuildComparison,
+precisionWarnings, results[] }`. Each result contains `summary` and `raw`,
+  and `raw` holds column arrays of every sample.
+  - `schemaVersion` is 3. Every v2 field is still there with the same
+    meaning, except `environment.wasmBuiltWithSimd` (see
+    [Environment info](#environment-info)).
+  - `wasmBuildComparison`: `{ builds, order, simdSkippedReason }`. `builds`
+    lists the builds measured; `order` is `alternating-per-clip` for the A/B
+    suite; `simdSkippedReason` is `not-supported` when the browser could not
+    run the SIMD build.
 - **CSV**: one row per raw sample in a single long-format table.
   - `kind` is one of `frame`, `detection`, `skipped_detection`,
     `layout_change` or `long_task`.
-  - Every row also has `clip`, `mode`, `index` and `warmup`, plus the columns
-    that apply to its kind.
+  - Every row also has `clip`, `mode`, `wasm_build`, `wasm_build_position`,
+    `index` and `warmup`, plus the columns that apply to its kind.
   - The table loads directly into pandas or R:
     `df[df.kind == "detection"]`.
 
@@ -304,7 +375,7 @@ What this means for the metrics:
   - With fewer than about 100 samples, p99 is effectively the maximum.
   - Prefer p50 and p95, and pool several runs for tail percentiles.
 - **Clip warm-up.** 1 s is meant to cover player start-up only. The WASM
-  warm-up happens once, before the suite. Choosing a different clip warm-up
+  warm-up happens after each build switch, not before every clip. Choosing a different clip warm-up
   changes which samples are counted, so always quote the value used. It is in
   the report's `config`.
 - **requestVideoFrameCallback support.** The engine itself needs it: Chromium

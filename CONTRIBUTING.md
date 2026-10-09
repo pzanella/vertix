@@ -4,7 +4,7 @@
 
 ```bash
 npm install
-npm run build:wasm   # compiles wasm/ and writes bindings to src/core/wasm/
+npm run build:wasm   # compiles wasm/ twice (SIMD and scalar) into src/core/wasm/
 npm run dev          # http://localhost:5173
 ```
 
@@ -51,7 +51,8 @@ any video player. If a change to the engine needs something from React
 surface.
 
 Changes to face detection or the ONNX model pipeline go in `wasm/src/`
-(Rust) — rebuild with `npm run build:wasm` and confirm `npm run build`
+(Rust) — rebuild with `npm run build:wasm`, run `npm run compare:wasm` to
+check that the SIMD and scalar builds still agree, and confirm `npm run build`
 still passes before opening a PR.
 
 ## Code style
