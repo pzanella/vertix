@@ -1,4 +1,4 @@
-import { summarize, type BenchmarkClipResult, type BenchmarkConfig, type BenchmarkReport } from "../../core";
+import { summarize, type BenchmarkClipResult, type BenchmarkReport, type WasmBuildVariant } from "../../core";
 import type { BenchmarkStatus } from "../../hooks/useBenchmark";
 
 export type BenchmarkVerdict = "valid" | "invalid" | "partial" | "failed";
@@ -10,7 +10,8 @@ export interface BenchmarkHighlights {
   reframedRuns: number;
   droppedFrames: number | null;
   expectedFrames: number | null;
-  wasmP50Ms: number | null;
+  /** Median of the per-run WASM p50 over 9:16 runs, per build measured. */
+  wasmP50MsByBuild: { build: WasmBuildVariant; p50Ms: number | null }[];
   detectionHz: number | null;
 }
 
@@ -55,16 +56,6 @@ export function benchmarkVerdict(status: BenchmarkStatus, report: BenchmarkRepor
   return report?.results.some(isClipInvalid) ? "invalid" : "valid";
 }
 
-/** Stage layout of a run, matching the plan in useBenchmark. */
-export function benchmarkStageKinds(total: number, config: BenchmarkConfig): BenchmarkStageKind[] {
-  if (total <= 1) return ["clip"];
-  return Array.from({ length: total }, (_, index) => {
-    if (index === 0) return "warmup";
-    if (config.baseline && index === total - 1) return "baseline";
-    return "clip";
-  });
-}
-
 function sumKnown(values: (number | null)[]): number | null {
   const known = values.filter((value): value is number => value !== null);
   return known.length > 0 ? known.reduce((sum, value) => sum + value, 0) : null;
@@ -79,7 +70,14 @@ export function benchmarkHighlights(report: BenchmarkReport): BenchmarkHighlight
     reframedRuns: reframed.length,
     droppedFrames: sumKnown(report.results.map((result) => result.summary.frames.droppedFramesEstimate)),
     expectedFrames: sumKnown(report.results.map((result) => result.summary.frames.expectedFrames)),
-    wasmP50Ms: median(reframed.map((result) => result.summary.detection.wasmMs.p50)),
+    wasmP50MsByBuild: report.wasmBuildComparison.builds.map((build) => ({
+      build,
+      p50Ms: median(
+        reframed
+          .filter((result) => result.wasmBuild.variant === build)
+          .map((result) => result.summary.detection.wasmMs.p50)
+      ),
+    })),
     detectionHz: median(reframed.map((result) => result.summary.detection.rateHz)),
   };
 }

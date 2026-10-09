@@ -61,7 +61,11 @@ function buildHighlights(report: BenchmarkReport, verdict: BenchmarkVerdict): Hi
       hint: stats.expectedFrames !== null ? `of ${stats.expectedFrames} expected` : "estimate",
       tone: stats.droppedFrames ? "running" : undefined,
     },
-    { label: "WASM p50", value: `${formatNumber(stats.wasmP50Ms, 1)} ms`, hint: "median over 9:16 clips" },
+    ...stats.wasmP50MsByBuild.map(({ build, p50Ms }) => ({
+      label: `WASM p50 · ${build}`,
+      value: `${formatNumber(p50Ms, 1)} ms`,
+      hint: "median over 9:16 clips",
+    })),
     { label: "Detection", value: `${formatNumber(stats.detectionHz, 1)} Hz`, hint: "median rate" },
     {
       label: "Validity",
@@ -131,12 +135,12 @@ export function BenchmarkResultsView({
 
       <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain flex flex-col gap-3 px-4 pb-3">
         {highlights.length > 0 && (
-          <dl className="grid grid-cols-2 sm:grid-cols-5 gap-1.5">
+          <dl className={`grid grid-cols-2 gap-1.5 ${highlights.length > 5 ? "sm:grid-cols-3" : "sm:grid-cols-5"}`}>
             {highlights.map(({ label, value, hint, tone, wide }) => (
               <div
                 key={label}
                 className={`rounded-xl border border-neutral-800 bg-gradient-to-b from-neutral-900 to-neutral-950 px-3 py-2 ${
-                  wide ? "col-span-2 sm:col-span-1" : ""
+                  wide && highlights.length % 2 === 1 ? "col-span-2 sm:col-span-1" : ""
                 }`}
               >
                 <dt className="text-[11px] text-neutral-500">{label}</dt>
@@ -197,7 +201,9 @@ export function BenchmarkResultsView({
           <p className="text-[11px] text-neutral-500">
             {environment.hardwareConcurrency ?? "?"} cores · DPR {environment.devicePixelRatio} · timer{" "}
             {environment.timerResolutionMs?.toFixed(3) ?? "?"} ms · SIMD supported{" "}
-            {environment.wasmSimdSupported ? "yes" : "no"}, used {environment.wasmBuiltWithSimd ? "yes" : "no"}
+            {environment.wasmSimdSupported ? "yes" : "no"} · default build {environment.wasmBuild.defaultVariant} ·
+            .wasm simd {environment.wasmBinarySizes.simd.toLocaleString()} B, scalar{" "}
+            {environment.wasmBinarySizes.scalar.toLocaleString()} B
           </p>
         )}
       </div>

@@ -8,6 +8,7 @@ import {
   summarize,
   type SampleSummary,
 } from "./stats";
+import type { BenchmarkWasmBuild } from "./suitePlan";
 
 export type DetectionPath = "worker" | "main-thread";
 
@@ -145,9 +146,14 @@ export interface BenchmarkClipResult {
   muted: boolean;
   /** True if the page was hidden at any point of the run — browsers throttle or stop frames then, so the run is not valid. */
   pageHiddenDuringRun: boolean;
+  /** The WASM build this run used (schema v3). */
+  wasmBuild: BenchmarkWasmBuild;
   summary: BenchmarkClipSummary;
   raw: BenchmarkClipRaw;
 }
+
+/** What the recorder itself knows; the runner adds the build. */
+export type BenchmarkClipRecording = Omit<BenchmarkClipResult, "wasmBuild">;
 
 // requestVideoFrameCallback fires at most once per new video frame, so this
 // bounds the frame buffer for any source up to 120 fps with headroom.
@@ -346,7 +352,7 @@ export class BenchmarkRecorder implements BenchmarkProbe {
   }
 
   /** Stops recording and builds the result. Recording calls after this are ignored. */
-  finish(mode: "9:16" | "16:9"): BenchmarkClipResult {
+  finish(mode: "9:16" | "16:9"): BenchmarkClipRecording {
     if (!this.finished) {
       this.finished = true;
       if (this.longTaskObserver) {

@@ -28,13 +28,13 @@ describe("clampToRange", () => {
 
 describe("estimateSuiteSeconds", () => {
   it("adds the baseline clip only when enabled", () => {
-    const withBaseline = estimateSuiteSeconds(DEFAULT_BENCHMARK_CONFIG);
-    const withoutBaseline = estimateSuiteSeconds({ ...DEFAULT_BENCHMARK_CONFIG, baseline: false });
+    const withBaseline = estimateSuiteSeconds(DEFAULT_BENCHMARK_CONFIG, false);
+    const withoutBaseline = estimateSuiteSeconds({ ...DEFAULT_BENCHMARK_CONFIG, baseline: false }, false);
     expect(withBaseline - withoutBaseline).toBeCloseTo(SAMPLE_CLIPS[0].durationSec + 1);
   });
 
   it("grows with the WASM warm-up", () => {
-    const base = estimateSuiteSeconds(DEFAULT_BENCHMARK_CONFIG);
-    expect(estimateSuiteSeconds({ ...DEFAULT_BENCHMARK_CONFIG, wasmWarmupSec: 5 }) - base).toBeCloseTo(2);
+    const base = estimateSuiteSeconds(DEFAULT_BENCHMARK_CONFIG, false);
+    expect(estimateSuiteSeconds({ ...DEFAULT_BENCHMARK_CONFIG, wasmWarmupSec: 5 }, false) - base).toBeCloseTo(2);
   });
 });
