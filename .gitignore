@@ -19,3 +19,6 @@ wasm/target
 
 # OS
 .DS_Store
+
+# Local evaluation output (scripts/make-cut-clips.mjs, scripts/eval-cuts.mjs)
+.eval
