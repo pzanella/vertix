@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { BenchmarkRecorder } from "./BenchmarkRecorder";
+import { BenchmarkRecorder, type BenchmarkClipResult } from "./BenchmarkRecorder";
 import type { BenchmarkEnvironment } from "./environment";
 import { benchmarkReportToCsv, benchmarkSummaryRows, buildBenchmarkReport, findPrecisionWarnings } from "./report";
 
@@ -13,13 +13,17 @@ const environment: BenchmarkEnvironment = {
   devicePixelRatio: 2,
   crossOriginIsolated: false,
   wasmSimdSupported: true,
-  wasmBuiltWithSimd: false,
+  wasmBuiltWithSimd: true,
+  wasmBuild: { defaultVariant: "simd", defaultReason: "supported" },
+  wasmBinarySizes: { simd: 100, scalar: 110 },
   requestVideoFrameCallbackSupported: true,
   longTasksSupported: false,
   timerResolutionMs: 0.1,
 };
 
-function sampleResult() {
+const comparison = { builds: ["simd" as const], order: null, simdSkippedReason: null };
+
+function sampleResult(): BenchmarkClipResult {
   const video = {
     duration: 2,
     videoWidth: 1280,
@@ -31,7 +35,10 @@ function sampleResult() {
   recorder.recordDetection("worker", 2, 3, 40, 0.5, 50, 2, 1, 1, 0);
   recorder.recordSkippedDetection();
   recorder.recordLayoutChange(200);
-  return recorder.finish("9:16");
+  return {
+    ...recorder.finish("9:16"),
+    wasmBuild: { variant: "simd", reason: "benchmark-suite", runOrder: { position: 1, sequence: ["simd", "scalar"] } },
+  };
 }
 
 describe("findPrecisionWarnings", () => {
@@ -47,13 +54,16 @@ describe("findPrecisionWarnings", () => {
 
 describe("benchmarkReportToCsv", () => {
   it("writes one row per raw sample with a shared header and quotes commas", () => {
-    const report = buildBenchmarkReport({ wasmWarmupSec: 3, clipWarmupSec: 1, baseline: true }, environment, [
-      sampleResult(),
-    ]);
+    const report = buildBenchmarkReport(
+      { wasmWarmupSec: 3, clipWarmupSec: 1, baseline: true },
+      environment,
+      comparison,
+      [sampleResult()]
+    );
     const lines = benchmarkReportToCsv(report).trim().split("\n");
-    expect(lines[0].startsWith("kind,clip,mode,index,warmup")).toBe(true);
+    expect(lines[0].startsWith("kind,clip,mode,wasm_build,wasm_build_position,index,warmup")).toBe(true);
     expect(lines).toHaveLength(1 + 10 + 1 + 1 + 1);
-    expect(lines[1].startsWith('frame,"clip, one",9:16,0,0,0,0,0.3,0')).toBe(true);
+    expect(lines[1].startsWith('frame,"clip, one",9:16,simd,1,0,0,0,0,0.3,0')).toBe(true);
     expect(lines.some((line) => line.startsWith("skipped_detection,"))).toBe(true);
     expect(lines.some((line) => line.startsWith("layout_change,"))).toBe(true);
     expect(lines[0].endsWith("kept_faces,skin_rejected,skin_rejected_speaker_sized,duration_ms")).toBe(true);
@@ -63,9 +73,12 @@ describe("benchmarkReportToCsv", () => {
 
 describe("benchmarkSummaryRows", () => {
   it("produces one row per clip with detection rate and skipped count", () => {
-    const report = buildBenchmarkReport({ wasmWarmupSec: 3, clipWarmupSec: 1, baseline: false }, environment, [
-      sampleResult(),
-    ]);
+    const report = buildBenchmarkReport(
+      { wasmWarmupSec: 3, clipWarmupSec: 1, baseline: false },
+      environment,
+      comparison,
+      [sampleResult()]
+    );
     const [row] = benchmarkSummaryRows(report);
     expect(row.clip).toBe("clip, one");
     expect(row["skipped (in flight)"]).toBe(1);

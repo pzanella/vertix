@@ -1,7 +1,11 @@
 import { describe, expect, it, vi } from "vitest";
 import { VertixEngine } from "./VertixEngine";
 
-vi.mock("./wasm/wasm.js", () => ({
+vi.mock("./wasm/simd/wasm.js", () => ({
+  default: () => new Promise(() => {}),
+  ReframeEngine: class {},
+}));
+vi.mock("./wasm/scalar/wasm.js", () => ({
   default: () => new Promise(() => {}),
   ReframeEngine: class {},
 }));

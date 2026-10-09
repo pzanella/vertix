@@ -1,5 +1,6 @@
 import type { VertixEngine, VertixMode } from "../VertixEngine";
 import { BenchmarkRecorder, type BenchmarkClipResult } from "./BenchmarkRecorder";
+import type { BenchmarkWasmBuild } from "./suitePlan";
 
 export interface ClipPlaybackOptions {
   mode: VertixMode;
@@ -16,6 +17,7 @@ export interface BenchmarkClipOptions extends ClipPlaybackOptions {
   clipName: string;
   nominalFps: number | null;
   warmupSec: number;
+  wasmBuild: BenchmarkWasmBuild;
 }
 
 // A clip that has not ended after duration × this (+ grace) is treated as stuck.
@@ -164,5 +166,5 @@ export async function runBenchmarkClip(
   }
   const finished = recorder as BenchmarkRecorder | null;
   if (!finished) throw new Error("Benchmark clip ended before it started");
-  return { ...finished.finish(options.mode), pageHiddenDuringRun: pageHidden };
+  return { ...finished.finish(options.mode), pageHiddenDuringRun: pageHidden, wasmBuild: options.wasmBuild };
 }

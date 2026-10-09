@@ -1,6 +1,7 @@
 import type { BenchmarkClipResult, BenchmarkClipSummary } from "./BenchmarkRecorder";
 import type { BenchmarkEnvironment } from "./environment";
 import type { SampleSummary } from "./stats";
+import type { WasmBuildVariant } from "../wasmBuild";
 
 export interface BenchmarkConfig {
   /** Seconds of the first clip played, unrecorded, before the suite starts — warms up WASM and the JIT. */
@@ -18,11 +19,22 @@ export interface PrecisionWarning {
   timerResolutionMs: number;
 }
 
+/** How the run compared the WASM builds. Schema v3. */
+export interface WasmBuildComparison {
+  /** Builds measured in this run, in first-use order. */
+  builds: WasmBuildVariant[];
+  /** "alternating-per-clip": even clips ran SIMD then scalar, odd clips scalar then SIMD. */
+  order: "alternating-per-clip" | null;
+  /** Set when the SIMD build was not measured because this browser cannot run it. */
+  simdSkippedReason: "not-supported" | null;
+}
+
 export interface BenchmarkReport {
   tool: "vertix-benchmark";
-  schemaVersion: 2;
+  schemaVersion: 3;
   config: BenchmarkConfig;
   environment: BenchmarkEnvironment;
+  wasmBuildComparison: WasmBuildComparison;
   /** Timing metrics whose median is within PRECISION_WARNING_FACTOR × the measured timer resolution. */
   precisionWarnings: PrecisionWarning[];
   results: BenchmarkClipResult[];
@@ -61,13 +73,15 @@ export function findPrecisionWarnings(
 export function buildBenchmarkReport(
   config: BenchmarkConfig,
   environment: BenchmarkEnvironment,
+  wasmBuildComparison: WasmBuildComparison,
   results: BenchmarkClipResult[]
 ): BenchmarkReport {
   return {
     tool: "vertix-benchmark",
-    schemaVersion: 2,
+    schemaVersion: 3,
     config,
     environment,
+    wasmBuildComparison,
     precisionWarnings: findPrecisionWarnings(results, environment.timerResolutionMs),
     results,
   };
@@ -77,6 +91,8 @@ const CSV_COLUMNS = [
   "kind",
   "clip",
   "mode",
+  "wasm_build",
+  "wasm_build_position",
   "index",
   "warmup",
   "time_ms",
@@ -110,13 +126,15 @@ export function benchmarkReportToCsv(report: BenchmarkReport): string {
   const lines = [CSV_COLUMNS.join(",")];
   const push = (row: CsvRow) => lines.push(CSV_COLUMNS.map((column) => csvCell(row[column])).join(","));
 
-  for (const { clip, mode, raw } of report.results) {
+  for (const { clip, mode, raw, wasmBuild } of report.results) {
     const { frames, detections, skippedDetections, layoutChanges, longTasks } = raw;
+    const build = { wasm_build: wasmBuild.variant, wasm_build_position: wasmBuild.runOrder?.position };
     frames.nowMs.forEach((_, i) =>
       push({
         kind: "frame",
         clip,
         mode,
+        ...build,
         index: i,
         warmup: frames.warmup[i],
         time_ms: frames.nowMs[i],
@@ -130,6 +148,7 @@ export function benchmarkReportToCsv(report: BenchmarkReport): string {
         kind: "detection",
         clip,
         mode,
+        ...build,
         index: i,
         warmup: detections.warmup[i],
         time_ms: detections.endedAtMs[i],
@@ -151,6 +170,7 @@ export function benchmarkReportToCsv(report: BenchmarkReport): string {
         kind: "skipped_detection",
         clip,
         mode,
+        ...build,
         index: i,
         warmup: skippedDetections.warmup[i],
         media_time_s: skippedDetections.mediaTimeSec[i],
@@ -161,6 +181,7 @@ export function benchmarkReportToCsv(report: BenchmarkReport): string {
         kind: "layout_change",
         clip,
         mode,
+        ...build,
         index: i,
         warmup: layoutChanges.warmup[i],
         time_ms: layoutChanges.nowMs[i],
@@ -172,6 +193,7 @@ export function benchmarkReportToCsv(report: BenchmarkReport): string {
         kind: "long_task",
         clip,
         mode,
+        ...build,
         index: i,
         warmup: longTasks.warmup[i],
         time_ms: longTasks.startTimeMs[i],
@@ -192,9 +214,11 @@ export type BenchmarkTableRow = Record<string, string | number | null>;
 
 /** One compact row per clip, for console.table and the on-page results table. */
 export function benchmarkSummaryRows(report: BenchmarkReport): BenchmarkTableRow[] {
-  return report.results.map(({ clip, mode, summary, pageHiddenDuringRun }) => ({
+  return report.results.map(({ clip, mode, summary, pageHiddenDuringRun, wasmBuild }) => ({
     clip,
     mode,
+    build: mode === "16:9" ? "n/a" : wasmBuild.variant,
+    "build order": wasmBuild.runOrder ? `${wasmBuild.runOrder.position}/${wasmBuild.runOrder.sequence.length}` : null,
     "render fps": round(summary.effectiveFps, 1),
     "frame work p50 ms": round(summary.frameWorkMs.p50),
     "frame work p95 ms": round(summary.frameWorkMs.p95),

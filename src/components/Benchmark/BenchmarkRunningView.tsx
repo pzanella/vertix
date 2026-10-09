@@ -1,14 +1,11 @@
-import type { BenchmarkConfig } from "../../core";
 import type { BenchmarkStage } from "../../hooks/useBenchmark";
 import { BenchmarkIcon } from "./BenchmarkIcon";
-import { benchmarkStageKinds } from "./benchmarkOutcome";
 import { BenchmarkPanelHeader } from "./BenchmarkPanelHeader";
 import { BenchmarkStageRail } from "./BenchmarkStageRail";
 import { DANGER_BUTTON } from "./benchmarkStyles";
 
 interface BenchmarkRunningViewProps {
   titleId: string;
-  config: BenchmarkConfig;
   stage: BenchmarkStage | null;
   progress: number;
   stageFraction: number;
@@ -18,7 +15,6 @@ interface BenchmarkRunningViewProps {
 
 export function BenchmarkRunningView({
   titleId,
-  config,
   stage,
   progress,
   stageFraction,
@@ -50,13 +46,7 @@ export function BenchmarkRunningView({
           </p>
         </div>
 
-        {stage && (
-          <BenchmarkStageRail
-            kinds={benchmarkStageKinds(stage.total, config)}
-            currentIndex={stage.index}
-            currentFraction={stageFraction}
-          />
-        )}
+        {stage && <BenchmarkStageRail kinds={stage.kinds} currentIndex={stage.index} currentFraction={stageFraction} />}
 
         <p className="text-neutral-500">Keep this tab visible. Results open here when the run ends.</p>
 

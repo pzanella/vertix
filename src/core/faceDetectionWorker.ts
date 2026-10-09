@@ -1,4 +1,4 @@
-import initWasm, { ReframeEngine } from "./wasm/wasm.js";
+import { importWasmBindings, type WasmBindings, type WasmBuildVariant } from "./wasmBuild";
 
 /**
  * Runs the WASM face detector off the main thread, including reading the
@@ -19,25 +19,33 @@ import initWasm, { ReframeEngine } from "./wasm/wasm.js";
  */
 const ctx = self as unknown as Worker;
 
-let engine: InstanceType<typeof ReframeEngine> | null = null;
+let engine: InstanceType<WasmBindings["ReframeEngine"]> | null = null;
 
-// This bundle is built as a classic script, not a module (see
-// build-worker.mjs), so it can't rely on wasm.js's default `import.meta.url`
-// resolution — pass the .wasm path explicitly instead.
-const wasmUrl = new URL("wasm_bg.wasm", self.location.href);
-
-// Post failures back instead of letting them become a silent unhandled
+// The main thread picks the build (see wasmBuild.ts) and sends it in the
+// first message; nothing is fetched before that, so only one .wasm binary
+// is downloaded. This bundle is built as a classic script, not a module
+// (see build-worker.mjs), so it can't rely on wasm.js's default
+// `import.meta.url` resolution — the .wasm path is passed explicitly.
+// Failures are posted back instead of becoming a silent unhandled
 // rejection in here — otherwise the main thread just waits forever for a
 // "ready" that never comes.
-initWasm({ module_or_path: wasmUrl })
-  .then(() => {
-    engine = new ReframeEngine();
-    ctx.postMessage({ type: "ready" });
-  })
-  .catch((err: unknown) => {
-    ctx.postMessage({ type: "error", message: err instanceof Error ? err.message : String(err) });
-  });
+function initEngine(build: WasmBuildVariant): void {
+  const wasmUrl = new URL(`wasm_${build}_bg.wasm`, self.location.href);
+  importWasmBindings(build)
+    .then(async (bindings) => {
+      await bindings.default({ module_or_path: wasmUrl });
+      engine = new bindings.ReframeEngine();
+      ctx.postMessage({ type: "ready", build });
+    })
+    .catch((err: unknown) => {
+      ctx.postMessage({ type: "error", message: err instanceof Error ? err.message : String(err) });
+    });
+}
 
+interface InitMessage {
+  type: "init";
+  build: WasmBuildVariant;
+}
 interface DetectMessage {
   type: "detect";
   requestId: number;
@@ -57,8 +65,12 @@ interface ResetMessage {
 let detectCanvas: OffscreenCanvas | null = null;
 let detectCtx: OffscreenCanvasRenderingContext2D | null = null;
 
-ctx.onmessage = (e: MessageEvent<DetectMessage | ResetMessage>) => {
+ctx.onmessage = (e: MessageEvent<InitMessage | DetectMessage | ResetMessage>) => {
   const msg = e.data;
+  if (msg.type === "init") {
+    initEngine(msg.build);
+    return;
+  }
   if (msg.type === "reset") {
     engine?.reset();
     return;

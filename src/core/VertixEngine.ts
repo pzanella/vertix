@@ -1,4 +1,3 @@
-import initWasm, { ReframeEngine } from "./wasm/wasm.js";
 import { AudioActivityMonitor } from "./audioActivity";
 import { ActiveSpeakerResolver, PersonCountDebouncer } from "./speakerTracking";
 import {
@@ -12,6 +11,13 @@ import {
   type PaneTarget,
 } from "./layoutEngine";
 import type { BenchmarkProbe } from "./bench/BenchmarkRecorder";
+import {
+  defaultWasmBuild,
+  importWasmBindings,
+  type WasmBindings,
+  type WasmBuildSelection,
+  type WasmBuildVariant,
+} from "./wasmBuild";
 
 /**
  * Vertix's headless reframe engine — face detection (WASM/ONNX), the
@@ -162,12 +168,42 @@ const WORKER_READY_TIMEOUT_MS = 4000;
 // constructed (React StrictMode always creates at least two in dev).
 let sharedWorker: Worker | null = null;
 let sharedWorkerReady = false;
+// True while a worker is starting up. Detection ticks are skipped then
+// instead of falling back to the main thread, which would download the
+// other copy of the .wasm binary for nothing.
+let sharedWorkerLoading = false;
 let sharedWorkerLoadPromise: Promise<boolean> | null = null;
+let disposeSharedWorker: (() => void) | null = null;
 let nextDetectionRequestId = 0;
-const pendingDetectionCallbacks = new Map<
-  number,
-  (facesFlat: Float64Array, tookMs: number, readbackMs: number) => void
->();
+
+interface PendingDetection {
+  onResult: (facesFlat: Float64Array, tookMs: number, readbackMs: number) => void;
+  /** Called instead of onResult when the worker is replaced before it answers. */
+  onCancel: () => void;
+}
+const pendingDetections = new Map<number, PendingDetection>();
+
+let activeWasmBuild: WasmBuildSelection | null = null;
+
+/** The WASM build the worker and the main-thread fallback load: the default from the SIMD probe unless the benchmark suite switched it. */
+export function getActiveWasmBuild(): WasmBuildSelection {
+  activeWasmBuild ??= defaultWasmBuild();
+  return activeWasmBuild;
+}
+
+/**
+ * Benchmark suite only: replaces the shared worker with a new one running
+ * `selection`'s build. Main-thread fallback instances reload lazily on
+ * their next detection tick. Requests still pending in the old worker are
+ * cancelled. Resolves like getSharedDetectionWorker.
+ */
+export function switchWasmBuild(selection: WasmBuildSelection): Promise<boolean> {
+  activeWasmBuild = selection;
+  disposeSharedWorker?.();
+  for (const pending of pendingDetections.values()) pending.onCancel();
+  pendingDetections.clear();
+  return getSharedDetectionWorker();
+}
 
 /**
  * Creates the shared worker on first call and waits for it to report
@@ -182,6 +218,8 @@ const pendingDetectionCallbacks = new Map<
 function getSharedDetectionWorker(): Promise<boolean> {
   if (sharedWorkerLoadPromise) return sharedWorkerLoadPromise;
 
+  const build = getActiveWasmBuild().variant;
+  sharedWorkerLoading = true;
   sharedWorkerLoadPromise = new Promise((resolve) => {
     let worker: Worker;
     try {
@@ -194,11 +232,28 @@ function getSharedDetectionWorker(): Promise<boolean> {
         "[Vertix] Couldn't construct the detection worker; falling back to running WASM on the main thread.",
         err
       );
+      sharedWorkerLoading = false;
       resolve(false);
       return;
     }
 
     let settled = false;
+    const settle = (ok: boolean) => {
+      if (settled) return;
+      settled = true;
+      sharedWorkerLoading = false;
+      clearTimeout(timeout);
+      resolve(ok);
+    };
+    const release = () => {
+      worker.onmessage = null;
+      worker.onerror = null;
+      worker.terminate();
+      if (sharedWorker === worker) {
+        sharedWorker = null;
+        sharedWorkerReady = false;
+      }
+    };
     // Also the recovery path for a crash discovered well after startup, not
     // just an initial-load failure — always tears the worker down and flips
     // sharedWorkerReady off, but only resolves/clears the timeout once
@@ -209,14 +264,8 @@ function getSharedDetectionWorker(): Promise<boolean> {
       console.error(
         `[Vertix] Detection worker unavailable (${reason}); falling back to running WASM on the main thread.`
       );
-      worker.terminate();
-      sharedWorker = null;
-      sharedWorkerReady = false;
-      if (!settled) {
-        settled = true;
-        clearTimeout(timeout);
-        resolve(false);
-      }
+      release();
+      settle(false);
     };
 
     const timeout = setTimeout(() => fail(`no "ready" within ${WORKER_READY_TIMEOUT_MS}ms`), WORKER_READY_TIMEOUT_MS);
@@ -229,13 +278,16 @@ function getSharedDetectionWorker(): Promise<boolean> {
         tookMs?: number;
         readbackMs?: number;
         message?: string;
+        build?: WasmBuildVariant;
       };
       if (msg.type === "ready") {
         if (settled) return;
-        settled = true;
-        clearTimeout(timeout);
+        if (msg.build !== build) {
+          fail(`loaded the ${msg.build} WASM build instead of ${build}`);
+          return;
+        }
         sharedWorkerReady = true;
-        resolve(true);
+        settle(true);
         return;
       }
       if (msg.type === "error") {
@@ -243,9 +295,9 @@ function getSharedDetectionWorker(): Promise<boolean> {
         return;
       }
       if (msg.type === "result" && msg.requestId !== undefined) {
-        const callback = pendingDetectionCallbacks.get(msg.requestId);
-        pendingDetectionCallbacks.delete(msg.requestId);
-        callback?.(new Float64Array(msg.faces!), msg.tookMs ?? 0, msg.readbackMs ?? 0);
+        const pending = pendingDetections.get(msg.requestId);
+        pendingDetections.delete(msg.requestId);
+        pending?.onResult(new Float64Array(msg.faces!), msg.tookMs ?? 0, msg.readbackMs ?? 0);
       }
     };
     worker.onerror = (e: ErrorEvent) => {
@@ -253,6 +305,13 @@ function getSharedDetectionWorker(): Promise<boolean> {
     };
 
     sharedWorker = worker;
+    disposeSharedWorker = () => {
+      release();
+      settle(false);
+      sharedWorkerLoadPromise = null;
+      disposeSharedWorker = null;
+    };
+    worker.postMessage({ type: "init", build });
   });
 
   return sharedWorkerLoadPromise;
@@ -338,7 +397,8 @@ export class VertixEngine {
   // Face detection normally runs in the shared worker above. `engine` (a
   // main-thread WASM instance) only exists as a fallback if the worker
   // can't be used.
-  private engine: InstanceType<typeof ReframeEngine> | null = null;
+  private engine: InstanceType<WasmBindings["ReframeEngine"]> | null = null;
+  private engineBuild: WasmBuildVariant | null = null;
   private wasmReady = false;
   private wasmLoading: Promise<void> | null = null;
 
@@ -565,9 +625,19 @@ export class VertixEngine {
   }
 
   private ensureWasm(): void {
+    const build = getActiveWasmBuild().variant;
+    if (this.engineBuild !== build) {
+      this.engine?.free();
+      this.engine = null;
+      this.wasmReady = false;
+      this.wasmLoading = null;
+    }
     if (this.wasmReady || this.wasmLoading) return;
-    this.wasmLoading = initWasm().then(() => {
-      this.engine = new ReframeEngine();
+    this.engineBuild = build;
+    this.wasmLoading = importWasmBindings(build).then(async (bindings) => {
+      await bindings.default();
+      if (this.engineBuild !== build) return;
+      this.engine = new bindings.ReframeEngine();
       this.wasmReady = true;
       this.emitState();
     });
@@ -702,7 +772,7 @@ export class VertixEngine {
       const generation = this.detectionRequestGeneration;
       const requestId = nextDetectionRequestId++;
       let bitmapReadyAt = 0;
-      pendingDetectionCallbacks.set(requestId, (facesFlat, tookMs, readbackMs) => {
+      const onResult = (facesFlat: Float64Array, tookMs: number, readbackMs: number) => {
         this.detectionInFlight = false;
         // Belongs to a frame from before a reset (seek, mode change) —
         // discard it instead of feeding stale positions into the layout.
@@ -724,7 +794,8 @@ export class VertixEngine {
             this.lastSkinRejectedSpeakerSizedCount
           );
         }
-      });
+      };
+      pendingDetections.set(requestId, { onResult, onCancel: () => (this.detectionInFlight = false) });
       // Resizing via createImageBitmap instead of drawImage+getImageData
       // here keeps the main thread from doing a synchronous GPU→CPU
       // readback every detection tick — the worker does that part now
@@ -740,8 +811,10 @@ export class VertixEngine {
         })
         .catch(() => {
           this.detectionInFlight = false;
-          pendingDetectionCallbacks.delete(requestId);
+          pendingDetections.delete(requestId);
         });
+    } else if (sharedWorkerLoading) {
+      return;
     } else {
       // The worker either never became usable, or just stopped being one
       // (a runtime crash after reporting ready — see getSharedDetectionWorker's

@@ -19,4 +19,6 @@ codegen-units = 1
 strip = true
 
 [package.metadata.wasm-pack.profile.release]
-wasm-opt = ["-O", "--enable-bulk-memory", "--enable-nontrapping-float-to-int"]
+# --enable-simd lets wasm-opt accept the simd128 build; it adds no SIMD
+# instructions to the scalar build (scripts/build-wasm.mjs checks that).
+wasm-opt = ["-O", "--enable-bulk-memory", "--enable-nontrapping-float-to-int", "--enable-simd"]

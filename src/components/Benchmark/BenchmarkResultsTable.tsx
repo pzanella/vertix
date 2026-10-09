@@ -2,7 +2,7 @@ import { useMemo } from "react";
 import { benchmarkSummaryRows, type BenchmarkReport } from "../../core";
 import { isClipInvalid } from "./benchmarkOutcome";
 
-const CLIP_KEYS = new Set(["clip", "mode"]);
+const CLIP_KEYS = new Set(["clip", "mode", "build"]);
 
 function formatCell(value: string | number | null | undefined): string {
   return value === null || value === undefined ? "—" : String(value);
@@ -44,6 +44,7 @@ export function BenchmarkResultsTable({ report }: { report: BenchmarkReport }) {
                 </span>
                 <span className="block font-normal text-neutral-500">
                   {formatCell(row.mode)}
+                  {row.build !== "n/a" && ` · ${formatCell(row.build)}`}
                   {invalidByClip[clipIndex] && <span className="text-red-400"> · invalid</span>}
                 </span>
               </th>

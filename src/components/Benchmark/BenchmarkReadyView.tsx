@@ -1,15 +1,16 @@
 import { useId } from "react";
-import type { BenchmarkConfig } from "../../core";
+import { isWasmSimdSupported, type BenchmarkConfig } from "../../core";
 import { SAMPLE_CLIPS } from "../Player/sampleClips";
 import {
   CLIP_WARMUP_RANGE,
   WASM_WARMUP_RANGE,
   clampToRange,
   estimateSuiteSeconds,
+  suiteStageKinds,
   type SecondsRange,
 } from "./benchmarkConfig";
 import { BenchmarkIcon } from "./BenchmarkIcon";
-import { benchmarkStageKinds, TONE_CHIP, VERDICT_LABEL, VERDICT_TONE, type BenchmarkVerdict } from "./benchmarkOutcome";
+import { TONE_CHIP, VERDICT_LABEL, VERDICT_TONE, type BenchmarkVerdict } from "./benchmarkOutcome";
 import { BenchmarkPanelHeader } from "./BenchmarkPanelHeader";
 import { BenchmarkStageRail } from "./BenchmarkStageRail";
 import { GHOST_BUTTON, PRIMARY_BUTTON } from "./benchmarkStyles";
@@ -127,7 +128,7 @@ export function BenchmarkReadyView({
   onShowResults,
   onClose,
 }: BenchmarkReadyViewProps) {
-  const stageCount = 1 + SAMPLE_CLIPS.length + (config.baseline ? 1 : 0);
+  const simdSupported = isWasmSimdSupported();
   const update = (patch: Partial<BenchmarkConfig>) => onConfigChange((current) => ({ ...current, ...patch }));
 
   return (
@@ -137,7 +138,7 @@ export function BenchmarkReadyView({
         title="Benchmark"
         accessory={
           <span className="rounded-full bg-amber-500/15 px-2 py-0.5 text-[11px] font-medium tabular-nums text-amber-300">
-            {formatDuration(estimateSuiteSeconds(config))}
+            {formatDuration(estimateSuiteSeconds(config, simdSupported))}
           </span>
         }
         onClose={onClose}
@@ -146,11 +147,14 @@ export function BenchmarkReadyView({
       <div className="min-h-0 overflow-y-auto overscroll-contain flex flex-col gap-3 px-4 pb-4">
         <p className="leading-relaxed text-neutral-400">
           Plays the {SAMPLE_CLIPS.length} sample clips back to back in 9:16
+          {simdSupported
+            ? ", each once with the SIMD and once with the scalar WASM build (alternating which goes first)"
+            : " with the scalar WASM build (this browser has no WebAssembly SIMD)"}
           {config.baseline ? ", then one 16:9 baseline without detection" : ""}, at normal speed. The panel closes so
           you can watch the player; progress shows on the gauge.
         </p>
 
-        <BenchmarkStageRail kinds={benchmarkStageKinds(stageCount, config)} />
+        <BenchmarkStageRail kinds={suiteStageKinds(config, simdSupported)} />
 
         <div className="grid grid-cols-3 gap-1.5">
           <SecondsStepper

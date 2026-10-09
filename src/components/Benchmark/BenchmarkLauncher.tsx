@@ -139,7 +139,6 @@ export function BenchmarkLauncher({ getEngine, videoRef, load, hasSource, onRunn
           {view === "running" && (
             <BenchmarkRunningView
               titleId={titleId}
-              config={config}
               stage={stage}
               progress={overall}
               stageFraction={stageFraction}
