@@ -34,6 +34,7 @@ export default function App() {
     isTransitioning,
     meta,
     metrics,
+    setLookaheadEnabled,
     errorMessage,
     isBuffering,
     streamHealth,
@@ -223,6 +224,7 @@ export default function App() {
             isTransitioning={isTransitioning}
             metrics={metrics}
             showSkinFilter={SKIN_FILTER_DEBUG}
+            onLookaheadChange={setLookaheadEnabled}
           />
         </div>
       )}

@@ -883,6 +883,7 @@ export class VertixEngine {
     this.resetTrackingState();
     this.flushLookahead();
     this.displayedMediaTimeSec = null;
+    this.metrics = { ...this.metrics, displayedMediaTimeSec: null };
     this.nextDetectionFrameIndex = this.captureIndex + FACE_DETECT_INTERVAL;
     this.lastFrameMediaTime = null;
     // A flush point: the lookahead length may follow what was measured so far.

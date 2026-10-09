@@ -2,7 +2,7 @@ import { memo, useEffect, useReducer } from "react";
 import type { ReframeMeta, ReframeMetrics, ReframeMode } from "../../hooks/useWasmReframe";
 import { classifyLayout } from "./layoutStatus";
 import { LiveAnalyticsCharts } from "./LiveAnalyticsCharts";
-import { TONE_CLASS } from "./dashboardFormat";
+import { TONE_CLASS, formatBytes } from "./dashboardFormat";
 import { MetricRow } from "./MetricRow";
 import { MetricSection } from "./MetricSection";
 
@@ -16,6 +16,19 @@ interface AnalyticsDashboardProps {
   metrics: ReframeMetrics;
   /** Debug only (`?debug=skin`): how many detections the skin-tone filter threw away. */
   showSkinFilter?: boolean;
+  onLookaheadChange: (enabled: boolean) => void;
+}
+
+const LOOKAHEAD_UNAVAILABLE_LABEL: Record<NonNullable<ReframeMetrics["lookahead"]["unavailableReason"]>, string> = {
+  "no-audio-graph": "unavailable (no audio graph)",
+  "cross-origin": "unavailable (cross-origin)",
+  "silent-audio-path": "unavailable (silent audio)",
+};
+
+function lookaheadValue({ enabled, unavailableReason, lengthMs }: ReframeMetrics["lookahead"]): string {
+  if (!enabled) return "off";
+  if (unavailableReason) return LOOKAHEAD_UNAVAILABLE_LABEL[unavailableReason];
+  return lengthMs > 0 ? `${lengthMs} ms` : "—";
 }
 
 const LAYOUT_LABEL: Record<ReturnType<typeof classifyLayout>, (speakerCount: number) => string> = {
@@ -49,6 +62,7 @@ export const AnalyticsDashboard = memo(function AnalyticsDashboard({
   isTransitioning,
   metrics,
   showSkinFilter = false,
+  onLookaheadChange,
 }: AnalyticsDashboardProps) {
   // "Stable Scene Duration" ticks up live between layout changes — the hook
   // only updates `layoutCommittedAt` at the moment a layout actually
@@ -65,6 +79,7 @@ export const AnalyticsDashboard = memo(function AnalyticsDashboard({
   // 500ms by forceTick above specifically so this recomputes with a fresh time.
   const stableSeconds = metrics.layoutCommittedAt !== null ? (performance.now() - metrics.layoutCommittedAt) / 1000 : 0;
   const currentTime = duration * progress;
+  const lookahead = metrics.lookahead;
 
   return (
     <aside className="flex flex-col gap-3 w-full md:w-[22rem] md:shrink-0 md:h-full md:overflow-y-auto md:overscroll-contain md:pr-2 [scrollbar-width:thin] [scrollbar-color:theme(colors.neutral.800)_transparent]">
@@ -122,6 +137,50 @@ export const AnalyticsDashboard = memo(function AnalyticsDashboard({
           />
           <MetricRow label="Switch Count" value={String(metrics.sceneSwitchCount)} />
           <MetricRow label="Cuts Detected" value={String(metrics.sceneCutCount)} />
+        </MetricSection>
+
+        <MetricSection title="Lookahead">
+          <div className="flex items-baseline justify-between gap-3 text-xs">
+            <span className="text-neutral-500">Crop on cut frame</span>
+            <button
+              type="button"
+              role="switch"
+              aria-checked={lookahead.enabled}
+              aria-label="Lookahead"
+              onClick={() => onLookaheadChange(!lookahead.enabled)}
+              className={`relative h-4 w-7 shrink-0 self-center rounded-full transition-colors ${
+                lookahead.enabled ? "bg-brand-600" : "bg-neutral-700"
+              }`}
+            >
+              <span
+                className={`absolute top-0.5 left-0.5 h-3 w-3 rounded-full bg-white transition-transform ${
+                  lookahead.enabled ? "translate-x-3" : "translate-x-0"
+                }`}
+              />
+            </button>
+          </div>
+          <MetricRow
+            label="Delay"
+            value={lookaheadValue(lookahead)}
+            tone={lookahead.enabled && lookahead.unavailableReason ? "warn" : "default"}
+          />
+          <MetricRow
+            label="Frame Copy"
+            value={lookahead.slotWidth !== null ? `${lookahead.slotWidth}×${lookahead.slotHeight}` : "—"}
+          />
+          <MetricRow
+            label="Buffer"
+            value={
+              lookahead.allocatedSlots > 0
+                ? `${lookahead.bufferedFrames}/${lookahead.allocatedSlots} · ${formatBytes(lookahead.bufferBytes)}`
+                : "—"
+            }
+          />
+          <MetricRow
+            label="Dropped"
+            value={String(lookahead.droppedFrames)}
+            tone={lookahead.droppedFrames > 0 ? "warn" : "default"}
+          />
         </MetricSection>
 
         <MetricSection title="Performance">
