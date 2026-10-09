@@ -149,3 +149,123 @@ describe("VertixEngine render loop", () => {
     engine.destroy();
   });
 });
+
+interface TestFace {
+  cx: number;
+  cy: number;
+  size: number;
+  motion?: number;
+}
+
+/** Engine internals the speaker-tracking tests drive directly, bypassing the worker. */
+interface EngineInternals {
+  lastResolvedFaces: { cx: number; cy: number }[];
+  processDetectionResult(
+    facesFlat: Float64Array,
+    audioEnergy: number | null,
+    mediaTimeSec: number,
+    srcW: number,
+    srcH: number,
+    cropW: number,
+    cropH: number,
+    detectionMode: "worker" | "main-thread",
+    inferenceMs: number
+  ): void;
+}
+
+function packFaces(faces: TestFace[]): Float64Array {
+  return new Float64Array(faces.flatMap((f) => [f.cx, f.cy, f.size, f.size, f.motion ?? 0, 0.9]));
+}
+
+const FRAMES_PER_DETECTION = 5;
+
+/** Drives detections every FRAMES_PER_DETECTION frames of a `fps` clip, each followed by one rendered frame (which commits the layout). */
+function setUpTracking(fps: number) {
+  const { engine, video, asElement } = setUp();
+  engine.attach(asElement, fakeCanvas());
+  const internals = engine as unknown as EngineInternals;
+  const intervalSec = FRAMES_PER_DETECTION / fps;
+  let detections = 0;
+  const detect = (faces: TestFace[]) => {
+    detections += 1;
+    internals.processDetectionResult(
+      packFaces(faces),
+      null,
+      detections * intervalSec,
+      1280,
+      720,
+      405,
+      720,
+      "worker",
+      1
+    );
+    video.presentFrame();
+  };
+  /** Keeps detecting `faces` until `done()`; returns the media time from the first of these detections to the one that made it true. */
+  const secondsUntil = (faces: TestFace[], done: () => boolean) => {
+    const start = detections;
+    while (detections - start < 100) {
+      detect(faces);
+      if (done()) return Math.round((detections - start - 1) * intervalSec * 1000) / 1000;
+    }
+    throw new Error("condition never became true");
+  };
+  const speakerCount = () => engine.getState().speakerCount;
+  const resolved = () => internals.lastResolvedFaces;
+  return { engine, detect, secondsUntil, speakerCount, resolved };
+}
+
+const LEFT = { cx: 0.2, cy: 0.5, size: 0.15 };
+const MIDDLE = { cx: 0.5, cy: 0.5, size: 0.15 };
+const RIGHT = { cx: 0.8, cy: 0.5, size: 0.15 };
+const FAR_RIGHT = { cx: 0.9, cy: 0.2, size: 0.15 };
+const BIG_MIDDLE = { cx: 0.5, cy: 0.5, size: 0.3 };
+
+describe.each([25, 50])("VertixEngine speaker tracking at %i fps", (fps) => {
+  it("commits the first layout after 1.0s, because the first rendered frame already commits the no-crop layout", () => {
+    const { engine, secondsUntil, speakerCount } = setUpTracking(fps);
+    expect(secondsUntil([LEFT], () => speakerCount() === 1)).toBe(1);
+    engine.destroy();
+  });
+
+  it("changes an existing layout after 1.0s of agreeing detections", () => {
+    const { engine, secondsUntil, speakerCount } = setUpTracking(fps);
+    secondsUntil([LEFT], () => speakerCount() === 1);
+    expect(secondsUntil([LEFT, RIGHT], () => speakerCount() === 2)).toBe(1);
+    engine.destroy();
+  });
+
+  it("drops to no crop after 0.2s without faces", () => {
+    const { engine, secondsUntil, speakerCount } = setUpTracking(fps);
+    secondsUntil([LEFT], () => speakerCount() === 1);
+    expect(secondsUntil([], () => speakerCount() === 0)).toBe(0.2);
+    engine.destroy();
+  });
+
+  it("shows the 3-face grid until a size-dominant face has won for 0.8s", () => {
+    const { engine, detect, secondsUntil, resolved } = setUpTracking(fps);
+    detect([LEFT, BIG_MIDDLE, RIGHT]);
+    expect(resolved()).toHaveLength(3);
+    expect(secondsUntil([LEFT, BIG_MIDDLE, RIGHT], () => resolved().length === 1)).toBeCloseTo(
+      0.8 - FRAMES_PER_DETECTION / fps,
+      6
+    );
+    expect(resolved()).toEqual([expect.objectContaining({ cx: BIG_MIDDLE.cx })]);
+    engine.destroy();
+  });
+
+  it("frames nobody when 4+ faces have no clear winner", () => {
+    const { engine, detect, resolved } = setUpTracking(fps);
+    detect([LEFT, MIDDLE, RIGHT, FAR_RIGHT]);
+    expect(resolved()).toEqual([]);
+    engine.destroy();
+  });
+
+  it("keeps the lock while no face clearly wins", () => {
+    const { engine, detect, secondsUntil, resolved } = setUpTracking(fps);
+    secondsUntil([LEFT, BIG_MIDDLE, RIGHT], () => resolved().length === 1);
+    detect([LEFT, MIDDLE, RIGHT]);
+    expect(resolved()).toEqual([expect.objectContaining({ cx: MIDDLE.cx })]);
+    engine.destroy();
+  });
+});

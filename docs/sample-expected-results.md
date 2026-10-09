@@ -28,7 +28,7 @@ Two facts that shape every row below:
 - Any pane showing a frozen/stale frame while others update.
 - A pane's crop snapping instantly instead of gliding, or drifting onto empty background.
 - For `3-speakers.mp4`: rapid flickering between single-speaker and grid layouts within a
-  couple of seconds — the lock-in logic (`ACTIVE_SPEAKER_LOCK_TICKS`) is meant to prevent this.
+  couple of seconds — the lock-in logic (`ACTIVE_SPEAKER_LOCK_SEC` in `speakerTracking.ts`) is meant to prevent this.
 - For `3-speakers.mp4`: the crop locking onto someone who isn't actually the speaker (a bystander,
   a mic-holder) and staying there — the exact failure that got the 2-face version of this reverted;
   watch for it here too since the same size-dominance check still runs at 3+.

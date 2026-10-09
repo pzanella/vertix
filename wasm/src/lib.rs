@@ -3,8 +3,8 @@ use wasm_bindgen::prelude::*;
 mod face;
 use face::FaceTracker;
 
-/// Simple RGB skin-tone check (Peer et al.) — works across skin tones
-/// without needing color-space conversion.
+/// Simple RGB skin-tone check (Peer et al.), no color-space conversion.
+/// Not yet verified on dark skin, colored lighting or black-and-white footage.
 #[inline(always)]
 pub(crate) fn is_skin_tone(r: u8, g: u8, b: u8) -> bool {
     let ri = r as i32;
@@ -39,7 +39,8 @@ impl ReframeEngine {
         ReframeEngine { face_tracker: FaceTracker::new() }
     }
 
-    /// Runs face detection on a 320x240 letterboxed frame (see `face.rs`)
+    /// Runs face detection on a 320x240 frame (the source stretched to fit,
+    /// not letterboxed; see `face.rs`)
     /// and returns every detected face, flattened as
     /// `[cx, cy, w, h, motion, score, ...]` (fractions 0..1 of the source
     /// frame). Meant to be called less often than every frame — it's much

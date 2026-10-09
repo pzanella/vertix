@@ -53,7 +53,8 @@ export class AudioActivityMonitor {
       this.sourceNode = this.ctx.createMediaElementSource(video);
       this.analyser = this.ctx.createAnalyser();
       this.analyser.fftSize = 512;
-      this.analyser.smoothingTimeConstant = 0.6;
+      // No smoothingTimeConstant: it only smooths frequency-domain data, and
+      // energy() reads time-domain samples.
       this.sourceNode.connect(this.analyser);
       this.analyser.connect(this.ctx.destination);
       this.data = new Uint8Array(this.analyser.fftSize);

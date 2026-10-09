@@ -1,9 +1,11 @@
 import initWasm, { ReframeEngine } from "./wasm/wasm.js";
 import { AudioActivityMonitor } from "./audioActivity";
+import { ActiveSpeakerResolver, PersonCountDebouncer } from "./speakerTracking";
 import {
   computeSpeakerLayout,
   faceVisibleFraction,
   lerpPaneRectInto,
+  paneSmoothingAlpha,
   unpackFaces,
   type FaceBox,
   type PaneRect,
@@ -61,6 +63,8 @@ export interface VertixMetrics {
   frameTimeHistory: number[];
   motionHistory: number[];
   confidenceHistory: number[];
+  /** Completed detections per media-time second, EMA-smoothed (alpha 0.2). Lower than fps / 5 when detections are skipped because the previous one is still running. Null before the second detection. */
+  detectionRateHz: number | null;
   /** Whether the last detection tick ran in the shared worker or fell back to the main thread. Null before the first tick. */
   detectionMode: "worker" | "main-thread" | null;
   /** How long the last detection call itself took (WASM inference only, not the surrounding postMessage/bitmap overhead), in ms. Null before the first tick. */
@@ -102,6 +106,7 @@ export const INITIAL_METRICS: VertixMetrics = {
   frameTimeHistory: [],
   motionHistory: [],
   confidenceHistory: [],
+  detectionRateHz: null,
   detectionMode: null,
   workerInferenceMs: null,
   workerInferenceHistory: [],
@@ -255,72 +260,6 @@ const MIN_SPEAKER_FACE_SIZE = 0.12;
 // at an edge) to count — see faceVisibleFraction.
 const MIN_FACE_VISIBLE_FRACTION = 0.8;
 
-// A person-count change only takes effect once this many consecutive
-// ticks agree, so a single misdetection doesn't flip the layout and back.
-// Three cases: the very first commit (nothing on screen yet, safe to be
-// fast), a normal count change (needs more confirmation), and dropping to
-// 0/B-roll (faster than a normal change, but not instant either).
-const PERSON_COUNT_STABLE_TICKS_INITIAL = 2;
-const PERSON_COUNT_STABLE_TICKS = 6;
-const PERSON_COUNT_DROP_TO_ZERO_TICKS = 2;
-
-// --- Active-speaker resolution ----------------------------------------
-// From this many raw faces up, a plain split/grid stops being a safe
-// default — it could be a genuine multi-person conversation, or just one
-// person talking with a silent bystander close enough to camera to pass
-// the filters (an interview subject with a reporter's face/mic arm in
-// frame, a press scrum). See resolveLayoutFaces for how it tells them apart.
-//
-// Tried at 2 and reverted: on a real interview (subject + a reporter
-// holding a mic into frame, facing away from camera), the size-dominance
-// check picked the reporter — her mic/shoulder read as the larger box at
-// that moment — and the 5-tick lock then held the crop on her, facing
-// away, for several seconds while the actual subject went unshown. At 2
-// faces a plain split at least always keeps the real subject visible in
-// their own pane; a confidently-wrong single-speaker lock is worse than
-// that, so this only runs at 3+ again, where it was validated for longer.
-const ACTIVE_SPEAKER_THRESHOLD = 3;
-// At this face count or below, a scene resolveLayoutFaces can't confidently
-// read falls back to the ordinary grid instead of showing nothing — this is
-// what keeps a genuine 3-person conversation looking normal whenever
-// nobody's clearly dominant. Above it, an unresolved scene is assumed too
-// crowded to guess at and shows no crop instead.
-const AMBIGUOUS_GRID_FALLBACK_FACES = 3;
-// RMS energy below which the audio track counts as silence, not speech.
-// A rough starting value — hasn't been tuned against real broadcast audio.
-const AUDIO_ACTIVE_ENERGY = 0.02;
-// A face's mouth-motion score must beat the runner-up by this multiple to
-// count as a clear active speaker, once audio has confirmed someone's
-// actually talking.
-const ACTIVE_SPEAKER_MARGIN = 1.5;
-// Same idea, used when audio can't confirm anyone's speaking — which in
-// practice is most playback: no audio track at all, muted (by the viewer,
-// or by the browser refusing audible autoplay), or silent on cross-origin
-// sources without CORS. Motion
-// still gets tried, just held to a stricter margin to make up for the
-// missing confirmation.
-const ACTIVE_SPEAKER_MARGIN_NO_AUDIO = 2.2;
-// A face's size must beat the next-largest by this multiple to count as
-// clearly the foregrounded subject — checked before motion, and without
-// needing audio. Camera shake reads as motion on every face in a scene;
-// framing size doesn't have that problem, and interview subjects are
-// usually shot larger than bystanders. Tuned against a real press scrum
-// where the actual speaker's face measured about 2x the next-largest.
-const FACE_SIZE_DOMINANCE_MARGIN = 1.4;
-// How many consecutive ticks a new candidate has to keep winning before
-// the engine actually locks onto them — same idea as
-// PERSON_COUNT_STABLE_TICKS, applied to who's framed instead of how many.
-const ACTIVE_SPEAKER_LOCK_TICKS = 5;
-// Two face positions within this distance (fraction of frame) count as
-// "the same person" from one tick to the next.
-const SAME_PERSON_DISTANCE = 0.08;
-
-// How much each pane's crop glides toward its subject's latest detected
-// position per rendered frame (0-1) — gentle camera-follow *within* an
-// already-stable layout (same face count), not a trigger for changing the
-// layout itself. Lower = slower, calmer follow.
-const PANE_SMOOTHING_ALPHA = 0.06;
-
 // A face must drift more than this (a fraction of frame width/height) from
 // where its pane's crop was last aimed before the crop moves at all.
 const DEADZONE_FRACTION = 0.04;
@@ -368,17 +307,6 @@ function drawFitFrame(
   ctx.drawImage(video, 0, Math.round((outH - fgH) / 2), outW, fgH);
 }
 
-/** The single face whose score clearly stands out from the rest by at least `margin`×, or null if the top two are too close to call (or there's only a zero-scoring "winner", which isn't one). */
-function dominantBy(faces: FaceBox[], scoreOf: (f: FaceBox) => number, margin: number): FaceBox | null {
-  const sorted = [...faces].sort((a, b) => scoreOf(b) - scoreOf(a));
-  const top = sorted[0];
-  const topScore = scoreOf(top);
-  if (topScore <= 0) return null;
-  const runnerUp = sorted[1];
-  if (runnerUp !== undefined && topScore <= scoreOf(runnerUp) * margin) return null;
-  return top;
-}
-
 type MetricsListener = (metrics: VertixMetrics) => void;
 type StateListener = (state: VertixState) => void;
 
@@ -420,6 +348,8 @@ export class VertixEngine {
 
   // FPS/frame-time measurement.
   private lastFrameTime: number | null = null;
+  private lastDetectionMediaTime: number | null = null;
+  private detectionIntervalEma = 0;
   private fpsEma = 0;
   private frameTimeEma = 0;
   private lastMetricsPush = 0;
@@ -437,14 +367,10 @@ export class VertixEngine {
 
   private lastFaces: FaceBox[] = [];
   private lastResolvedFaces: FaceBox[] = [];
-  private stablePersonCount = 0;
-  private pendingPersonCount = 0;
-  private pendingPersonCountStreak = 0;
+  private personCount = new PersonCountDebouncer();
 
   private audioMonitor = new AudioActivityMonitor();
-  private lockedActiveSpeakerPos: { cx: number; cy: number } | null = null;
-  private pendingActiveSpeakerPos: { cx: number; cy: number } | null = null;
-  private pendingActiveSpeakerStreak = 0;
+  private activeSpeaker = new ActiveSpeakerResolver();
 
   private targetPanes: PaneTarget[] = [];
   private smoothedPanes: PaneRect[] = [];
@@ -566,7 +492,7 @@ export class VertixEngine {
       wasmReady: sharedWorkerReady || this.wasmReady,
       mode: this.mode,
       meta: this.meta,
-      speakerCount: this.stablePersonCount,
+      speakerCount: this.personCount.stableCount,
       isTransitioning: this.transitionStart !== null,
     };
   }
@@ -640,12 +566,10 @@ export class VertixEngine {
     this.detectionRequestGeneration += 1;
     this.lastFaces = [];
     this.lastResolvedFaces = [];
-    this.stablePersonCount = 0;
-    this.pendingPersonCount = 0;
-    this.pendingPersonCountStreak = 0;
-    this.lockedActiveSpeakerPos = null;
-    this.pendingActiveSpeakerPos = null;
-    this.pendingActiveSpeakerStreak = 0;
+    this.lastDetectionMediaTime = null;
+    this.detectionIntervalEma = 0;
+    this.personCount.reset();
+    this.activeSpeaker.reset();
     this.smoothedPanes = [];
     this.targetPanes = [];
     this.layoutSignature = "";
@@ -658,6 +582,7 @@ export class VertixEngine {
       audioEnergy: null,
       cropScaleFactor: null,
       layoutCommittedAt: null,
+      detectionRateHz: null,
     };
     this.emitState();
     this.emitMetrics();
@@ -673,88 +598,14 @@ export class VertixEngine {
     this.frameCallbackId = video.requestVideoFrameCallback(this.boundOnVideoFrame);
   }
 
-  /**
-   * Resolves raw detected faces down to what the layout should actually
-   * track this tick. Below ACTIVE_SPEAKER_THRESHOLD, faces pass through
-   * unchanged.
-   *
-   * Above it, a plain split/grid isn't trustworthy anymore — it could be a
-   * real multi-person conversation, or one person talking with a silent
-   * bystander close enough to camera to pass the filters. This looks for a
-   * single active speaker: first by framing size (works without audio),
-   * then by mouth motion if sizes are too close to call. A winner has to
-   * hold for a few ticks before the engine actually locks onto them, so
-   * one noisy read doesn't flip the framing.
-   *
-   * If neither signal is confident, falls back to the raw faces (today's
-   * ordinary split/grid) at AMBIGUOUS_GRID_FALLBACK_FACES or below, or to
-   * showing nothing above it — better to punt on a scene we can't read
-   * than confidently show the wrong crop.
-   *
-   * `energy` is the audio reading for this same tick, passed in by the
-   * caller rather than read again here to avoid re-summing the analyser
-   * buffer twice for the same instant.
-   */
-  private resolveLayoutFaces(rawFaces: FaceBox[], energy: number | null): FaceBox[] {
-    if (rawFaces.length < ACTIVE_SPEAKER_THRESHOLD) return rawFaces;
-    const ambiguousFallback = rawFaces.length <= AMBIGUOUS_GRID_FALLBACK_FACES ? rawFaces : [];
-
-    // Size doesn't need audio — playback is often muted or has no audio
-    // track, so a signal that required audio would frequently go unused.
-    let winner = dominantBy(rawFaces, (f) => Math.max(f.w, f.h), FACE_SIZE_DOMINANCE_MARGIN);
-
-    if (winner === null) {
-      // Sizes are too close to call — try motion instead, held to a
-      // stricter margin if audio hasn't confirmed anyone's actually
-      // talking.
-      const audioConfirmed = energy !== null && energy >= AUDIO_ACTIVE_ENERGY;
-      winner = dominantBy(
-        rawFaces,
-        (f) => f.motion,
-        audioConfirmed ? ACTIVE_SPEAKER_MARGIN : ACTIVE_SPEAKER_MARGIN_NO_AUDIO
-      );
-    }
-
-    if (winner === null) {
-      // No confident winner this tick — don't restart the lock streak,
-      // but don't extend it either. Keep showing whoever's already locked
-      // on, if anyone.
-      this.pendingActiveSpeakerPos = null;
-      this.pendingActiveSpeakerStreak = 0;
-      return this.lockedActiveSpeakerPos
-        ? [this.closestFaceTo(rawFaces, this.lockedActiveSpeakerPos)]
-        : ambiguousFallback;
-    }
-
-    const candidate = { cx: winner.cx, cy: winner.cy };
-    if (this.pendingActiveSpeakerPos && this.isSamePerson(this.pendingActiveSpeakerPos, candidate)) {
-      this.pendingActiveSpeakerStreak += 1;
-    } else {
-      this.pendingActiveSpeakerPos = candidate;
-      this.pendingActiveSpeakerStreak = 1;
-    }
-    if (this.pendingActiveSpeakerStreak >= ACTIVE_SPEAKER_LOCK_TICKS) {
-      this.lockedActiveSpeakerPos = candidate;
-    }
-
-    return this.lockedActiveSpeakerPos
-      ? [this.closestFaceTo(rawFaces, this.lockedActiveSpeakerPos)]
-      : ambiguousFallback;
-  }
-
-  private isSamePerson(a: { cx: number; cy: number }, b: { cx: number; cy: number }): boolean {
-    return Math.abs(a.cx - b.cx) < SAME_PERSON_DISTANCE && Math.abs(a.cy - b.cy) < SAME_PERSON_DISTANCE;
-  }
-
-  private closestFaceTo(faces: FaceBox[], pos: { cx: number; cy: number }): FaceBox {
-    return faces.reduce((best, f) => {
-      const d = (f.cx - pos.cx) ** 2 + (f.cy - pos.cy) ** 2;
-      const bd = (best.cx - pos.cx) ** 2 + (best.cy - pos.cy) ** 2;
-      return d < bd ? f : best;
-    });
-  }
-
-  private dispatchDetection(video: HTMLVideoElement, srcW: number, srcH: number, cropW: number, cropH: number): void {
+  private dispatchDetection(
+    video: HTMLVideoElement,
+    mediaTimeSec: number,
+    srcW: number,
+    srcH: number,
+    cropW: number,
+    cropH: number
+  ): void {
     const probe = this.benchmarkProbe;
     const dispatchedAt = probe ? performance.now() : 0;
     const audioEnergy = this.audioMonitor.energy();
@@ -770,7 +621,7 @@ export class VertixEngine {
         // discard it instead of feeding stale positions into the layout.
         if (generation !== this.detectionRequestGeneration) return;
         const postStart = probe ? performance.now() : 0;
-        this.processDetectionResult(facesFlat, audioEnergy, srcW, srcH, cropW, cropH, "worker", tookMs);
+        this.processDetectionResult(facesFlat, audioEnergy, mediaTimeSec, srcW, srcH, cropW, cropH, "worker", tookMs);
         if (probe) {
           const end = performance.now();
           probe.recordDetection(
@@ -816,7 +667,17 @@ export class VertixEngine {
       const start = performance.now();
       const facesFlat = this.engine.update_faces(new Uint8Array(faceImageData.data.buffer));
       const tookMs = performance.now() - start;
-      this.processDetectionResult(facesFlat, audioEnergy, srcW, srcH, cropW, cropH, "main-thread", tookMs);
+      this.processDetectionResult(
+        facesFlat,
+        audioEnergy,
+        mediaTimeSec,
+        srcW,
+        srcH,
+        cropW,
+        cropH,
+        "main-thread",
+        tookMs
+      );
       if (probe) {
         const end = performance.now();
         probe.recordDetection(
@@ -836,6 +697,7 @@ export class VertixEngine {
   private processDetectionResult(
     facesFlat: Float64Array,
     audioEnergy: number | null,
+    mediaTimeSec: number,
     srcW: number,
     srcH: number,
     cropW: number,
@@ -851,24 +713,19 @@ export class VertixEngine {
         faceVisibleFraction(f) >= MIN_FACE_VISIBLE_FRACTION
     );
 
-    this.lastResolvedFaces = this.resolveLayoutFaces(this.lastFaces, audioEnergy);
+    this.lastResolvedFaces = this.activeSpeaker.resolve(this.lastFaces, audioEnergy, mediaTimeSec);
     const count = this.lastResolvedFaces.length;
-    if (count === this.pendingPersonCount) {
-      this.pendingPersonCountStreak += 1;
-    } else {
-      this.pendingPersonCount = count;
-      this.pendingPersonCountStreak = 1;
-    }
-    const requiredTicks =
-      count === 0
-        ? PERSON_COUNT_DROP_TO_ZERO_TICKS
-        : this.layoutSignature === ""
-          ? PERSON_COUNT_STABLE_TICKS_INITIAL
-          : PERSON_COUNT_STABLE_TICKS;
-    if (this.pendingPersonCountStreak >= requiredTicks) {
-      this.stablePersonCount = count;
-    }
+    const stablePersonCount = this.personCount.observe(count, this.layoutSignature !== "", mediaTimeSec);
     this.emitState();
+
+    if (this.lastDetectionMediaTime !== null && mediaTimeSec > this.lastDetectionMediaTime) {
+      const interval = mediaTimeSec - this.lastDetectionMediaTime;
+      this.detectionIntervalEma =
+        this.detectionIntervalEma === 0
+          ? interval
+          : this.detectionIntervalEma + (interval - this.detectionIntervalEma) * 0.2;
+    }
+    this.lastDetectionMediaTime = mediaTimeSec;
 
     const faces = this.lastFaces;
     const faceSizes = faces.map((f) => Math.round(Math.max(f.w, f.h) * 1000) / 10);
@@ -879,6 +736,7 @@ export class VertixEngine {
       faceSizes,
       motionScore,
       faceConfidence,
+      detectionRateHz: this.detectionIntervalEma > 0 ? 1 / this.detectionIntervalEma : null,
       audioAvailable: this.audioMonitor.available,
       audioEnergy,
       detectionMode,
@@ -897,7 +755,7 @@ export class VertixEngine {
     // *committed* layout — otherwise, mid-debounce, this could compute a
     // different pane count than what's actually on screen. The deadzone
     // itself lives inside computeSpeakerLayout.
-    if (this.stablePersonCount > 0 && count === this.stablePersonCount) {
+    if (stablePersonCount > 0 && count === stablePersonCount) {
       this.targetPanes = computeSpeakerLayout(
         this.lastResolvedFaces,
         srcW,
@@ -940,6 +798,7 @@ export class VertixEngine {
     // each callback (when the callback runs, not the frame's media time) —
     // EMA-smoothed every frame, pushed to subscribers (and sampled into the
     // trend history) only a few times a second.
+    const frameDtSec = this.lastFrameTime !== null ? Math.max(0, now - this.lastFrameTime) / 1000 : 0;
     if (this.lastFrameTime !== null) {
       const dt = now - this.lastFrameTime;
       if (dt > 0) {
@@ -1001,11 +860,12 @@ export class VertixEngine {
       // within it, each pane's crop only drifts smoothly toward its target.
       this.frameCounter += 1;
       if (this.frameCounter % FACE_DETECT_INTERVAL === 0) {
-        if (!this.detectionInFlight) this.dispatchDetection(video, srcW, srcH, cropW, cropH);
+        if (!this.detectionInFlight) this.dispatchDetection(video, metadata.mediaTime, srcW, srcH, cropW, cropH);
         else probe?.recordSkippedDetection();
       }
 
-      const targetSignature = this.stablePersonCount === 0 ? "broll" : `speakers:${this.stablePersonCount}`;
+      const speakerCount = this.personCount.stableCount;
+      const targetSignature = speakerCount === 0 ? "broll" : `speakers:${speakerCount}`;
 
       if (targetSignature !== this.layoutSignature) {
         // Snapshot the current frame before it's overwritten, so the layout
@@ -1038,7 +898,7 @@ export class VertixEngine {
         // A new layout snaps straight to its target instead of gliding in
         // from the old positions.
         this.targetPanes =
-          this.stablePersonCount === 0 ? [] : computeSpeakerLayout(this.lastResolvedFaces, srcW, srcH, cropW, cropH);
+          speakerCount === 0 ? [] : computeSpeakerLayout(this.lastResolvedFaces, srcW, srcH, cropW, cropH);
         this.smoothedPanes = this.targetPanes.map((p) => ({ ...p.pane.source }));
 
         const cropScaleFactor =
@@ -1055,16 +915,17 @@ export class VertixEngine {
         this.emitState();
       }
 
-      if (this.stablePersonCount === 0) {
+      if (speakerCount === 0) {
         drawFitFrame(ctx, this.blurCanvas, video, srcW, srcH, cropW, cropH);
       } else {
         // Mutate the already-allocated smoothed rects toward the cached
         // target and draw with integer coordinates (avoids sub-pixel blit
         // interpolation). No new objects, no layout math — that only runs
         // at detection ticks, above.
+        const smoothingAlpha = paneSmoothingAlpha(frameDtSec);
         for (let i = 0; i < this.targetPanes.length; i++) {
           const target = this.targetPanes[i].pane;
-          const smoothed = lerpPaneRectInto(this.smoothedPanes[i], target.source, PANE_SMOOTHING_ALPHA);
+          const smoothed = lerpPaneRectInto(this.smoothedPanes[i], target.source, smoothingAlpha);
           ctx.drawImage(
             video,
             Math.round(smoothed.x),
