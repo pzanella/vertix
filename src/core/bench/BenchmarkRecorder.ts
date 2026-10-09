@@ -37,6 +37,8 @@ export interface BenchmarkProbe {
   /** A detection was due on this frame but skipped because the previous one had not returned yet. */
   recordSkippedDetection(): void;
   recordLayoutChange(nowMs: number): void;
+  /** Main-thread time spent sending one frame to the cut trigger (lookahead only). */
+  recordTriggerCost(mainThreadMs: number): void;
 }
 
 export interface BenchmarkRecorderOptions {
@@ -232,6 +234,10 @@ export class BenchmarkRecorder implements BenchmarkProbe {
   private detectionCount = 0;
   private detectionOverflow = 0;
 
+  private readonly triggerCost: Float64Array;
+  private readonly triggerWarmup: Uint8Array;
+  private triggerCount = 0;
+
   private readonly skippedMediaTime: Float64Array;
   private readonly skippedWarmup: Uint8Array;
   private skippedCount = 0;
@@ -268,6 +274,8 @@ export class BenchmarkRecorder implements BenchmarkProbe {
     this.frameMediaTime = new Float64Array(frameCapacity);
     this.framePresented = new Float64Array(frameCapacity);
     this.frameWarmup = new Uint8Array(frameCapacity);
+    this.triggerCost = new Float64Array(frameCapacity);
+    this.triggerWarmup = new Uint8Array(frameCapacity);
 
     const detectionCapacity = Math.ceil(frameCapacity / 2);
     this.detectionEndedAt = new Float64Array(detectionCapacity);
@@ -375,6 +383,18 @@ export class BenchmarkRecorder implements BenchmarkProbe {
     this.skippedMediaTime[i] = this.lastMediaTime;
     this.skippedWarmup[i] = this.inWarmup ? 1 : 0;
     this.skippedCount = i + 1;
+  }
+
+  recordTriggerCost(mainThreadMs: number): void {
+    if (this.finished) return;
+    const i = this.triggerCount;
+    if (i >= this.triggerCost.length) {
+      this.frameOverflow += 1;
+      return;
+    }
+    this.triggerCost[i] = mainThreadMs;
+    this.triggerWarmup[i] = this.inWarmup ? 1 : 0;
+    this.triggerCount = i + 1;
   }
 
   recordLayoutChange(nowMs: number): void {

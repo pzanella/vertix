@@ -16,6 +16,7 @@ import {
 import type { BenchmarkProbe } from "./bench/BenchmarkRecorder";
 import { DecisionTimeline, mergeDecisions, type LayoutDecision, type Reframe } from "./lookahead/decisionTimeline";
 import { FrameRingBuffer, type BufferedFrame } from "./lookahead/frameRingBuffer";
+import { TRIGGER_H, TRIGGER_W, locateCut, type ScoredFrame } from "./lookahead/cutTrigger";
 import {
   DEFAULT_DETECTION_P95_MS,
   DEFAULT_FRAME_INTERVAL_MS,
@@ -219,6 +220,9 @@ const FACE_H = 240;
 // Detection doesn't run on every frame, only every Nth one — rendering and
 // pane smoothing still do.
 const FACE_DETECT_INTERVAL = 5;
+// Per-frame cut-trigger scores kept for cut localisation: a few seconds,
+// well over the gap between two detections.
+const SCORED_FRAME_HISTORY = 120;
 // A frame shown while paused waits for its own detection this long at most.
 const HELD_FRAME_TIMEOUT_MS = 500;
 // Frame rate assumed for sizing the frame buffer before one is measured.
@@ -584,6 +588,16 @@ export class VertixEngine {
   private triggerLatency = new RollingP95();
   private taintProbeCtx: OffscreenCanvasRenderingContext2D | null = null;
 
+  // Per-frame cut trigger (lookahead only): scores every buffered frame in
+  // its own worker and asks for a detection right away on a likely cut.
+  private cutTriggerWorker: Worker | null = null;
+  private cutTriggerUnavailable = false;
+  private cutTriggerGeneration = 0;
+  private pendingTriggerFrames = new Map<number, { mediaTimeSec: number; capturedAt: number }>();
+  private scoredFrames: ScoredFrame[] = [];
+  private pendingCutDetectionSec: number | null = null;
+  private lastDispatchedDetectionSec: number | null = null;
+
   // Benchmark mode only (see src/core/bench). Null in normal playback, where
   // every instrumentation point below reduces to a single null check.
   private benchmarkProbe: BenchmarkProbe | null = null;
@@ -672,6 +686,8 @@ export class VertixEngine {
     this.detach();
     this.audioMonitor.detach();
     this.taintProbeCtx = null;
+    this.cutTriggerWorker?.terminate();
+    this.cutTriggerWorker = null;
     this.longTaskObserver?.disconnect();
     this.engine?.free();
     this.engine = null;
@@ -832,6 +848,9 @@ export class VertixEngine {
     this.lastSkinRejectedFaces = [];
     this.lastResolvedFaces = [];
     this.lastDetectionMediaTime = null;
+    this.lastDispatchedDetectionSec = null;
+    this.pendingCutDetectionSec = null;
+    this.resetCutTrigger();
     this.detectionIntervalEma = 0;
     this.personCount.reset();
     this.activeSpeaker.reset();
@@ -1041,10 +1060,12 @@ export class VertixEngine {
   ): void {
     const probe = this.benchmarkProbe;
     const dispatchedAt = performance.now();
+    const previousDetectionSec = this.lastDispatchedDetectionSec;
     const audioEnergy = this.audioMonitor.energy();
 
     if (sharedWorkerReady && sharedWorker) {
       this.detectionInFlight = true;
+      this.lastDispatchedDetectionSec = mediaTimeSec;
       const generation = this.detectionRequestGeneration;
       const requestId = nextDetectionRequestId++;
       let bitmapReadyAt = 0;
@@ -1065,7 +1086,8 @@ export class VertixEngine {
           cropW,
           cropH,
           "worker",
-          tookMs
+          tookMs,
+          previousDetectionSec
         );
         if (probe) {
           const end = performance.now();
@@ -1086,8 +1108,15 @@ export class VertixEngine {
             this.lastSceneCut.isCut
           );
         }
+        this.dispatchPendingCutDetection();
       };
-      pendingDetections.set(requestId, { onResult, onCancel: () => (this.detectionInFlight = false) });
+      pendingDetections.set(requestId, {
+        onResult,
+        onCancel: () => {
+          this.detectionInFlight = false;
+          this.pendingCutDetectionSec = null;
+        },
+      });
       // Resizing via createImageBitmap instead of drawImage+getImageData
       // here keeps the main thread from doing a synchronous GPU→CPU
       // readback every detection tick — the worker does that part now
@@ -1106,6 +1135,7 @@ export class VertixEngine {
         })
         .catch(() => {
           this.detectionInFlight = false;
+          this.pendingCutDetectionSec = null;
           pendingDetections.delete(requestId);
         });
     } else if (sharedWorkerLoading) {
@@ -1118,6 +1148,7 @@ export class VertixEngine {
       // already loading or ready, so it's safe to call on every tick here.
       this.ensureWasm();
       if (!this.engine) return;
+      this.lastDispatchedDetectionSec = mediaTimeSec;
       this.faceCtx.drawImage(source, 0, 0, FACE_W, FACE_H);
       const drawnAt = probe ? performance.now() : 0;
       const faceImageData = this.faceCtx.getImageData(0, 0, FACE_W, FACE_H);
@@ -1135,7 +1166,8 @@ export class VertixEngine {
         cropW,
         cropH,
         "main-thread",
-        tookMs
+        tookMs,
+        previousDetectionSec
       );
       if (probe) {
         const end = performance.now();
@@ -1169,7 +1201,8 @@ export class VertixEngine {
     cropW: number,
     cropH: number,
     detectionMode: "worker" | "main-thread",
-    inferenceMs: number
+    inferenceMs: number,
+    previousDetectionSec: number | null = null
   ): void {
     const detections = unpackDetections(facesFlat);
     this.lastSceneCut = sceneCut;
@@ -1189,7 +1222,14 @@ export class VertixEngine {
     const stablePersonCount = sceneCut.isCut
       ? this.personCount.commitNow(count, mediaTimeSec)
       : this.personCount.observe(count, this.hasFrameSinceReset, mediaTimeSec);
-    this.decideLayout(mediaTimeSec, count, stablePersonCount, sceneCut.isCut, srcW, srcH, cropW, cropH);
+    // With lookahead, a cut found here is shown from the frame where it
+    // happened (the biggest per-frame jump since the previous detection),
+    // not from this detection frame.
+    const decisionSec =
+      sceneCut.isCut && this.lookaheadLengthMs > 0
+        ? locateCut(this.scoredFrames, previousDetectionSec, mediaTimeSec)
+        : mediaTimeSec;
+    this.decideLayout(decisionSec, count, stablePersonCount, sceneCut.isCut, srcW, srcH, cropW, cropH);
 
     if (this.lastDetectionMediaTime !== null && mediaTimeSec > this.lastDetectionMediaTime) {
       const interval = mediaTimeSec - this.lastDetectionMediaTime;
@@ -1455,8 +1495,89 @@ export class VertixEngine {
           this.benchmarkProbe?.recordSkippedDetection();
         }
       }
+      this.scoreFrameForCut(frame);
     }
     this.ensureDisplayLoop();
+  }
+
+  private ensureCutTriggerWorker(): Worker | null {
+    if (this.cutTriggerWorker || this.cutTriggerUnavailable) return this.cutTriggerWorker;
+    try {
+      const worker = new Worker(`${import.meta.env.BASE_URL}workers/cutTriggerWorker.js`);
+      worker.onmessage = (e: MessageEvent) => this.onCutTriggerScore(e.data);
+      worker.onerror = () => {
+        console.error("[Vertix] Cut-trigger worker failed; cuts are applied at detection rate.");
+        worker.terminate();
+        this.cutTriggerWorker = null;
+        this.cutTriggerUnavailable = true;
+      };
+      this.cutTriggerWorker = worker;
+    } catch {
+      this.cutTriggerUnavailable = true;
+    }
+    return this.cutTriggerWorker;
+  }
+
+  /** Sends a thumbnail of a buffered frame to the cut trigger. Only the createImageBitmap/postMessage calls run here. */
+  private scoreFrameForCut(frame: BufferedFrame<FrameSlot>): void {
+    const worker = this.ensureCutTriggerWorker();
+    if (!worker) return;
+    const start = performance.now();
+    const generation = this.cutTriggerGeneration;
+    const probe = this.benchmarkProbe;
+    this.pendingTriggerFrames.set(frame.frameIndex, { mediaTimeSec: frame.mediaTimeSec, capturedAt: start });
+    let syncMs = 0;
+    createImageBitmap(frame.slot.canvas, { resizeWidth: TRIGGER_W, resizeHeight: TRIGGER_H, resizeQuality: "low" })
+      .then((bitmap) => {
+        const postStart = performance.now();
+        if (generation !== this.cutTriggerGeneration || worker !== this.cutTriggerWorker) {
+          bitmap.close();
+          return;
+        }
+        worker.postMessage({ type: "score", frameId: frame.frameIndex, bitmap }, [bitmap]);
+        probe?.recordTriggerCost(syncMs + performance.now() - postStart);
+      })
+      .catch(() => this.pendingTriggerFrames.delete(frame.frameIndex));
+    syncMs = performance.now() - start;
+  }
+
+  private onCutTriggerScore(msg: { frameId: number; hist: number; grid: number; triggered: boolean }): void {
+    const pending = this.pendingTriggerFrames.get(msg.frameId);
+    if (!pending) return;
+    this.pendingTriggerFrames.delete(msg.frameId);
+    this.triggerLatency.push(performance.now() - pending.capturedAt);
+    if (this.scoredFrames.length === SCORED_FRAME_HISTORY) this.scoredFrames.shift();
+    this.scoredFrames.push({ mediaTimeSec: pending.mediaTimeSec, score: Math.max(msg.hist, msg.grid) });
+    if (msg.triggered && this.mode === "9:16") this.requestCutDetection(pending.mediaTimeSec);
+  }
+
+  /** A detection on the likely cut frame now, instead of at the next regular tick (after the one in flight, if any). */
+  private requestCutDetection(mediaTimeSec: number): void {
+    // A detection on this frame or a later one already covers the cut; if
+    // it finds it, cut localisation moves the change back to this frame.
+    if (this.lastDispatchedDetectionSec !== null && this.lastDispatchedDetectionSec >= mediaTimeSec) return;
+    if (this.detectionInFlight) {
+      this.pendingCutDetectionSec = mediaTimeSec;
+      return;
+    }
+    const frame = this.frameBuffer?.find(mediaTimeSec);
+    if (!frame) return;
+    this.nextDetectionFrameIndex = frame.frameIndex + FACE_DETECT_INTERVAL;
+    this.dispatchDetection(frame.slot.canvas, mediaTimeSec, ...this.cropArgs());
+  }
+
+  private dispatchPendingCutDetection(): void {
+    const pending = this.pendingCutDetectionSec;
+    if (pending === null) return;
+    this.pendingCutDetectionSec = null;
+    this.requestCutDetection(pending);
+  }
+
+  private resetCutTrigger(): void {
+    this.cutTriggerGeneration += 1;
+    this.pendingTriggerFrames.clear();
+    this.scoredFrames = [];
+    this.cutTriggerWorker?.postMessage({ type: "reset" });
   }
 
   /**
