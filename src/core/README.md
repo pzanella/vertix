@@ -58,12 +58,16 @@ engine.destroy();
 | `onMetricsUpdate(listener)` | Subscribe to live telemetry (FPS, detection confidence, motion, ...) — a few times a second. Fires once immediately with the current values, then on every update. Returns an unsubscribe function. |
 | `onStateChange(listener)` | Subscribe to everything else that changes (mode, video dimensions, speaker count, whether a transition is in progress, whether WASM has finished loading). Same immediate-fire-then-updates contract. Returns an unsubscribe function. |
 | `getMetrics()` / `getState()` | Read the current snapshot without subscribing. |
+| `setLookaheadEnabled(enabled)` | Lookahead on (default) or off at runtime: see [Lookahead](#lookahead). |
+| `getLookaheadStatus()` | Whether lookahead runs, its length, why it is unavailable, buffer size and memory. |
+| `getDisplayedMediaTime()` | Media time of the frame on screen (behind `video.currentTime` by the lookahead while playing). |
 | `setBenchmarkProbe(probe \| null)` | Benchmark mode only: report per-frame and per-detection timings to a `BenchmarkProbe` (e.g. a `BenchmarkRecorder`). `null` (the default) turns it off. See `docs/benchmark.md`. |
 
 ## Files in here
 
-- **`VertixEngine.ts`** — the class above. Owns the render loop
-  (`requestVideoFrameCallback`), the face-detection cadence, and all the
+- **`VertixEngine.ts`** — the class above. Owns the frame loop
+  (`requestVideoFrameCallback`), the lookahead display loop
+  (`requestAnimationFrame`), the face-detection cadence, and all the
   timing/smoothing constants (how long to wait before trusting a speaker
   count change, how big the camera's dead zone is, how long a layout
   cross-dissolve takes, ...). If something about *when* or *how fast* the
@@ -127,3 +131,39 @@ footage. If camera movement still feels off, look at the constants in
 `layoutEngine.ts` (`PANE_SMOOTHING_TAU_SEC`), `VertixEngine.ts`
 (`DEADZONE_FRACTION`) and `speakerTracking.ts` (`PERSON_COUNT_STABLE_SEC`),
 not the layout math itself.
+
+## Lookahead
+
+With lookahead on (the default), every decoded frame is copied into a ring
+of `OffscreenCanvas` slots (`lookahead/frameRingBuffer.ts`) and drawn by a
+`requestAnimationFrame` loop at its own display time plus the lookahead
+length. The audio goes through the same delay (`audioActivity.ts`: a
+`DelayNode` after the analyser). Detection results become decisions stamped
+with their frame's media time (`lookahead/decisionTimeline.ts`) and are
+applied when that frame is drawn, so a snap after a cut, a speaker-switch
+dissolve or a layout change lands on the frame it belongs to.
+
+- **Length**: 2 × detection p95 + cut-trigger p95 + one frame, kept within
+  120–600 ms (`lookahead/lookaheadSizing.ts`). Per-device and per-build
+  defaults until this device has measured its own (stored in
+  `localStorage`). It only changes at a seek, a source change or the
+  switch, never mid-playback.
+- **Frame copies**: the largest size (source size first) at which the
+  frames needed fit 96 MiB. Copies are drawn from the video synchronously,
+  so no decoder frame is held.
+- **Cut trigger**: a 64×48 thumbnail of every frame goes to
+  `cutTriggerWorker.ts`; a likely cut starts a detection on that frame at
+  once instead of at the next 5-frame tick. The WASM detector still
+  decides. A cut found on a regular tick is moved back to the frame with
+  the biggest frame-to-frame jump.
+- **Unavailable**: without a Web Audio graph (the element's own audio
+  could not be delayed), or for a cross-origin source without CORS (a
+  tainted canvas, or exact silence from a cross-origin element that is
+  playing audio),
+  lookahead is forced off and reported in `getLookaheadStatus()`.
+- **Playback events**: pause drains the buffer (video and audio stop
+  together, on the frame at `currentTime`); play and seek refill it (the
+  last frame holds, audio is silent, for the lookahead length); a frame
+  shown while paused waits for its own detection; rate changes and
+  rendition switches need nothing special.
+
