@@ -81,6 +81,13 @@ const MAX_LOCK_DISTANCE = 0.15;
 // second, with skips) a single missed face is common, and relocking takes
 // ACTIVE_SPEAKER_LOCK_SEC, too close to the count debounce to hide.
 const LOCK_GRACE_BELOW_THRESHOLD_SEC = 0.4;
+// When the lock moves to a person at least this far (straight-line,
+// fraction of frame) from the previously locked one, the framing changes
+// with a short cross-dissolve instead of panning across the room. Same as
+// MAX_LOCK_DISTANCE: beyond it the lock already treats a face as someone
+// else. It is also about half the width of a 9:16 crop of a 16:9 frame,
+// so the new speaker would sit near the edge of the old crop.
+const SPEAKER_SWITCH_DISTANCE = MAX_LOCK_DISTANCE;
 
 interface FacePosition {
   cx: number;
@@ -212,7 +219,9 @@ export class PersonCountDebouncer {
  * Once locked, the lock follows that face from detection to detection. It
  * is released when the face is gone (no face within MAX_LOCK_DISTANCE), or
  * when fewer than ACTIVE_SPEAKER_THRESHOLD faces remain for
- * LOCK_GRACE_BELOW_THRESHOLD_SEC.
+ * LOCK_GRACE_BELOW_THRESHOLD_SEC. When a new winner takes the lock from
+ * someone at least SPEAKER_SWITCH_DISTANCE away, `switchedSpeaker` is
+ * true for that detection, so the caller can change framing without a pan.
  *
  * If neither signal is confident, falls back to the raw faces (today's
  * ordinary split/grid) at AMBIGUOUS_GRID_FALLBACK_FACES or below, or to
@@ -224,9 +233,16 @@ export class ActiveSpeakerResolver {
   private pendingPos: FacePosition | null = null;
   private pendingStreak = new AgreementStreak();
   private belowThresholdSinceSec: number | null = null;
+  private switched = false;
+
+  /** Whether the last `resolve` moved the lock to a different person, at least SPEAKER_SWITCH_DISTANCE away. */
+  get switchedSpeaker(): boolean {
+    return this.switched;
+  }
 
   /** `energy` is the audio reading for the same detection, or null when there is no usable audio; `atSec` is its media time. */
   resolve(rawFaces: FaceBox[], energy: number | null, atSec: number): FaceBox[] {
+    this.switched = false;
     if (rawFaces.length < ACTIVE_SPEAKER_THRESHOLD) return this.resolveBelowThreshold(rawFaces, atSec);
     this.belowThresholdSinceSec = null;
     this.followLock(rawFaces);
@@ -265,6 +281,7 @@ export class ActiveSpeakerResolver {
       this.pendingStreak.restart(atSec);
     }
     if (this.pendingStreak.hasHeldFor(ACTIVE_SPEAKER_LOCK_SEC, atSec)) {
+      this.switched = this.lockedPos !== null && distanceBetween(this.lockedPos, candidate) >= SPEAKER_SWITCH_DISTANCE;
       this.lockedPos = candidate;
     }
 
@@ -276,6 +293,7 @@ export class ActiveSpeakerResolver {
     this.pendingPos = null;
     this.pendingStreak.clear();
     this.belowThresholdSinceSec = null;
+    this.switched = false;
   }
 
   /** Too few faces for a lock to be needed: keeps an existing lock through a short gap, then releases it. */

@@ -970,6 +970,7 @@ export class VertixEngine {
     // itself lives inside computeSpeakerLayout. A pending reframe aims
     // straight at the new faces, without the deadzone.
     if (stablePersonCount > 0 && count === stablePersonCount) {
+      if (this.activeSpeaker.switchedSpeaker) this.pendingReframe ??= "dissolve";
       this.targetPanes =
         this.pendingReframe !== null
           ? computeSpeakerLayout(this.lastResolvedFaces, srcW, srcH, cropW, cropH)

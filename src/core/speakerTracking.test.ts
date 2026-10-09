@@ -25,7 +25,7 @@ function lockedResolver() {
   let resolved: FaceBox[] = [];
   for (let i = 0; i < 10 && resolved.length !== 1; i++) resolved = detect([LEFT, BIG_MIDDLE, RIGHT]);
   expect(resolved).toEqual([BIG_MIDDLE]);
-  return { detect };
+  return { detect, resolver };
 }
 
 describe("ActiveSpeakerResolver lock release", () => {
@@ -96,6 +96,32 @@ describe("PersonCountDebouncer timing is the same in seconds at 25 and 50 fps", 
     debouncer.observe(1, false, 0);
     expect(debouncer.observe(1, false, 0.2)).toBe(1);
     expect(debouncer.observe(2, true, 5)).toBe(1);
+  });
+});
+
+describe("ActiveSpeakerResolver speaker switch", () => {
+  it("flags a switch when the lock moves to someone far from the locked face", () => {
+    const { detect, resolver } = lockedResolver();
+    const bigLeft = face(0.2, 0.5, 0.3);
+    const middle = face(0.5, 0.5);
+    let resolved: FaceBox[] = [];
+    for (let i = 0; i < 10 && resolved[0] !== bigLeft; i++) {
+      resolved = detect([bigLeft, middle, RIGHT]);
+      if (resolved[0] !== bigLeft) expect(resolver.switchedSpeaker).toBe(false);
+    }
+    expect(resolved).toEqual([bigLeft]);
+    expect(resolver.switchedSpeaker).toBe(true);
+    detect([bigLeft, middle, RIGHT]);
+    expect(resolver.switchedSpeaker).toBe(false);
+  });
+
+  it("does not flag a switch when the locked face moves a little", () => {
+    const { detect, resolver } = lockedResolver();
+    const moved = face(0.6, 0.5, 0.3);
+    for (let i = 0; i < 10; i++) {
+      expect(detect([LEFT, moved, RIGHT])).toEqual([moved]);
+      expect(resolver.switchedSpeaker).toBe(false);
+    }
   });
 });
 

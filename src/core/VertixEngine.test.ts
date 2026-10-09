@@ -393,3 +393,40 @@ describe("VertixEngine scene cuts", () => {
     engine.destroy();
   });
 });
+
+describe("VertixEngine active-speaker switch", () => {
+  const BIG_LEFT = { ...LEFT, size: 0.3 };
+  const BIG_MIDDLE_MOVED = { ...BIG_MIDDLE, cx: BIG_MIDDLE.cx + 0.1 };
+
+  /** Locked onto BIG_MIDDLE, with the single-pane layout committed and settled. */
+  function lockedOnMiddle() {
+    const tracking = setUpTracking(25);
+    const { secondsUntil, speakerCount, resolved, isGliding, isDissolving } = tracking;
+    secondsUntil(
+      [LEFT, BIG_MIDDLE, RIGHT],
+      () => speakerCount() === 1 && resolved()[0].cx === BIG_MIDDLE.cx && !isGliding() && !isDissolving()
+    );
+    return tracking;
+  }
+
+  it("cross-dissolves to a speaker on the other side of the room instead of panning", () => {
+    const { engine, secondsUntil, resolved, isGliding, isDissolving, paneCenterX } = lockedOnMiddle();
+    secondsUntil([BIG_LEFT, MIDDLE, RIGHT], () => resolved()[0].cx === BIG_LEFT.cx);
+    expect(paneCenterX()).toBeLessThan(0.3);
+    expect(isDissolving()).toBe(true);
+    expect(isGliding()).toBe(false);
+    engine.destroy();
+  });
+
+  it("still glides when the locked speaker moves a little", () => {
+    const { engine, detect, resolved, isGliding, isDissolving } = lockedOnMiddle();
+    detect([LEFT, BIG_MIDDLE_MOVED, RIGHT]);
+    expect(isGliding()).toBe(true);
+    for (let i = 0; i < 10; i++) {
+      detect([LEFT, BIG_MIDDLE_MOVED, RIGHT]);
+      expect(isDissolving()).toBe(false);
+    }
+    expect(resolved()[0].cx).toBe(BIG_MIDDLE_MOVED.cx);
+    engine.destroy();
+  });
+});
