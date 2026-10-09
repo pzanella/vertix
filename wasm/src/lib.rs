@@ -1,6 +1,7 @@
 use wasm_bindgen::prelude::*;
 
 mod face;
+mod scene_cut;
 use face::FaceTracker;
 
 /// Simple RGB skin-tone check (Peer et al.), no color-space conversion.
@@ -60,6 +61,15 @@ impl ReframeEngine {
             flat.push(if f.skin_rejected { 1.0 } else { 0.0 });
         }
         flat
+    }
+
+    /// Hard-cut scores of the last `update_faces` call, as
+    /// `[hist, grid, is_cut]`: histogram and luma-grid differences from the
+    /// previous call (0..1 each) and 1.0 if that frame was a cut, else 0.0.
+    /// See `scene_cut.rs` for the rule.
+    pub fn last_cut_scores(&self) -> Vec<f64> {
+        let cut = self.face_tracker.last_cut();
+        vec![cut.hist, cut.grid, if cut.is_cut { 1.0 } else { 0.0 }]
     }
 
     pub fn reset(&mut self) {
