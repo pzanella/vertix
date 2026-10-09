@@ -14,6 +14,7 @@ import {
   type SceneCutScores,
 } from "./layoutEngine";
 import type { BenchmarkProbe } from "./bench/BenchmarkRecorder";
+import { DecisionTimeline, mergeDecisions, type LayoutDecision, type Reframe } from "./lookahead/decisionTimeline";
 import {
   defaultWasmBuild,
   importWasmBindings,
@@ -361,13 +362,6 @@ const SKIN_REJECTED_DASH = [10, 6];
 const LAYOUT_TRANSITION_MS = 250;
 
 /**
- * A framing change that must not glide: "snap" after a hard cut in the
- * source (the viewer already saw a cut), "dissolve" when the active
- * speaker switches to someone else within the same shot.
- */
-type Reframe = "snap" | "dissolve";
-
-/**
  * Full, un-cropped frame centered in the output canvas with a softly
  * blurred cover-scaled backdrop filling the rest — no tracking, no crop
  * math, just "show everything". Used for the no-faces (B-roll) fallback.
@@ -466,8 +460,7 @@ export class VertixEngine {
   private srcDimsInitialized = false;
 
   private lastFaces: FaceBox[] = [];
-  // Per-detection counts for the benchmark probe, and the boxes for the
-  // skin-rejection overlay.
+  // Per-detection counts for the benchmark probe.
   private lastDetectedFaceCount = 0;
   private lastSkinRejectedFaces: FaceBox[] = [];
   private lastSkinRejectedSpeakerSizedCount = 0;
@@ -480,11 +473,22 @@ export class VertixEngine {
   private audioMonitor = new AudioActivityMonitor();
   private activeSpeaker = new ActiveSpeakerResolver();
 
+  // Decision side: what the latest detection decided, before it is shown.
+  private decidedTargetPanes: PaneTarget[] = [];
+  private decidedSpeakerCount = 0;
+  // True once a frame was rendered (or buffered) since the last reset: the
+  // no-crop layout counts as committed from then on.
+  private hasFrameSinceReset = false;
+  private decisions = new DecisionTimeline();
+
+  // Display side: what the frame on screen uses.
+  private displayedSpeakerCount = 0;
+  private displayedSkinRejectedFaces: FaceBox[] = [];
   private targetPanes: PaneTarget[] = [];
   private smoothedPanes: PaneRect[] = [];
 
   private layoutSignature = "";
-  // Set by a detection, applied (and cleared) by the next rendered frame.
+  // Set by an applied decision, consumed by the frame it was applied on.
   private pendingReframe: Reframe | null = null;
   private transitionSnapshotCanvas: OffscreenCanvas | null = null;
   private transitionStart: number | null = null;
@@ -613,7 +617,7 @@ export class VertixEngine {
       wasmReady: sharedWorkerReady || this.wasmReady,
       mode: this.mode,
       meta: this.meta,
-      speakerCount: this.personCount.stableCount,
+      speakerCount: this.displayedSpeakerCount,
       isTransitioning: this.transitionStart !== null,
     };
   }
@@ -703,6 +707,12 @@ export class VertixEngine {
     this.detectionIntervalEma = 0;
     this.personCount.reset();
     this.activeSpeaker.reset();
+    this.decidedTargetPanes = [];
+    this.decidedSpeakerCount = 0;
+    this.hasFrameSinceReset = false;
+    this.decisions.clear();
+    this.displayedSpeakerCount = 0;
+    this.displayedSkinRejectedFaces = [];
     this.smoothedPanes = [];
     this.targetPanes = [];
     this.layoutSignature = "";
@@ -743,13 +753,13 @@ export class VertixEngine {
     const ctx = this.skinRejectionOverlayCtx;
     if (!ctx) return;
     ctx.clearRect(0, 0, outW, outH);
-    const faces = this.lastSkinRejectedFaces;
+    const faces = this.displayedSkinRejectedFaces;
     if (faces.length === 0 || this.mode === "16:9") return;
 
     const { w: srcW, h: srcH } = this.srcDims;
     const fittedHeight = Math.round(srcH * (outW / srcW));
     const views: { source: PaneRect; dest: PaneRect }[] =
-      this.personCount.stableCount === 0
+      this.displayedSpeakerCount === 0
         ? [
             {
               source: { x: 0, y: 0, w: srcW, h: srcH },
@@ -935,9 +945,8 @@ export class VertixEngine {
     const count = this.lastResolvedFaces.length;
     const stablePersonCount = sceneCut.isCut
       ? this.personCount.commitNow(count, mediaTimeSec)
-      : this.personCount.observe(count, this.layoutSignature !== "", mediaTimeSec);
-    if (sceneCut.isCut) this.pendingReframe = "snap";
-    this.emitState();
+      : this.personCount.observe(count, this.hasFrameSinceReset, mediaTimeSec);
+    this.decideLayout(mediaTimeSec, count, stablePersonCount, sceneCut.isCut, srcW, srcH, cropW, cropH);
 
     if (this.lastDetectionMediaTime !== null && mediaTimeSec > this.lastDetectionMediaTime) {
       const interval = mediaTimeSec - this.lastDetectionMediaTime;
@@ -977,19 +986,67 @@ export class VertixEngine {
           : this.metrics.confidenceHistory,
     };
     this.emitMetrics();
+  }
 
-    // Only refresh the LERP target once the raw count matches the
-    // *committed* layout — otherwise, mid-debounce, this could compute a
-    // different pane count than what's actually on screen. The deadzone
-    // itself lives inside computeSpeakerLayout. A pending reframe aims
-    // straight at the new faces, without the deadzone.
-    if (stablePersonCount > 0 && count === stablePersonCount) {
-      if (this.activeSpeaker.switchedSpeaker) this.pendingReframe ??= "dissolve";
-      this.targetPanes =
-        this.pendingReframe !== null
+  /** Turns one detection into a LayoutDecision for the frame at `mediaTimeSec`, and queues it for display. */
+  private decideLayout(
+    mediaTimeSec: number,
+    count: number,
+    stablePersonCount: number,
+    isCut: boolean,
+    srcW: number,
+    srcH: number,
+    cropW: number,
+    cropH: number
+  ): void {
+    const countChanged = stablePersonCount !== this.decidedSpeakerCount;
+    let reframe: Reframe | null = isCut ? "snap" : null;
+    if (stablePersonCount === 0) {
+      this.decidedTargetPanes = [];
+    } else if (count === stablePersonCount) {
+      // Only refresh the target once the raw count matches the *committed*
+      // layout — otherwise, mid-debounce, this could compute a different
+      // pane count than what's actually on screen. The deadzone itself
+      // lives inside computeSpeakerLayout. A reframe or a new layout aims
+      // straight at the new faces, without the deadzone.
+      if (this.activeSpeaker.switchedSpeaker) reframe ??= "dissolve";
+      this.decidedTargetPanes =
+        reframe !== null || countChanged
           ? computeSpeakerLayout(this.lastResolvedFaces, srcW, srcH, cropW, cropH)
-          : computeSpeakerLayout(this.lastResolvedFaces, srcW, srcH, cropW, cropH, this.targetPanes, DEADZONE_FRACTION);
+          : computeSpeakerLayout(
+              this.lastResolvedFaces,
+              srcW,
+              srcH,
+              cropW,
+              cropH,
+              this.decidedTargetPanes,
+              DEADZONE_FRACTION
+            );
     }
+    this.decidedSpeakerCount = stablePersonCount;
+    this.decisions.push({
+      mediaTimeSec,
+      speakerCount: stablePersonCount,
+      targetPanes: this.decidedTargetPanes,
+      reframe,
+      isCut,
+      skinRejectedFaces: this.lastSkinRejectedFaces,
+    });
+  }
+
+  /** Applies the decisions due for the frame about to be drawn; with `onlyUpToSec` null, every queued one (no lookahead: they are already late). */
+  private applyDueDecisions(onlyUpToSec: number | null): LayoutDecision | null {
+    const decision = mergeDecisions(
+      onlyUpToSec === null ? this.decisions.takeAll() : this.decisions.takeDue(onlyUpToSec)
+    );
+    if (!decision) return null;
+    const countChanged = decision.speakerCount !== this.displayedSpeakerCount;
+    this.displayedSpeakerCount = decision.speakerCount;
+    this.displayedSkinRejectedFaces = decision.skinRejectedFaces;
+    this.targetPanes = decision.targetPanes;
+    this.pendingReframe = decision.reframe;
+    if (countChanged) this.emitState();
+    return decision;
   }
 
   /**
@@ -1106,13 +1163,15 @@ export class VertixEngine {
       // cover-crop following its face. The layout (pane count/positions) is
       // committed once per debounced face-count change and held fixed;
       // within it, each pane's crop only drifts smoothly toward its target.
+      this.hasFrameSinceReset = true;
       this.frameCounter += 1;
       if (this.frameCounter % FACE_DETECT_INTERVAL === 0) {
         if (!this.detectionInFlight) this.dispatchDetection(video, metadata.mediaTime, srcW, srcH, cropW, cropH);
         else probe?.recordSkippedDetection();
       }
 
-      const speakerCount = this.personCount.stableCount;
+      this.applyDueDecisions(null);
+      const speakerCount = this.displayedSpeakerCount;
       const targetSignature = speakerCount === 0 ? "broll" : `speakers:${speakerCount}`;
 
       const reframe = this.pendingReframe;
@@ -1132,8 +1191,6 @@ export class VertixEngine {
 
         // A new layout snaps straight to its target instead of gliding in
         // from the old positions.
-        this.targetPanes =
-          speakerCount === 0 ? [] : computeSpeakerLayout(this.lastResolvedFaces, srcW, srcH, cropW, cropH);
         this.smoothedPanes = this.targetPanes.map((p) => ({ ...p.pane.source }));
 
         const cropScaleFactor =
