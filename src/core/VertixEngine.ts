@@ -116,7 +116,7 @@ export type LookaheadUnavailableReason =
   | "no-audio-graph"
   /** Cross-origin source without CORS: frames can't be read and the graph only carries silence. */
   | "cross-origin"
-  /** The graph carries exact silence while the element plays unmuted audio (same cause, detected from the audio side). */
+  /** The graph carries exact silence while a cross-origin element plays unmuted audio (same cause, detected from the audio side). */
   | "silent-audio-path";
 
 export interface LookaheadStatus {
@@ -809,6 +809,7 @@ export class VertixEngine {
     this.srcDimsInitialized = false;
     this.frameCounter = 0;
     this.sourceTainted = false;
+    this.audioMonitor.resetSilentPath();
     this.flushLookahead();
     this.frameBuffer = null;
     this.captureIndex = 0;

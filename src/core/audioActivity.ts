@@ -149,13 +149,17 @@ export class AudioActivityMonitor {
    * Updates silentPathSuspected. A cross-origin source without CORS
    * headers plays through the graph as exact zeros instead of failing, so
    * delaying it is pointless and the caller should not rely on the graph.
-   * Only judged while `video` plays unmuted and reports decoded audio, so a
-   * clip without an audio track never counts. Cleared by any non-zero sample.
+   * Only judged for a cross-origin http(s) source (a same-origin, blob or
+   * MediaSource one can't be tainted, and a silent audio track — every
+   * sample clip has one — must not count), while `video` plays unmuted and
+   * reports decoded audio. Cleared by any non-zero sample.
    */
   checkSilentPath(video: HTMLVideoElement, nowMs: number): boolean {
     if (!this._available || !this.analyser || !this.data) return this._silentPathSuspected;
-    const audible = !video.paused && !video.muted && video.volume > 0;
-    if (!audible || !hasDecodedAudio(video)) {
+    // A suspended context reads as zeros too, but that is a different (and
+    // temporary) state: nothing plays at all until it resumes.
+    const audible = !video.paused && !video.muted && video.volume > 0 && this.ctx?.state === "running";
+    if (!audible || !isCrossOriginSource(video) || !hasDecodedAudio(video)) {
       this.exactSilenceSinceMs = null;
       return this._silentPathSuspected;
     }
@@ -169,6 +173,12 @@ export class AudioActivityMonitor {
       if (nowMs - this.exactSilenceSinceMs >= SILENT_PATH_SUSPECT_MS) this._silentPathSuspected = true;
     }
     return this._silentPathSuspected;
+  }
+
+  /** Forgets the silent-path verdict: a new source is judged on its own. */
+  resetSilentPath(): void {
+    this.exactSilenceSinceMs = null;
+    this._silentPathSuspected = false;
   }
 
   detach(): void {
@@ -217,4 +227,13 @@ function hasDecodedAudio(video: HTMLVideoElement): boolean {
   if (typeof v.webkitAudioDecodedByteCount === "number") return v.webkitAudioDecodedByteCount > 0;
   if (typeof v.mozHasAudio === "boolean") return v.mozHasAudio;
   return (v.audioTracks?.length ?? 0) > 0;
+}
+
+function isCrossOriginSource(video: HTMLVideoElement): boolean {
+  try {
+    const url = new URL(video.currentSrc, location.href);
+    return (url.protocol === "http:" || url.protocol === "https:") && url.origin !== location.origin;
+  } catch {
+    return false;
+  }
 }

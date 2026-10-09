@@ -25,6 +25,7 @@ vi.mock("./audioActivity", () => ({
     }
     setOutputDelay() {}
     muteFor() {}
+    resetSilentPath() {}
   },
 }));
 
