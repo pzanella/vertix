@@ -13,7 +13,9 @@ const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const wasmDir = join(root, "src/core/wasm");
 const outDir = join(root, "public/workers");
 
-if (!existsSync(join(wasmDir, "wasm_bg.wasm"))) {
+const WASM_BUILDS = ["simd", "scalar"];
+
+if (!WASM_BUILDS.every((build) => existsSync(join(wasmDir, build, "wasm_bg.wasm")))) {
   console.error("public/workers build skipped: src/core/wasm/ doesn't exist yet — run `npm run build:wasm` first.");
   process.exit(1);
 }
@@ -37,11 +39,14 @@ await build({
   logOverride: { "empty-import-meta": "silent" },
 });
 
-// The bundled worker still resolves the .wasm binary next to itself at
+// The bundled worker resolves the selected .wasm binary next to itself at
 // runtime (faceDetectionWorker.ts passes initWasm() an explicit
 // same-directory URL) — esbuild doesn't do anything with that reference
-// (it's a runtime string, not a static import), so the binary has to
+// (it's a runtime string, not a static import), so both binaries have to
 // actually sit next to the bundled worker file for that URL to resolve.
-copyFileSync(join(wasmDir, "wasm_bg.wasm"), join(outDir, "wasm_bg.wasm"));
+// The worker only fetches the one it was told to load.
+for (const build of WASM_BUILDS) {
+  copyFileSync(join(wasmDir, build, "wasm_bg.wasm"), join(outDir, `wasm_${build}_bg.wasm`));
+}
 
-console.log("Worker bundle + wasm binary written to public/workers/");
+console.log("Worker bundle + both wasm binaries written to public/workers/");
