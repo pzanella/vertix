@@ -14,11 +14,17 @@ vi.mock("./wasm/scalar/wasm.js", () => ({
 vi.mock("./audioActivity", () => ({
   AudioActivityMonitor: class {
     available = false;
+    silentPathSuspected = false;
     attach() {}
     detach() {}
     energy() {
       return null;
     }
+    checkSilentPath() {
+      return false;
+    }
+    setOutputDelay() {}
+    muteFor() {}
   },
 }));
 
