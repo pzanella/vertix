@@ -4,6 +4,7 @@ import {
   medianOfPositive,
   ratePerSecond,
   selectWhere,
+  sum,
   summarize,
   type SampleSummary,
 } from "./stats";
@@ -24,7 +25,9 @@ export interface BenchmarkProbe {
     postProcessMs: number,
     totalMs: number,
     rawFaceCount: number,
-    keptFaceCount: number
+    keptFaceCount: number,
+    skinRejectedCount: number,
+    skinRejectedSpeakerSizedCount: number
   ): void;
   /** A detection was due on this frame but skipped because the previous one had not returned yet. */
   recordSkippedDetection(): void;
@@ -79,6 +82,8 @@ export interface DetectionSummary {
   totalMs: SampleSummary;
   rawFaces: SampleSummary;
   keptFaces: SampleSummary;
+  /** Detections the skin-tone filter rejected (sum over measured detections); `speakerSized` would also have passed the size/visibility filter. */
+  skinRejected: { total: number; speakerSized: number };
 }
 
 export interface LongTaskSummary {
@@ -121,6 +126,8 @@ export interface BenchmarkClipRaw {
     totalMs: number[];
     rawFaces: number[];
     keptFaces: number[];
+    skinRejected: number[];
+    skinRejectedSpeakerSized: number[];
     warmup: number[];
   };
   skippedDetections: { mediaTimeSec: number[]; warmup: number[] };
@@ -186,6 +193,8 @@ export class BenchmarkRecorder implements BenchmarkProbe {
   private readonly detectionTotal: Float64Array;
   private readonly detectionRawFaces: Float64Array;
   private readonly detectionKeptFaces: Float64Array;
+  private readonly detectionSkinRejected: Float64Array;
+  private readonly detectionSkinRejectedSpeakerSized: Float64Array;
   private readonly detectionWarmup: Uint8Array;
   private detectionCount = 0;
   private detectionOverflow = 0;
@@ -238,6 +247,8 @@ export class BenchmarkRecorder implements BenchmarkProbe {
     this.detectionTotal = new Float64Array(detectionCapacity);
     this.detectionRawFaces = new Float64Array(detectionCapacity);
     this.detectionKeptFaces = new Float64Array(detectionCapacity);
+    this.detectionSkinRejected = new Float64Array(detectionCapacity);
+    this.detectionSkinRejectedSpeakerSized = new Float64Array(detectionCapacity);
     this.detectionWarmup = new Uint8Array(detectionCapacity);
     this.skippedMediaTime = new Float64Array(detectionCapacity);
     this.skippedWarmup = new Uint8Array(detectionCapacity);
@@ -283,7 +294,9 @@ export class BenchmarkRecorder implements BenchmarkProbe {
     postProcessMs: number,
     totalMs: number,
     rawFaceCount: number,
-    keptFaceCount: number
+    keptFaceCount: number,
+    skinRejectedCount: number,
+    skinRejectedSpeakerSizedCount: number
   ): void {
     if (this.finished) return;
     const i = this.detectionCount;
@@ -301,6 +314,8 @@ export class BenchmarkRecorder implements BenchmarkProbe {
     this.detectionTotal[i] = totalMs;
     this.detectionRawFaces[i] = rawFaceCount;
     this.detectionKeptFaces[i] = keptFaceCount;
+    this.detectionSkinRejected[i] = skinRejectedCount;
+    this.detectionSkinRejectedSpeakerSized[i] = skinRejectedSpeakerSizedCount;
     this.detectionWarmup[i] = this.inWarmup ? 1 : 0;
     this.detectionCount = i + 1;
   }
@@ -427,6 +442,10 @@ export class BenchmarkRecorder implements BenchmarkProbe {
         totalMs: summarize(total),
         rawFaces: summarize(pick(this.detectionRawFaces)),
         keptFaces: summarize(pick(this.detectionKeptFaces)),
+        skinRejected: {
+          total: sum(pick(this.detectionSkinRejected)),
+          speakerSized: sum(pick(this.detectionSkinRejectedSpeakerSized)),
+        },
       },
       layoutChanges,
       longTasks: {
@@ -517,6 +536,8 @@ export class BenchmarkRecorder implements BenchmarkProbe {
         totalMs: toArray(this.detectionTotal, d),
         rawFaces: toArray(this.detectionRawFaces, d),
         keptFaces: toArray(this.detectionKeptFaces, d),
+        skinRejected: toArray(this.detectionSkinRejected, d),
+        skinRejectedSpeakerSized: toArray(this.detectionSkinRejectedSpeakerSized, d),
         warmup: toArray(this.detectionWarmup, d),
       },
       skippedDetections: {

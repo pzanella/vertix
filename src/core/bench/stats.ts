@@ -31,6 +31,12 @@ export function percentileOfSorted(sorted: ArrayLike<number>, p: number): number
   return sorted[lower] + (sorted[upper] - sorted[lower]) * weight;
 }
 
+export function sum(values: ArrayLike<number>): number {
+  let total = 0;
+  for (let i = 0; i < values.length; i++) total += values[i];
+  return total;
+}
+
 export function mean(values: ArrayLike<number>): number | null {
   const n = values.length;
   if (n === 0) return null;

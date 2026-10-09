@@ -40,15 +40,16 @@ impl ReframeEngine {
     }
 
     /// Runs face detection on a 320x240 frame (the source stretched to fit,
-    /// not letterboxed; see `face.rs`)
-    /// and returns every detected face, flattened as
-    /// `[cx, cy, w, h, motion, score, ...]` (fractions 0..1 of the source
-    /// frame). Meant to be called less often than every frame — it's much
-    /// more expensive than the rest of the render loop.
+    /// not letterboxed; see `face.rs`) and returns every detected face,
+    /// flattened as `[cx, cy, w, h, motion, score, skin_rejected, ...]`
+    /// (fractions 0..1 of the source frame; `skin_rejected` is 1.0 for a face
+    /// that failed only the skin-tone check, else 0.0). Meant to be called
+    /// less often than every frame — it's much more expensive than the rest
+    /// of the render loop.
     pub fn update_faces(&mut self, face_frame_rgba: &[u8]) -> Vec<f64> {
         let faces = self.face_tracker.observe(face_frame_rgba);
 
-        let mut flat = Vec::with_capacity(faces.len() * 6);
+        let mut flat = Vec::with_capacity(faces.len() * 7);
         for f in &faces {
             flat.push(f.cx as f64);
             flat.push(f.cy as f64);
@@ -56,6 +57,7 @@ impl ReframeEngine {
             flat.push(f.h as f64);
             flat.push(f.motion);
             flat.push(f.score as f64);
+            flat.push(if f.skin_rejected { 1.0 } else { 0.0 });
         }
         flat
     }

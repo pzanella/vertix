@@ -23,20 +23,35 @@ export interface SpeakerPane {
   dest: PaneRect;
 }
 
-/** Unpacks the `[cx, cy, w, h, motion, score, ...]` array returned by `ReframeEngine.update_faces`. */
-export function unpackFaces(flat: Float64Array): FaceBox[] {
-  const faces: FaceBox[] = [];
-  for (let i = 0; i + 5 < flat.length; i += 6) {
-    faces.push({
+// Values per face in the array returned by `ReframeEngine.update_faces`.
+const DETECTION_STRIDE = 7;
+
+export interface UnpackedDetections {
+  faces: FaceBox[];
+  /** Detections the WASM skin-tone filter rejected. For measuring that filter only — never for the layout. */
+  skinRejected: FaceBox[];
+}
+
+/** Unpacks the `[cx, cy, w, h, motion, score, skinRejected, ...]` array returned by `ReframeEngine.update_faces`. */
+export function unpackDetections(flat: Float64Array): UnpackedDetections {
+  const result: UnpackedDetections = { faces: [], skinRejected: [] };
+  for (let i = 0; i + DETECTION_STRIDE - 1 < flat.length; i += DETECTION_STRIDE) {
+    const face: FaceBox = {
       cx: flat[i],
       cy: flat[i + 1],
       w: flat[i + 2],
       h: flat[i + 3],
       motion: flat[i + 4],
       confidence: flat[i + 5],
-    });
+    };
+    (flat[i + 6] === 0 ? result.faces : result.skinRejected).push(face);
   }
-  return faces;
+  return result;
+}
+
+/** The faces that passed every WASM filter, dropping skin-rejected detections. */
+export function unpackFaces(flat: Float64Array): FaceBox[] {
+  return unpackDetections(flat).faces;
 }
 
 /**

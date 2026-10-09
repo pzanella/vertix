@@ -28,7 +28,7 @@ function sampleResult() {
   } as unknown as HTMLVideoElement;
   const recorder = new BenchmarkRecorder({ clipName: "clip, one", video, warmupSec: 0, nominalFps: 25 });
   for (let i = 0; i < 10; i++) recorder.recordFrame(i * 40, 0.3, i * 0.04, i);
-  recorder.recordDetection("worker", 2, 3, 40, 0.5, 50, 2, 1);
+  recorder.recordDetection("worker", 2, 3, 40, 0.5, 50, 2, 1, 1, 0);
   recorder.recordSkippedDetection();
   recorder.recordLayoutChange(200);
   return recorder.finish("9:16");
@@ -56,6 +56,8 @@ describe("benchmarkReportToCsv", () => {
     expect(lines[1].startsWith('frame,"clip, one",9:16,0,0,0,0,0.3,0')).toBe(true);
     expect(lines.some((line) => line.startsWith("skipped_detection,"))).toBe(true);
     expect(lines.some((line) => line.startsWith("layout_change,"))).toBe(true);
+    expect(lines[0].endsWith("kept_faces,skin_rejected,skin_rejected_speaker_sized,duration_ms")).toBe(true);
+    expect(lines.find((line) => line.startsWith("detection,"))!.endsWith(",2,1,1,0,")).toBe(true);
   });
 });
 
@@ -67,6 +69,8 @@ describe("benchmarkSummaryRows", () => {
     const [row] = benchmarkSummaryRows(report);
     expect(row.clip).toBe("clip, one");
     expect(row["skipped (in flight)"]).toBe(1);
+    expect(row["skin rejected"]).toBe(1);
+    expect(row["skin rejected (speaker-sized)"]).toBe(0);
     expect(row["render fps"]).toBe(25);
     expect(report.precisionWarnings.length).toBeGreaterThan(0);
   });

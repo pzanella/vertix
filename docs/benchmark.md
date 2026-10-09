@@ -153,7 +153,7 @@ If the worker cannot start, it runs on the main thread (`path`).
 | `postProcessMs`        | Main thread: `processDetectionResult` (filters, active speaker, debounce, layout, emit) | same                                         |
 | `totalMs`              | Dispatch on the main thread → end of post-processing                                    | same                                         |
 | `overheadMs`           | `total − acquire − wasm − post`: `postMessage` transfer and event-loop queueing         | ≈ 0                                          |
-| `rawFaces`/`keptFaces` | Faces returned by WASM / faces left after the size and visibility filters               | same                                         |
+| `rawFaces`/`keptFaces` | Faces WASM returned as passing the skin filter / faces left after the size and visibility filters | same                                         |
 
 What one `update_faces()` call contains:
 
