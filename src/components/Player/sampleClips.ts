@@ -18,6 +18,26 @@ const asset = (path: string) => `${import.meta.env.BASE_URL}${path}`;
 
 export const sampleClipUrl = (file: string) => asset(`samples/${file}`);
 
+/** A clip the benchmark suite plays. */
+export interface BenchmarkClip {
+  file: string;
+  url: string;
+  nominalFps: number;
+  durationSec: number;
+  /** Media times of the clip's real hard cuts (test clips only). */
+  knownCutsSec: readonly number[];
+}
+
+/**
+ * Benchmark-only test clips with known hard cuts, made by
+ * scripts/make-cut-clips.mjs from the sample clips (1280x720, 25 fps, no
+ * audio). Not offered in the sample picker.
+ */
+export const CUT_TEST_CLIPS: BenchmarkClip[] = [
+  { file: "cross-count.mp4", nominalFps: 25, durationSec: 16, knownCutsSec: [4, 8, 12] },
+  { file: "cross-same-count.mp4", nominalFps: 25, durationSec: 16, knownCutsSec: [4, 8, 12] },
+].map((clip) => ({ ...clip, url: asset(`bench/${clip.file}`) }));
+
 export const SAMPLE_CLIPS: SampleClip[] = [
   {
     file: "1-speaker.mp4",
@@ -73,4 +93,15 @@ export const SAMPLE_CLIPS: SampleClip[] = [
     nominalFps: 25,
     durationSec: 11.733,
   },
+];
+
+export const BENCHMARK_CLIPS: BenchmarkClip[] = [
+  ...SAMPLE_CLIPS.map(({ file, nominalFps, durationSec }) => ({
+    file,
+    url: sampleClipUrl(file),
+    nominalFps,
+    durationSec,
+    knownCutsSec: [],
+  })),
+  ...CUT_TEST_CLIPS,
 ];

@@ -1,5 +1,12 @@
 export { VertixEngine, INITIAL_METRICS } from "./VertixEngine";
-export type { VertixMode, VertixMeta, VertixMetrics, VertixState } from "./VertixEngine";
+export type {
+  LookaheadStatus,
+  LookaheadUnavailableReason,
+  VertixMode,
+  VertixMeta,
+  VertixMetrics,
+  VertixState,
+} from "./VertixEngine";
 export {
   computeSpeakerLayout,
   unpackDetections,

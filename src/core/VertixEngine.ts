@@ -1057,7 +1057,8 @@ export class VertixEngine {
     srcW: number,
     srcH: number,
     cropW: number,
-    cropH: number
+    cropH: number,
+    triggeredByCut = false
   ): void {
     const probe = this.benchmarkProbe;
     const dispatchedAt = performance.now();
@@ -1106,7 +1107,10 @@ export class VertixEngine {
             mediaTimeSec,
             this.lastSceneCut.hist,
             this.lastSceneCut.grid,
-            this.lastSceneCut.isCut
+            this.lastSceneCut.isCut,
+            triggeredByCut,
+            this.lastResolvedFaces.length,
+            this.lastResolvedFaces[0]?.cx ?? NaN
           );
         }
         this.dispatchPendingCutDetection();
@@ -1186,7 +1190,10 @@ export class VertixEngine {
           mediaTimeSec,
           this.lastSceneCut.hist,
           this.lastSceneCut.grid,
-          this.lastSceneCut.isCut
+          this.lastSceneCut.isCut,
+          triggeredByCut,
+          this.lastResolvedFaces.length,
+          this.lastResolvedFaces[0]?.cx ?? NaN
         );
       }
     }
@@ -1475,8 +1482,10 @@ export class VertixEngine {
         }
       }
     }
-    this.renderFrame(video, srcW, srcH, null, now, frameDtSec);
+    const renderStart = this.benchmarkProbe ? performance.now() : 0;
+    this.renderFrame(video, srcW, srcH, null, metadata.mediaTime, now, frameDtSec);
     this.displayedMediaTimeSec = metadata.mediaTime;
+    this.benchmarkProbe?.recordDisplay(now, metadata.mediaTime, performance.now() - renderStart, NaN);
   }
 
   /** Lookahead: copies the frame into the buffer, due LOOKAHEAD after its own display time, and runs detection on it if due. */
@@ -1564,7 +1573,7 @@ export class VertixEngine {
     const frame = this.frameBuffer?.find(mediaTimeSec);
     if (!frame) return;
     this.nextDetectionFrameIndex = frame.frameIndex + FACE_DETECT_INTERVAL;
-    this.dispatchDetection(frame.slot.canvas, mediaTimeSec, ...this.cropArgs());
+    this.dispatchDetection(frame.slot.canvas, mediaTimeSec, ...this.cropArgs(), true);
   }
 
   private dispatchPendingCutDetection(): void {
@@ -1665,16 +1674,24 @@ export class VertixEngine {
     if (frame) {
       const frameDtSec = this.lastDisplayedAt !== null ? (now - this.lastDisplayedAt) / 1000 : 0;
       this.lastDisplayedAt = now;
+      const renderStart = performance.now();
       this.renderFrame(
         frame.slot.canvas,
         frame.slot.canvas.width,
         frame.slot.canvas.height,
+        frame.mediaTimeSec,
         frame.mediaTimeSec,
         now,
         frameDtSec
       );
       buffer.release(frame);
       this.displayedMediaTimeSec = frame.mediaTimeSec;
+      this.benchmarkProbe?.recordDisplay(
+        now,
+        frame.mediaTimeSec,
+        performance.now() - renderStart,
+        onScreenAt - frame.dueMs
+      );
     }
 
     if (buffer.length > 0) {
@@ -1701,6 +1718,7 @@ export class VertixEngine {
     sourceW: number,
     sourceH: number,
     decisionsUpToSec: number | null,
+    frameMediaTimeSec: number,
     now: number,
     frameDtSec: number
   ): void {
@@ -1728,7 +1746,8 @@ export class VertixEngine {
       // cover-crop following its face. The layout (pane count/positions) is
       // committed once per debounced face-count change and held fixed;
       // within it, each pane's crop only drifts smoothly toward its target.
-      this.applyDueDecisions(decisionsUpToSec);
+      const applied = this.applyDueDecisions(decisionsUpToSec);
+      if (applied?.isCut) probe?.recordCutShown(now, applied.mediaTimeSec, frameMediaTimeSec);
       const speakerCount = this.displayedSpeakerCount;
       const targetSignature = speakerCount === 0 ? "broll" : `speakers:${speakerCount}`;
 
