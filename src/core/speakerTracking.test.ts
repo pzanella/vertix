@@ -98,3 +98,27 @@ describe("PersonCountDebouncer timing is the same in seconds at 25 and 50 fps", 
     expect(debouncer.observe(2, true, 5)).toBe(1);
   });
 });
+
+describe("PersonCountDebouncer after a scene cut", () => {
+  it("commits the cut detection's count immediately", () => {
+    const debouncer = new PersonCountDebouncer();
+    for (let atSec = 0.2; atSec <= 3; atSec += 0.2) debouncer.observe(2, true, atSec);
+    expect(debouncer.commitNow(1, 3.2)).toBe(1);
+  });
+
+  it("uses the short debounce for changes starting within 1.0s of the cut", () => {
+    const debouncer = new PersonCountDebouncer();
+    debouncer.commitNow(1, 5);
+    expect(debouncer.observe(2, true, 5.2)).toBe(1);
+    expect(debouncer.observe(2, true, 5.4)).toBe(2);
+  });
+
+  it("uses the normal debounce for changes starting 1.0s or more after the cut", () => {
+    const debouncer = new PersonCountDebouncer();
+    debouncer.commitNow(1, 5);
+    debouncer.observe(1, true, 5.6);
+    expect(debouncer.observe(2, true, 6)).toBe(1);
+    expect(debouncer.observe(2, true, 6.4)).toBe(1);
+    expect(debouncer.observe(2, true, 7)).toBe(2);
+  });
+});

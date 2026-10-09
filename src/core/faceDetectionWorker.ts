@@ -97,6 +97,10 @@ ctx.onmessage = (e: MessageEvent<InitMessage | DetectMessage | ResetMessage>) =>
     const start = performance.now();
     const faces = engine.update_faces(new Uint8Array(rgba.buffer));
     const tookMs = performance.now() - start;
-    ctx.postMessage({ type: "result", requestId: msg.requestId, faces, tookMs, readbackMs }, [faces.buffer]);
+    const cutScores = engine.last_cut_scores();
+    ctx.postMessage({ type: "result", requestId: msg.requestId, faces, cutScores, tookMs, readbackMs }, [
+      faces.buffer,
+      cutScores.buffer,
+    ]);
   }
 };

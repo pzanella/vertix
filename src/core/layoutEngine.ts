@@ -49,6 +49,22 @@ export function unpackDetections(flat: Float64Array): UnpackedDetections {
   return result;
 }
 
+/** Hard-cut scores of one detection frame against the previous one (see wasm/src/scene_cut.rs). */
+export interface SceneCutScores {
+  /** Colour histogram distance, 0..1. */
+  hist: number;
+  /** Mean absolute luma difference on a 40x30 block grid, 0..1. */
+  grid: number;
+  isCut: boolean;
+}
+
+export const NO_SCENE_CUT: SceneCutScores = { hist: 0, grid: 0, isCut: false };
+
+/** Unpacks the `[hist, grid, isCut]` array returned by `ReframeEngine.last_cut_scores`. */
+export function unpackSceneCutScores(flat: Float64Array): SceneCutScores {
+  return flat.length < 3 ? NO_SCENE_CUT : { hist: flat[0], grid: flat[1], isCut: flat[2] === 1 };
+}
+
 /** The faces that passed every WASM filter, dropping skin-rejected detections. */
 export function unpackFaces(flat: Float64Array): FaceBox[] {
   return unpackDetections(flat).faces;

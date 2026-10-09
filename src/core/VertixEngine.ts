@@ -6,9 +6,11 @@ import {
   lerpPaneRectInto,
   paneSmoothingAlpha,
   unpackDetections,
+  unpackSceneCutScores,
   type FaceBox,
   type PaneRect,
   type PaneTarget,
+  type SceneCutScores,
 } from "./layoutEngine";
 import type { BenchmarkProbe } from "./bench/BenchmarkRecorder";
 import {
@@ -64,6 +66,8 @@ export interface VertixMetrics {
   layoutCommittedAt: number | null;
   /** How many times the layout has actually changed this session. */
   sceneSwitchCount: number;
+  /** Hard cuts in the source video detected since this source was loaded (seeks don't reset it). 9:16 mode only. */
+  sceneCutCount: number;
   /** Recent samples (oldest first) for trend charts — roughly the last 10-15s, sampling rate varies per metric. */
   fpsHistory: number[];
   frameTimeHistory: number[];
@@ -112,6 +116,7 @@ export const INITIAL_METRICS: VertixMetrics = {
   audioEnergy: null,
   layoutCommittedAt: null,
   sceneSwitchCount: 0,
+  sceneCutCount: 0,
   fpsHistory: [],
   frameTimeHistory: [],
   motionHistory: [],
@@ -177,7 +182,7 @@ let disposeSharedWorker: (() => void) | null = null;
 let nextDetectionRequestId = 0;
 
 interface PendingDetection {
-  onResult: (facesFlat: Float64Array, tookMs: number, readbackMs: number) => void;
+  onResult: (facesFlat: Float64Array, cutScoresFlat: Float64Array, tookMs: number, readbackMs: number) => void;
   /** Called instead of onResult when the worker is replaced before it answers. */
   onCancel: () => void;
 }
@@ -275,6 +280,7 @@ function getSharedDetectionWorker(): Promise<boolean> {
         type: string;
         requestId?: number;
         faces?: ArrayBuffer;
+        cutScores?: ArrayBuffer;
         tookMs?: number;
         readbackMs?: number;
         message?: string;
@@ -297,7 +303,12 @@ function getSharedDetectionWorker(): Promise<boolean> {
       if (msg.type === "result" && msg.requestId !== undefined) {
         const pending = pendingDetections.get(msg.requestId);
         pendingDetections.delete(msg.requestId);
-        pending?.onResult(new Float64Array(msg.faces!), msg.tookMs ?? 0, msg.readbackMs ?? 0);
+        pending?.onResult(
+          new Float64Array(msg.faces!),
+          new Float64Array(msg.cutScores ?? []),
+          msg.tookMs ?? 0,
+          msg.readbackMs ?? 0
+        );
       }
     };
     worker.onerror = (e: ErrorEvent) => {
@@ -347,6 +358,13 @@ const SKIN_REJECTED_DASH = [10, 6];
 // cross-dissolve from the old framing into the new one, instead of cutting
 // instantly.
 const LAYOUT_TRANSITION_MS = 250;
+
+/**
+ * A framing change that must not glide: "snap" after a hard cut in the
+ * source (the viewer already saw a cut), "dissolve" when the active
+ * speaker switches to someone else within the same shot.
+ */
+type Reframe = "snap" | "dissolve";
 
 /**
  * Full, un-cropped frame centered in the output canvas with a softly
@@ -434,6 +452,7 @@ export class VertixEngine {
   private frameTimeEma = 0;
   private lastMetricsPush = 0;
   private sceneSwitchCount = 0;
+  private sceneCutCount = 0;
 
   // Main-thread stall tracking (Long Tasks API — Chromium only). Raw
   // entries land here as they're observed; onVideoFrame's own metrics-push
@@ -463,6 +482,8 @@ export class VertixEngine {
   private smoothedPanes: PaneRect[] = [];
 
   private layoutSignature = "";
+  // Set by a detection, applied (and cleared) by the next rendered frame.
+  private pendingReframe: Reframe | null = null;
   private transitionSnapshotCanvas: OffscreenCanvas | null = null;
   private transitionStart: number | null = null;
 
@@ -652,6 +673,7 @@ export class VertixEngine {
     this.frameTimeEma = 0;
     this.lastMetricsPush = 0;
     this.sceneSwitchCount = 0;
+    this.sceneCutCount = 0;
     // Browser capability, not a per-source reading — INITIAL_METRICS always
     // has this false, so it'd get wiped out on every source load otherwise.
     this.metrics = { ...INITIAL_METRICS, longTasksSupported: this.longTaskObserver !== null };
@@ -682,6 +704,7 @@ export class VertixEngine {
     this.smoothedPanes = [];
     this.targetPanes = [];
     this.layoutSignature = "";
+    this.pendingReframe = null;
     this.transitionStart = null;
     this.metrics = {
       ...this.metrics,
@@ -772,13 +795,24 @@ export class VertixEngine {
       const generation = this.detectionRequestGeneration;
       const requestId = nextDetectionRequestId++;
       let bitmapReadyAt = 0;
-      const onResult = (facesFlat: Float64Array, tookMs: number, readbackMs: number) => {
+      const onResult = (facesFlat: Float64Array, cutScoresFlat: Float64Array, tookMs: number, readbackMs: number) => {
         this.detectionInFlight = false;
         // Belongs to a frame from before a reset (seek, mode change) —
         // discard it instead of feeding stale positions into the layout.
         if (generation !== this.detectionRequestGeneration) return;
         const postStart = probe ? performance.now() : 0;
-        this.processDetectionResult(facesFlat, audioEnergy, mediaTimeSec, srcW, srcH, cropW, cropH, "worker", tookMs);
+        this.processDetectionResult(
+          facesFlat,
+          unpackSceneCutScores(cutScoresFlat),
+          audioEnergy,
+          mediaTimeSec,
+          srcW,
+          srcH,
+          cropW,
+          cropH,
+          "worker",
+          tookMs
+        );
         if (probe) {
           const end = performance.now();
           probe.recordDetection(
@@ -831,6 +865,7 @@ export class VertixEngine {
       const tookMs = performance.now() - start;
       this.processDetectionResult(
         facesFlat,
+        unpackSceneCutScores(this.engine.last_cut_scores()),
         audioEnergy,
         mediaTimeSec,
         srcW,
@@ -860,6 +895,7 @@ export class VertixEngine {
 
   private processDetectionResult(
     facesFlat: Float64Array,
+    sceneCut: SceneCutScores,
     audioEnergy: number | null,
     mediaTimeSec: number,
     srcW: number,
@@ -875,9 +911,18 @@ export class VertixEngine {
     this.lastSkinRejectedFaces = detections.skinRejected;
     this.lastSkinRejectedSpeakerSizedCount = detections.skinRejected.filter(isSpeakerSized).length;
 
+    // A hard cut makes everything learned from the previous shot stale:
+    // who holds the lock, the agreement streaks, the committed count.
+    if (sceneCut.isCut) {
+      this.sceneCutCount += 1;
+      this.activeSpeaker.reset();
+    }
     this.lastResolvedFaces = this.activeSpeaker.resolve(this.lastFaces, audioEnergy, mediaTimeSec);
     const count = this.lastResolvedFaces.length;
-    const stablePersonCount = this.personCount.observe(count, this.layoutSignature !== "", mediaTimeSec);
+    const stablePersonCount = sceneCut.isCut
+      ? this.personCount.commitNow(count, mediaTimeSec)
+      : this.personCount.observe(count, this.layoutSignature !== "", mediaTimeSec);
+    if (sceneCut.isCut) this.pendingReframe = "snap";
     this.emitState();
 
     if (this.lastDetectionMediaTime !== null && mediaTimeSec > this.lastDetectionMediaTime) {
@@ -900,14 +945,18 @@ export class VertixEngine {
       faceConfidence,
       skinRejectedTotal: this.metrics.skinRejectedTotal + this.lastSkinRejectedFaces.length,
       skinRejectedSpeakerSized: this.metrics.skinRejectedSpeakerSized + this.lastSkinRejectedSpeakerSizedCount,
+      sceneCutCount: this.sceneCutCount,
       detectionRateHz: this.detectionIntervalEma > 0 ? 1 / this.detectionIntervalEma : null,
       audioAvailable: this.audioMonitor.available,
       audioEnergy,
       detectionMode,
       workerInferenceMs: inferenceMs,
       workerInferenceHistory: appendCapped(this.metrics.workerInferenceHistory, inferenceMs),
+      // The cut frame's motion compares against another shot; Rust zeroes it.
       motionHistory:
-        motionScore !== null ? appendCapped(this.metrics.motionHistory, motionScore) : this.metrics.motionHistory,
+        motionScore !== null && !sceneCut.isCut
+          ? appendCapped(this.metrics.motionHistory, motionScore)
+          : this.metrics.motionHistory,
       confidenceHistory:
         faceConfidence !== null
           ? appendCapped(this.metrics.confidenceHistory, faceConfidence)
@@ -918,18 +967,38 @@ export class VertixEngine {
     // Only refresh the LERP target once the raw count matches the
     // *committed* layout — otherwise, mid-debounce, this could compute a
     // different pane count than what's actually on screen. The deadzone
-    // itself lives inside computeSpeakerLayout.
+    // itself lives inside computeSpeakerLayout. A pending reframe aims
+    // straight at the new faces, without the deadzone.
     if (stablePersonCount > 0 && count === stablePersonCount) {
-      this.targetPanes = computeSpeakerLayout(
-        this.lastResolvedFaces,
-        srcW,
-        srcH,
-        cropW,
-        cropH,
-        this.targetPanes,
-        DEADZONE_FRACTION
-      );
+      this.targetPanes =
+        this.pendingReframe !== null
+          ? computeSpeakerLayout(this.lastResolvedFaces, srcW, srcH, cropW, cropH)
+          : computeSpeakerLayout(this.lastResolvedFaces, srcW, srcH, cropW, cropH, this.targetPanes, DEADZONE_FRACTION);
     }
+  }
+
+  /**
+   * Snapshots the current output so the next framing cross-dissolves in
+   * over LAYOUT_TRANSITION_MS. If a fade is already running, the canvas
+   * holds a partial blend, not a clean frame, so this cuts straight to the
+   * new framing instead of stacking a second fade on top of it.
+   */
+  private startLayoutDissolve(canvas: HTMLCanvasElement, cropW: number, cropH: number, now: number): void {
+    if (this.transitionStart !== null) {
+      this.transitionStart = null;
+      return;
+    }
+    if (
+      !this.transitionSnapshotCanvas ||
+      this.transitionSnapshotCanvas.width !== cropW ||
+      this.transitionSnapshotCanvas.height !== cropH
+    ) {
+      this.transitionSnapshotCanvas = new OffscreenCanvas(cropW, cropH);
+    }
+    const snapCtx = this.transitionSnapshotCanvas.getContext("2d")!;
+    snapCtx.clearRect(0, 0, cropW, cropH);
+    snapCtx.drawImage(canvas, 0, 0);
+    this.transitionStart = now;
   }
 
   // Runs on every decoded frame. Rendering happens synchronously here (not
@@ -1031,31 +1100,18 @@ export class VertixEngine {
       const speakerCount = this.personCount.stableCount;
       const targetSignature = speakerCount === 0 ? "broll" : `speakers:${speakerCount}`;
 
+      const reframe = this.pendingReframe;
+      this.pendingReframe = null;
+      // After a source cut, the old frame shows the previous shot: never
+      // fade from it, and stop any fade still running.
+      if (reframe === "snap") this.transitionStart = null;
+
       if (targetSignature !== this.layoutSignature) {
-        // Snapshot the current frame before it's overwritten, so the layout
-        // change dissolves in instead of cutting. Skipped on the very first
-        // commit — there's no prior frame to fade from.
+        // Skipped on the very first commit — there's no prior frame to fade from.
         if (this.layoutSignature !== "") {
           this.sceneSwitchCount += 1;
           probe?.recordLayoutChange(now);
-          if (this.transitionStart === null) {
-            if (
-              !this.transitionSnapshotCanvas ||
-              this.transitionSnapshotCanvas.width !== cropW ||
-              this.transitionSnapshotCanvas.height !== cropH
-            ) {
-              this.transitionSnapshotCanvas = new OffscreenCanvas(cropW, cropH);
-            }
-            const snapCtx = this.transitionSnapshotCanvas.getContext("2d")!;
-            snapCtx.clearRect(0, 0, cropW, cropH);
-            snapCtx.drawImage(canvas, 0, 0);
-            this.transitionStart = now;
-          } else {
-            // Another layout change landed mid-fade. The canvas right now
-            // holds a partial blend, not a clean frame — cut straight to
-            // the new layout instead of stacking a second fade on top of it.
-            this.transitionStart = null;
-          }
+          if (reframe !== "snap") this.startLayoutDissolve(canvas, cropW, cropH, now);
         }
         this.layoutSignature = targetSignature;
 
@@ -1077,6 +1133,11 @@ export class VertixEngine {
         };
         this.emitMetrics();
         this.emitState();
+      } else if (reframe !== null && speakerCount > 0) {
+        // Same pane count, new framing (a cut, or another speaker): jump
+        // to the target instead of gliding across the frame.
+        if (reframe === "dissolve") this.startLayoutDissolve(canvas, cropW, cropH, now);
+        this.smoothedPanes = this.targetPanes.map((p) => ({ ...p.pane.source }));
       }
 
       if (speakerCount === 0) {

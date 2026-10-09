@@ -15,6 +15,10 @@ const TIME_EPSILON_SEC = 1e-3;
 const PERSON_COUNT_STABLE_SEC_INITIAL = 0.2;
 const PERSON_COUNT_STABLE_SEC = 1.0;
 const PERSON_COUNT_DROP_TO_ZERO_SEC = 0.2;
+// After a scene cut the new count is committed from a single detection.
+// For this long afterwards, count changes use the short initial debounce,
+// so a wrong first reading is corrected in ~0.2s instead of ~1s.
+const POST_CUT_SHORT_DEBOUNCE_SEC = 1.0;
 
 // --- Active-speaker resolution ----------------------------------------
 // From this many raw faces up, a plain split/grid stops being a safe
@@ -109,6 +113,10 @@ class AgreementStreak {
     this.detections = 1;
   }
 
+  get startedAtSec(): number {
+    return this.startSec;
+  }
+
   /** Adds an agreeing detection; restarts instead after a clear or if media time went backwards. */
   extend(atSec: number): void {
     if (this.detections === 0 || atSec < this.startSec) this.restart(atSec);
@@ -141,8 +149,18 @@ export class PersonCountDebouncer {
   private stable = 0;
   private pendingCount = 0;
   private pendingStreak = new AgreementStreak();
+  private lastCutSec: number | null = null;
 
   get stableCount(): number {
+    return this.stable;
+  }
+
+  /** Commits `count` right away, without debounce: the first detection after a scene cut, at media time `atSec`. */
+  commitNow(count: number, atSec: number): number {
+    this.stable = count;
+    this.pendingCount = count;
+    this.pendingStreak.restart(atSec);
+    this.lastCutSec = atSec;
     return this.stable;
   }
 
@@ -157,7 +175,7 @@ export class PersonCountDebouncer {
     const requiredSec =
       count === 0
         ? PERSON_COUNT_DROP_TO_ZERO_SEC
-        : hasCommittedLayout
+        : hasCommittedLayout && !this.startedSoonAfterCut()
           ? PERSON_COUNT_STABLE_SEC
           : PERSON_COUNT_STABLE_SEC_INITIAL;
     if (this.pendingStreak.hasHeldFor(requiredSec, atSec)) this.stable = count;
@@ -168,6 +186,13 @@ export class PersonCountDebouncer {
     this.stable = 0;
     this.pendingCount = 0;
     this.pendingStreak.clear();
+    this.lastCutSec = null;
+  }
+
+  private startedSoonAfterCut(): boolean {
+    if (this.lastCutSec === null) return false;
+    const sinceCutSec = this.pendingStreak.startedAtSec - this.lastCutSec;
+    return sinceCutSec >= 0 && sinceCutSec < POST_CUT_SHORT_DEBOUNCE_SEC - TIME_EPSILON_SEC;
   }
 }
 
