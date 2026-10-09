@@ -28,6 +28,11 @@ pub const CUT_SPIKE_FACTOR: f64 = 3.0;
 /// Number of past detections the spike median uses. Until this many exist
 /// (start of playback, after a seek) only the absolute threshold applies.
 pub const CUT_SPIKE_HISTORY: usize = 10;
+/// After a cut, the next this many detections (~1 s at 25 fps) can't be
+/// cuts. A flash or fast fade between two takes crosses the threshold on
+/// several detections in a row; without this gap each one would snap the
+/// crop and reset tracking again.
+pub const CUT_MIN_GAP_DETECTIONS: u32 = 5;
 
 #[derive(Clone, Copy, Default)]
 pub struct CutScores {
@@ -44,6 +49,7 @@ pub struct SceneCutDetector {
     has_prev: bool,
     hist_history: VecDeque<f64>,
     grid_history: VecDeque<f64>,
+    detections_since_cut: u32,
 }
 
 impl SceneCutDetector {
@@ -54,6 +60,7 @@ impl SceneCutDetector {
             has_prev: false,
             hist_history: VecDeque::with_capacity(CUT_SPIKE_HISTORY),
             grid_history: VecDeque::with_capacity(CUT_SPIKE_HISTORY),
+            detections_since_cut: CUT_MIN_GAP_DETECTIONS,
         }
     }
 
@@ -73,7 +80,9 @@ impl SceneCutDetector {
         let hist_score = hist_l1 as f64 / (2 * PIXELS) as f64;
         let grid_score = grid_l1 as f64 / (GRID_CELLS as u64 * MAX_BLOCK_SUM as u64) as f64;
 
-        let is_cut = is_spike(hist_score, &self.hist_history) || is_spike(grid_score, &self.grid_history);
+        let is_spike_now = is_spike(hist_score, &self.hist_history) || is_spike(grid_score, &self.grid_history);
+        let is_cut = is_spike_now && self.detections_since_cut >= CUT_MIN_GAP_DETECTIONS;
+        self.detections_since_cut = if is_cut { 0 } else { self.detections_since_cut.saturating_add(1) };
 
         push_capped(&mut self.hist_history, hist_score);
         push_capped(&mut self.grid_history, grid_score);
@@ -87,6 +96,7 @@ impl SceneCutDetector {
         self.has_prev = false;
         self.hist_history.clear();
         self.grid_history.clear();
+        self.detections_since_cut = CUT_MIN_GAP_DETECTIONS;
     }
 }
 
@@ -200,6 +210,19 @@ mod tests {
         let scores = detector.observe(next);
         assert!(scores.hist >= CUT_SCORE_THRESHOLD);
         assert!(!scores.is_cut);
+    }
+
+    #[test]
+    fn no_second_cut_within_the_gap() {
+        let mut detector = SceneCutDetector::new();
+        let a = solid(200, 30, 30);
+        let b = solid(30, 30, 200);
+        detector.observe(&a);
+        assert!(detector.observe(&b).is_cut);
+        for _ in 0..CUT_MIN_GAP_DETECTIONS {
+            assert!(!detector.observe(&b).is_cut);
+        }
+        assert!(detector.observe(&a).is_cut);
     }
 
     #[test]
