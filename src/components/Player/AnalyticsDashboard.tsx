@@ -14,6 +14,8 @@ interface AnalyticsDashboardProps {
   speakerCount: number;
   isTransitioning: boolean;
   metrics: ReframeMetrics;
+  /** Debug only (`?debug=skin`): how many detections the skin-tone filter threw away. */
+  showSkinFilter?: boolean;
 }
 
 const LAYOUT_LABEL: Record<ReturnType<typeof classifyLayout>, (speakerCount: number) => string> = {
@@ -46,6 +48,7 @@ export const AnalyticsDashboard = memo(function AnalyticsDashboard({
   speakerCount,
   isTransitioning,
   metrics,
+  showSkinFilter = false,
 }: AnalyticsDashboardProps) {
   // "Stable Scene Duration" ticks up live between layout changes — the hook
   // only updates `layoutCommittedAt` at the moment a layout actually
@@ -87,13 +90,18 @@ export const AnalyticsDashboard = memo(function AnalyticsDashboard({
             label="Crop Scale"
             value={metrics.cropScaleFactor !== null ? `${metrics.cropScaleFactor.toFixed(2)}×` : "—"}
           />
-          <MetricRow label="Skin-Rejected" value={String(metrics.skinRejectedTotal)} />
-          <MetricRow
-            label="…Speaker-Sized"
-            value={String(metrics.skinRejectedSpeakerSized)}
-            tone={metrics.skinRejectedSpeakerSized > 0 ? "warn" : "default"}
-          />
         </MetricSection>
+
+        {showSkinFilter && (
+          <MetricSection title="Skin Filter">
+            <MetricRow label="Rejected" value={String(metrics.skinRejectedTotal)} />
+            <MetricRow
+              label="Speaker-Size"
+              value={String(metrics.skinRejectedSpeakerSized)}
+              tone={metrics.skinRejectedSpeakerSized > 0 ? "warn" : "default"}
+            />
+          </MetricSection>
+        )}
 
         <MetricSection title="Face Boxes">
           <MetricRow

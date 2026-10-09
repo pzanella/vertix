@@ -11,6 +11,7 @@ import {
   UrlSourceInput,
 } from "./components/Player";
 import { BenchmarkLauncher } from "./components/Benchmark";
+import { SKIN_FILTER_DEBUG } from "./lib/debugFlags";
 import { useWasmReframe } from "./hooks/useWasmReframe";
 
 export default function App() {
@@ -185,7 +186,7 @@ export default function App() {
           <div className="flex-1 min-h-0 flex flex-col items-center gap-y-6 gap-x-4">
             <Canvas
               canvasRef={canvasRef}
-              skinRejectionOverlayRef={skinRejectionOverlayRef}
+              skinRejectionOverlayRef={SKIN_FILTER_DEBUG ? skinRejectionOverlayRef : undefined}
               mode={mode}
               overlay={streamHealthOverlay}
             />
@@ -221,6 +222,7 @@ export default function App() {
             speakerCount={speakerCount}
             isTransitioning={isTransitioning}
             metrics={metrics}
+            showSkinFilter={SKIN_FILTER_DEBUG}
           />
         </div>
       )}
