@@ -14,7 +14,13 @@ import {
   type SceneCutScores,
 } from "./layoutEngine";
 import type { BenchmarkProbe } from "./bench/BenchmarkRecorder";
-import { DecisionTimeline, mergeDecisions, type LayoutDecision, type Reframe } from "./lookahead/decisionTimeline";
+import {
+  DecisionTimeline,
+  mergeDecisions,
+  type CutSource,
+  type LayoutDecision,
+  type Reframe,
+} from "./lookahead/decisionTimeline";
 import { FrameRingBuffer, type BufferedFrame } from "./lookahead/frameRingBuffer";
 import { TRIGGER_H, TRIGGER_W, locateCut, type ScoredFrame } from "./lookahead/cutTrigger";
 import {
@@ -1090,7 +1096,8 @@ export class VertixEngine {
           cropH,
           "worker",
           tookMs,
-          previousDetectionSec
+          previousDetectionSec,
+          triggeredByCut
         );
         if (probe) {
           const end = performance.now();
@@ -1173,7 +1180,8 @@ export class VertixEngine {
         cropH,
         "main-thread",
         tookMs,
-        previousDetectionSec
+        previousDetectionSec,
+        triggeredByCut
       );
       if (probe) {
         const end = performance.now();
@@ -1211,7 +1219,8 @@ export class VertixEngine {
     cropH: number,
     detectionMode: "worker" | "main-thread",
     inferenceMs: number,
-    previousDetectionSec: number | null = null
+    previousDetectionSec: number | null = null,
+    triggeredByCut = false
   ): void {
     const detections = unpackDetections(facesFlat);
     this.lastSceneCut = sceneCut;
@@ -1238,7 +1247,14 @@ export class VertixEngine {
       sceneCut.isCut && this.lookaheadLengthMs > 0
         ? locateCut(this.scoredFrames, previousDetectionSec, mediaTimeSec)
         : mediaTimeSec;
-    this.decideLayout(decisionSec, count, stablePersonCount, sceneCut.isCut, srcW, srcH, cropW, cropH);
+    const cutSource: CutSource | null = !sceneCut.isCut
+      ? null
+      : triggeredByCut
+        ? "trigger"
+        : decisionSec < mediaTimeSec
+          ? "localised"
+          : "tick";
+    this.decideLayout(decisionSec, count, stablePersonCount, cutSource, srcW, srcH, cropW, cropH);
 
     if (this.lastDetectionMediaTime !== null && mediaTimeSec > this.lastDetectionMediaTime) {
       const interval = mediaTimeSec - this.lastDetectionMediaTime;
@@ -1285,12 +1301,13 @@ export class VertixEngine {
     mediaTimeSec: number,
     count: number,
     stablePersonCount: number,
-    isCut: boolean,
+    cutSource: CutSource | null,
     srcW: number,
     srcH: number,
     cropW: number,
     cropH: number
   ): void {
+    const isCut = cutSource !== null;
     const countChanged = stablePersonCount !== this.decidedSpeakerCount;
     let reframe: Reframe | null = isCut ? "snap" : null;
     if (stablePersonCount === 0) {
@@ -1322,6 +1339,7 @@ export class VertixEngine {
       targetPanes: this.decidedTargetPanes,
       reframe,
       isCut,
+      cutSource,
       skinRejectedFaces: this.lastSkinRejectedFaces,
     });
     if (this.video?.paused) this.releaseHeldFrames();
@@ -1748,7 +1766,9 @@ export class VertixEngine {
       // committed once per debounced face-count change and held fixed;
       // within it, each pane's crop only drifts smoothly toward its target.
       const applied = this.applyDueDecisions(decisionsUpToSec);
-      if (applied?.isCut) probe?.recordCutShown(now, applied.mediaTimeSec, frameMediaTimeSec);
+      if (applied?.isCut) {
+        probe?.recordCutShown(now, applied.mediaTimeSec, frameMediaTimeSec, applied.cutSource ?? "tick");
+      }
       const speakerCount = this.displayedSpeakerCount;
       const targetSignature = speakerCount === 0 ? "broll" : `speakers:${speakerCount}`;
 

@@ -7,6 +7,14 @@ import type { FaceBox, PaneTarget } from "../layoutEngine";
  */
 export type Reframe = "snap" | "dissolve";
 
+/**
+ * How a hard cut was found: on a detection the cut trigger asked for
+ * ("trigger"), on a regular detection and moved back to the frame where it
+ * happened ("localised"), or on a regular detection that was the cut frame
+ * or without lookahead ("tick").
+ */
+export type CutSource = "trigger" | "localised" | "tick";
+
 /** What one detection decided for the output, from the frame it was computed on onwards. */
 export interface LayoutDecision {
   /** Media time of the frame the decision belongs to: the detection frame, or the cut frame for a hard cut. */
@@ -15,6 +23,8 @@ export interface LayoutDecision {
   targetPanes: PaneTarget[];
   reframe: Reframe | null;
   isCut: boolean;
+  /** Set for a hard cut. */
+  cutSource: CutSource | null;
   skinRejectedFaces: FaceBox[];
 }
 
@@ -72,11 +82,11 @@ export function mergeDecisions(decisions: LayoutDecision[]): LayoutDecision | nu
   if (decisions.length === 0) return null;
   const latest = decisions[decisions.length - 1];
   let reframe: Reframe | null = null;
-  let isCut = false;
+  let cut: LayoutDecision | null = null;
   for (const d of decisions) {
     if (d.reframe === "snap") reframe = "snap";
     else if (d.reframe === "dissolve" && reframe === null) reframe = "dissolve";
-    isCut ||= d.isCut;
+    if (d.isCut && cut === null) cut = d;
   }
-  return { ...latest, reframe, isCut };
+  return { ...latest, reframe, isCut: cut !== null, cutSource: cut?.cutSource ?? null };
 }

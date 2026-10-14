@@ -17,6 +17,7 @@ export {
 } from "./layoutEngine";
 export type { FaceBox, PaneRect, SpeakerPane, PaneTarget, UnpackedDetections } from "./layoutEngine";
 export * from "./bench";
+export type { CutSource } from "./lookahead/decisionTimeline";
 export { getActiveWasmBuild, switchWasmBuild } from "./VertixEngine";
 export { defaultWasmBuild, isWasmSimdSupported, WASM_BINARY_SIZES } from "./wasmBuild";
 export type { WasmBuildReason, WasmBuildSelection, WasmBuildVariant } from "./wasmBuild";

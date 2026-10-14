@@ -7,7 +7,8 @@
 // from /src/core), not the app UI. Results go to stdout and
 // .eval/lookahead-check.json (gitignored).
 //
-// Usage (after `npm run build:wasm && npm run build:worker`):
+// Usage (after `npm run build:wasm && npm run build:worker` and
+// `node scripts/make-cut-clips.mjs --bench`):
 //   node scripts/check-lookahead.mjs [--only=<clip file>] [--chrome=/path/to/chrome] [--headed]
 //
 // Timings in headless Chrome are not representative of a real device; the
@@ -32,6 +33,7 @@ const ONLY = args.find((arg) => arg.startsWith("--only="))?.slice("--only=".leng
 const ALL_CLIPS = [
   { file: "cross-count.mp4", url: "/bench/cross-count.mp4", knownCutsSec: [4, 8, 12] },
   { file: "cross-same-count.mp4", url: "/bench/cross-same-count.mp4", knownCutsSec: [4, 8, 12] },
+  { file: "cross-offset.mp4", url: "/bench/cross-offset.mp4", knownCutsSec: [4.08, 8.12, 12.16] },
   { file: "3-speakers.mp4", url: "/samples/3-speakers.mp4", knownCutsSec: [] },
 ];
 const CLIPS = ONLY ? ALL_CLIPS.filter((clip) => clip.file === ONLY) : ALL_CLIPS;
@@ -225,6 +227,7 @@ try {
         "cut s": cut.timeSec,
         "frames late": cut.framesLate ?? "missed",
         "crop changed at s": cut.shownMediaTimeSec,
+        "found by": cut.source ?? "-",
       });
     }
   }

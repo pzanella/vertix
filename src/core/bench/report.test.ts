@@ -79,11 +79,11 @@ describe("benchmarkReportToCsv", () => {
     expect(lines.some((line) => line.startsWith("layout_change,"))).toBe(true);
     expect(
       lines[0].endsWith(
-        "scene_cut_hist,scene_cut_grid,scene_cut,lookahead_ms,triggered,resolved_faces,resolved_cx,error_ms,cut_media_time_s,shown_media_time_s"
+        "scene_cut_hist,scene_cut_grid,scene_cut,lookahead_ms,triggered,resolved_faces,resolved_cx,error_ms,cut_media_time_s,shown_media_time_s,cut_source"
       )
     ).toBe(true);
     expect(
-      lines.find((line) => line.startsWith("detection,"))!.endsWith(",2,1,1,0,,1.2,0.4,0.3,1,170,0,NaN,NaN,,,")
+      lines.find((line) => line.startsWith("detection,"))!.endsWith(",2,1,1,0,,1.2,0.4,0.3,1,170,0,NaN,NaN,,,,")
     ).toBe(true);
   });
 });

@@ -50,15 +50,20 @@ with the numbers.
 1. Collect the environment info. This includes a few milliseconds of
    busy-waiting to measure the timer resolution, so it happens before any
    playback.
-2. For each of the six clips in `public/samples/` and the two test clips in
+2. For each of the six clips in `public/samples/` and the three test clips in
    `public/bench/` (`cross-count.mp4`, `cross-same-count.mp4`: hard cuts at
-   4, 8 and 12 s, made by `scripts/make-cut-clips.mjs`), in order, run the
+   4, 8 and 12 s, on detection frames; `cross-offset.mp4`: hard cuts at
+   4.08, 8.12 and 12.16 s, between detection frames), in order, run the
    clip once with lookahead off, on the build already loaded, then once per
    WASM build with lookahead on (see
    [WASM builds](#wasm-builds-simd-and-scalar)): SIMD then scalar on the
    odd-numbered clips, scalar then SIMD on the even-numbered ones. Without
    SIMD support, each clip runs once with lookahead off and once on, with
    the scalar build.
+   The test clips are not in the repository: `node scripts/make-cut-clips.mjs
+   --bench` makes them from the sample clips (needs ffmpeg). The deploy
+   workflow runs it, so they are on GitHub Pages; run it once locally before
+   using the suite with `npm run dev` or `npm run preview`.
 3. **Build switch and WASM warm-up**: whenever the next run needs the other
    build, the suite replaces the detection worker with a new one that loads
    that build, then plays the first *WASM warm-up* seconds of the next clip in
@@ -324,12 +329,16 @@ lookaheadComparison, precisionWarnings, results[] }`. Each result contains `summ
       (frame-copy size, estimated buffer memory, frames dropped by the
       buffer or superseded on display).
     - `summary.cutsShown[]`: every applied cut decision,
-      `{ cutMediaTimeSec, shownMediaTimeSec, framesLate }`, where
+      `{ cutMediaTimeSec, shownMediaTimeSec, framesLate, source }`, where
       `framesLate` counts displayed frames from the cut frame up to the one
-      the crop changed on (target 0). Without lookahead the cut frame is
-      the detection frame, so this undercounts; use `knownCuts`.
+      the crop changed on (target 0), and `source` is how the cut was
+      found: `trigger` (a detection the per-frame cut trigger asked for),
+      `localised` (a regular detection, moved back to the frame with the
+      biggest jump) or `tick` (a regular detection on the cut frame, or
+      without lookahead). Without lookahead the cut frame is the detection
+      frame, so `framesLate` undercounts; use `knownCuts`.
     - `summary.knownCuts[]`: for clips with known cuts,
-      `{ timeSec, framesLate, shownMediaTimeSec }` against the real cut
+      `{ timeSec, framesLate, shownMediaTimeSec, source }` against the real cut
       frame (`framesLate` null when the crop never changed for it).
     - `summary.display`: `{ count, errorMs, workMs }`. `errorMs` (lookahead
       only) is when a frame reaches the screen minus when it should
@@ -359,7 +368,8 @@ lookaheadComparison, precisionWarnings, results[] }`. Each result contains `summ
     `layout_change`, `long_task`, `display`, `cut_shown` or `trigger`
     (the last three since v5, with the columns `lookahead_ms`,
     `triggered`, `resolved_faces`, `resolved_cx`, `error_ms`,
-    `cut_media_time_s` and `shown_media_time_s` added at the end).
+    `cut_media_time_s`, `shown_media_time_s` and `cut_source` added at
+    the end).
   - Every row also has `clip`, `mode`, `wasm_build`, `wasm_build_position`,
     `index` and `warmup`, plus the columns that apply to its kind.
   - The table loads directly into pandas or R:

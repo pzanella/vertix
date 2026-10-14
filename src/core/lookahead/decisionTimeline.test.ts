@@ -8,6 +8,7 @@ function decision(mediaTimeSec: number, overrides: Partial<LayoutDecision> = {})
     targetPanes: [],
     reframe: null,
     isCut: false,
+    cutSource: null,
     skinRejectedFaces: [],
     ...overrides,
   };
@@ -53,10 +54,16 @@ describe("mergeDecisions", () => {
 
   it("keeps the latest layout and lets a snap win over a dissolve", () => {
     const merged = mergeDecisions([
-      decision(1, { reframe: "snap", isCut: true, speakerCount: 2 }),
+      decision(1, { reframe: "snap", isCut: true, cutSource: "trigger", speakerCount: 2 }),
       decision(1.2, { reframe: "dissolve", speakerCount: 3 }),
     ]);
-    expect(merged).toMatchObject({ mediaTimeSec: 1.2, speakerCount: 3, reframe: "snap", isCut: true });
+    expect(merged).toMatchObject({
+      mediaTimeSec: 1.2,
+      speakerCount: 3,
+      reframe: "snap",
+      isCut: true,
+      cutSource: "trigger",
+    });
   });
 
   it("keeps a dissolve when nothing snaps", () => {

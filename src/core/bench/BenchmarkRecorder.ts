@@ -9,6 +9,7 @@ import {
   type SampleSummary,
 } from "./stats";
 import type { BenchmarkWasmBuild } from "./suitePlan";
+import type { CutSource } from "../lookahead/decisionTimeline";
 
 export type DetectionPath = "worker" | "main-thread";
 
@@ -52,7 +53,7 @@ export interface BenchmarkProbe {
    */
   recordDisplay(nowMs: number, mediaTimeSec: number, workMs: number, errorMs: number): void;
   /** A hard-cut decision for the frame at `cutMediaTimeSec` was applied on the displayed frame at `shownMediaTimeSec`. */
-  recordCutShown(nowMs: number, cutMediaTimeSec: number, shownMediaTimeSec: number): void;
+  recordCutShown(nowMs: number, cutMediaTimeSec: number, shownMediaTimeSec: number, source: CutSource): void;
 }
 
 export interface BenchmarkRecorderOptions {
@@ -71,6 +72,7 @@ const REGULAR_DETECTION_GAP_FRAMES = 5;
 // A crop change more than this long after a known cut is not counted as its change.
 const KNOWN_CUT_MATCH_WINDOW_SEC = 1.5;
 const CUT_SHOWN_CAPACITY = 1024;
+const CUT_SOURCES: CutSource[] = ["tick", "trigger", "localised"];
 
 export interface FrameAccounting {
   /** requestVideoFrameCallback calls after warm-up. */
@@ -133,6 +135,8 @@ export interface CutShownEvent {
   shownMediaTimeSec: number;
   /** Displayed frames from cutMediaTimeSec up to (not including) the one the crop changed on. Target 0. */
   framesLate: number;
+  /** How the cut was found: the per-frame trigger, localised from a regular detection, or a regular detection ("tick"). */
+  source: CutSource;
 }
 
 /** A cut whose real time is known (test clips with joins), as the viewer saw it (schema v5). */
@@ -141,6 +145,8 @@ export interface KnownCutResult {
   /** Displayed frames from the real cut frame up to the one the crop changed on; null if the crop never changed for it. */
   framesLate: number | null;
   shownMediaTimeSec: number | null;
+  /** How the matched cut was found; null if the crop never changed for it. */
+  source: CutSource | null;
 }
 
 export interface DisplaySummary {
@@ -235,7 +241,7 @@ export interface BenchmarkClipRaw {
   };
   /** Schema v5. */
   displays: { nowMs: number[]; mediaTimeSec: number[]; workMs: number[]; errorMs: number[]; warmup: number[] };
-  cutsShown: { nowMs: number[]; cutMediaTimeSec: number[]; shownMediaTimeSec: number[] };
+  cutsShown: { nowMs: number[]; cutMediaTimeSec: number[]; shownMediaTimeSec: number[]; source: CutSource[] };
   triggers: { mainThreadMs: number[]; warmup: number[] };
   skippedDetections: { mediaTimeSec: number[]; warmup: number[] };
   layoutChanges: { nowMs: number[]; mediaTimeSec: number[]; warmup: number[] };
@@ -345,6 +351,7 @@ export class BenchmarkRecorder implements BenchmarkProbe {
   private readonly cutShownNow = new Float64Array(CUT_SHOWN_CAPACITY);
   private readonly cutShownCut = new Float64Array(CUT_SHOWN_CAPACITY);
   private readonly cutShownAt = new Float64Array(CUT_SHOWN_CAPACITY);
+  private readonly cutShownSource = new Uint8Array(CUT_SHOWN_CAPACITY);
   private cutShownCount = 0;
 
   private readonly triggerCost: Float64Array;
@@ -528,7 +535,7 @@ export class BenchmarkRecorder implements BenchmarkProbe {
     this.displayCount = i + 1;
   }
 
-  recordCutShown(nowMs: number, cutMediaTimeSec: number, shownMediaTimeSec: number): void {
+  recordCutShown(nowMs: number, cutMediaTimeSec: number, shownMediaTimeSec: number, source: CutSource): void {
     if (this.finished) return;
     const i = this.cutShownCount;
     if (i >= CUT_SHOWN_CAPACITY) {
@@ -538,6 +545,7 @@ export class BenchmarkRecorder implements BenchmarkProbe {
     this.cutShownNow[i] = nowMs;
     this.cutShownCut[i] = cutMediaTimeSec;
     this.cutShownAt[i] = shownMediaTimeSec;
+    this.cutShownSource[i] = CUT_SOURCES.indexOf(source);
     this.cutShownCount = i + 1;
   }
 
@@ -738,6 +746,7 @@ export class BenchmarkRecorder implements BenchmarkProbe {
         cutMediaTimeSec,
         shownMediaTimeSec,
         framesLate: this.displayedFramesBetween(cutMediaTimeSec, shownMediaTimeSec),
+        source: CUT_SOURCES[this.cutShownSource[i]],
       });
     }
     return events;
@@ -746,16 +755,19 @@ export class BenchmarkRecorder implements BenchmarkProbe {
   private knownCutResults(): KnownCutResult[] {
     return this.knownCutsSec.map((timeSec) => {
       let shownMediaTimeSec: number | null = null;
+      let source: CutSource | null = null;
       for (let i = 0; i < this.cutShownCount; i++) {
         const shown = this.cutShownAt[i];
         if (shown >= timeSec - 1e-4 && shown < timeSec + KNOWN_CUT_MATCH_WINDOW_SEC) {
           shownMediaTimeSec = shown;
+          source = CUT_SOURCES[this.cutShownSource[i]];
           break;
         }
       }
       return {
         timeSec,
         shownMediaTimeSec,
+        source,
         framesLate: shownMediaTimeSec === null ? null : this.displayedFramesBetween(timeSec, shownMediaTimeSec),
       };
     });
@@ -873,6 +885,7 @@ export class BenchmarkRecorder implements BenchmarkProbe {
         nowMs: toArray(this.cutShownNow, this.cutShownCount),
         cutMediaTimeSec: toArray(this.cutShownCut, this.cutShownCount),
         shownMediaTimeSec: toArray(this.cutShownAt, this.cutShownCount),
+        source: toArray(this.cutShownSource, this.cutShownCount).map((s) => CUT_SOURCES[s]),
       },
       triggers: {
         mainThreadMs: toArray(this.triggerCost, this.triggerCount),

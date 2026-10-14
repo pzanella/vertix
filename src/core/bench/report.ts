@@ -131,6 +131,7 @@ const CSV_COLUMNS = [
   "error_ms",
   "cut_media_time_s",
   "shown_media_time_s",
+  "cut_source",
 ] as const;
 
 type CsvColumn = (typeof CSV_COLUMNS)[number];
@@ -221,6 +222,7 @@ export function benchmarkReportToCsv(report: BenchmarkReport): string {
         time_ms: cutsShown.nowMs[i],
         cut_media_time_s: cutsShown.cutMediaTimeSec[i],
         shown_media_time_s: cutsShown.shownMediaTimeSec[i],
+        cut_source: cutsShown.source[i],
       })
     );
     triggers.mainThreadMs.forEach((_, i) =>
@@ -308,7 +310,7 @@ export function benchmarkSummaryRows(report: BenchmarkReport): BenchmarkTableRow
     "layout changes": summary.layoutChanges,
     "scene cuts": summary.sceneCutCount,
     "known cuts frames late": summary.knownCuts.length
-      ? summary.knownCuts.map((c) => (c.framesLate === null ? "missed" : c.framesLate)).join(" ")
+      ? summary.knownCuts.map((c) => (c.framesLate === null ? "missed" : `${c.framesLate} (${c.source})`)).join(" ")
       : null,
     "cut frames late (max)": summary.cutsShown.length ? Math.max(...summary.cutsShown.map((c) => c.framesLate)) : null,
     "display error p95 ms": round(summary.display.errorMs.p95),
