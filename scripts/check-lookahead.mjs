@@ -263,8 +263,14 @@ try {
     join(root, ".eval/lookahead-check.json"),
     JSON.stringify({ checkedAt: new Date().toISOString(), runs, activeSpeakerAgreement: agreement }, null, 2)
   );
+} catch (error) {
+  console.error(error);
+  process.exitCode = 1;
 } finally {
   chrome.kill();
-  await server.close();
+  // Vite's close() waits for the page's HMR socket, which a killed Chrome
+  // may never close: don't wait for it.
+  await Promise.race([server.close(), new Promise((resolve) => setTimeout(resolve, 2000))]);
   rmSync(profileDir, { recursive: true, force: true });
+  process.exit();
 }
