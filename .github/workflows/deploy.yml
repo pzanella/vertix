@@ -45,6 +45,13 @@ jobs:
 
       - run: npm ci
       - run: npm run build:wasm
+
+      # The benchmark suite's cut test clips are generated from the sample
+      # clips, not committed. ffmpeg (with libx264) is installed explicitly
+      # instead of relying on whatever the runner image happens to ship.
+      - name: Install ffmpeg
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg
+      - run: node scripts/make-cut-clips.mjs --bench
       # --base matches this repo's GitHub Pages project-site path
       # (https://<owner>.github.io/vertix/) — Vite needs it so every
       # bundled asset URL resolves under that subpath instead of the
