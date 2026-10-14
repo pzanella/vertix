@@ -554,6 +554,9 @@ export class VertixEngine {
   // True once a frame was rendered (or buffered) since the last reset: the
   // no-crop layout counts as committed from then on.
   private hasFrameSinceReset = false;
+  // Set by a seek while paused: like a cut, the first detection after it
+  // commits the speaker count at once, so the frame shown there is cropped.
+  private commitCountAtNextDetection = false;
   private decisions = new DecisionTimeline();
 
   // Display side: what the frame on screen uses.
@@ -864,6 +867,7 @@ export class VertixEngine {
     this.decidedTargetPanes = [];
     this.decidedSpeakerCount = 0;
     this.hasFrameSinceReset = false;
+    this.commitCountAtNextDetection = false;
     this.decisions.clear();
     this.displayedSpeakerCount = 0;
     this.displayedSkinRejectedFaces = [];
@@ -888,6 +892,7 @@ export class VertixEngine {
 
   private onSeeking(): void {
     this.resetTrackingState();
+    this.commitCountAtNextDetection = this.video?.paused ?? false;
     this.flushLookahead();
     this.displayedMediaTimeSec = null;
     this.metrics = { ...this.metrics, displayedMediaTimeSec: null };
@@ -1237,7 +1242,9 @@ export class VertixEngine {
     }
     this.lastResolvedFaces = this.activeSpeaker.resolve(this.lastFaces, audioEnergy, mediaTimeSec);
     const count = this.lastResolvedFaces.length;
-    const stablePersonCount = sceneCut.isCut
+    const commitAtOnce = sceneCut.isCut || this.commitCountAtNextDetection;
+    this.commitCountAtNextDetection = false;
+    const stablePersonCount = commitAtOnce
       ? this.personCount.commitNow(count, mediaTimeSec)
       : this.personCount.observe(count, this.hasFrameSinceReset, mediaTimeSec);
     // With lookahead, a cut found here is shown from the frame where it

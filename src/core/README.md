@@ -164,6 +164,7 @@ dissolve or a layout change lands on the frame it belongs to.
 - **Playback events**: pause drains the buffer (video and audio stop
   together, on the frame at `currentTime`); play and seek refill it (the
   last frame holds, audio is silent, for the lookahead length); a frame
-  shown while paused waits for its own detection; rate changes and
+  shown while paused waits for its own detection, and after a seek while
+  paused that detection commits the speaker count at once, like a cut; rate changes and
   rendition switches need nothing special.
 

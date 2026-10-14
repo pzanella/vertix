@@ -157,6 +157,7 @@ interface EngineInternals {
 
 const LEFT_FACE = new Float64Array([0.3, 0.5, 0.2, 0.2, 0, 0.9, 0]);
 const CUT: SceneCutScores = { hist: 0.5, grid: 0.5, isCut: true };
+const NO_CUT: SceneCutScores = { hist: 0, grid: 0, isCut: false };
 
 function setUp() {
   const engine = new VertixEngine();
@@ -167,6 +168,9 @@ function setUp() {
   /** A cut detection result for the frame at `mediaTimeSec`, with one face. */
   const detectCut = (mediaTimeSec: number) =>
     internals.processDetectionResult(LEFT_FACE, CUT, null, mediaTimeSec, 1280, 720, 405, 720, "worker", 1);
+  /** A plain (no cut) detection result for the frame at `mediaTimeSec`, with one face. */
+  const detect = (mediaTimeSec: number) =>
+    internals.processDetectionResult(LEFT_FACE, NO_CUT, null, mediaTimeSec, 1280, 720, 405, 720, "worker", 1);
   /** Runs screen refreshes up to `untilMs`, returning the media time on screen after each one. */
   const refreshUntil = (fromMs: number, untilMs: number) => {
     const shown: (number | null)[] = [];
@@ -176,7 +180,7 @@ function setUp() {
     }
     return shown;
   };
-  return { engine, video, detectCut, refreshUntil };
+  return { engine, video, detectCut, detect, refreshUntil };
 }
 
 describe("VertixEngine lookahead", () => {
@@ -266,6 +270,32 @@ describe("VertixEngine lookahead", () => {
     expect(engine.getDisplayedMediaTime()).toBe(shownBefore);
     runRefresh(video.frame * FRAME_MS + lengthMs);
     expect(engine.getDisplayedMediaTime()).toBe(video.mediaTime);
+    engine.destroy();
+  });
+
+  it("after a seek while paused, shows the new frame already cropped", () => {
+    const { engine, video, detect } = setUp();
+    video.presentFrame();
+    video.presentFrame();
+    video.paused = true;
+    video.emit("seeking");
+    video.presentFrame();
+    const seekedFrameSec = video.mediaTime;
+    expect(engine.getDisplayedMediaTime()).toBeNull();
+    detect(seekedFrameSec);
+    runRefresh(performance.now() + 1000);
+    expect(engine.getDisplayedMediaTime()).toBe(seekedFrameSec);
+    expect(engine.getState().speakerCount).toBe(1);
+    engine.destroy();
+  });
+
+  it("keeps the normal debounce for the first detection without a seek", () => {
+    const { engine, video, detect } = setUp();
+    video.presentFrame();
+    detect(video.mediaTime);
+    runRefresh(10_000);
+    expect(engine.getDisplayedMediaTime()).toBe(video.mediaTime);
+    expect(engine.getState().speakerCount).toBe(0);
     engine.destroy();
   });
 
