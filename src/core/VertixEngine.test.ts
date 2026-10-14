@@ -15,6 +15,7 @@ vi.mock("./audioActivity", () => ({
   AudioActivityMonitor: class {
     available = false;
     silentPathSuspected = false;
+    outputDelaySec = 0;
     attach() {}
     detach() {}
     energy() {

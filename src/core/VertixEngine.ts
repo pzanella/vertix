@@ -140,6 +140,10 @@ export interface LookaheadStatus {
   enabled: boolean;
   /** Set when lookahead is wanted but forced off. */
   unavailableReason: LookaheadUnavailableReason | null;
+  /** Wanted and available, but not running because the mode is 16:9 (no detection, nothing to look ahead for). */
+  bypassed: boolean;
+  /** The audio delay actually applied, in ms (0 when off or bypassed). */
+  audioDelayMs: number;
   /** How far behind the decoded frame the output (and audio) is shown, in ms: a whole number of frames. 0 when off. */
   lengthMs: number;
   /** lengthMs in frames. */
@@ -155,8 +159,12 @@ export interface LookaheadStatus {
   bufferBytes: number;
   /** Frames captured and waiting for display. */
   bufferedFrames: number;
-  /** Frames never displayed since this source was loaded: dropped because the buffer was full, or superseded on display. */
+  /** Frames never displayed since this source was loaded: overflowDrops + skippedOnDisplay. */
   droppedFrames: number;
+  /** Dropped because the pool was full (should stay 0). */
+  overflowDrops: number;
+  /** Passed over on display: the frame callback for their counterpart was skipped, or the delay was shrinking. */
+  skippedOnDisplay: number;
 }
 
 export interface VertixState {
@@ -202,6 +210,8 @@ export const INITIAL_METRICS: VertixMetrics = {
   lookahead: {
     enabled: false,
     unavailableReason: null,
+    bypassed: false,
+    audioDelayMs: 0,
     lengthMs: 0,
     delayFrames: 0,
     detectionP95Ms: null,
@@ -212,6 +222,8 @@ export const INITIAL_METRICS: VertixMetrics = {
     bufferBytes: 0,
     bufferedFrames: 0,
     droppedFrames: 0,
+    overflowDrops: 0,
+    skippedOnDisplay: 0,
   },
 };
 
@@ -766,11 +778,26 @@ export class VertixEngine {
     this.stateListeners.clear();
   }
 
+  /**
+   * Switches between the untouched 16:9 picture and the 9:16 reframe.
+   * Lookahead only runs in 9:16 (16:9 has nothing to look ahead for), so a
+   * switch to 16:9 drops the delay (a 15 ms fade, then live), and a switch
+   * to 9:16 brings it back: the current frame is shown at once as a 9:16
+   * frame, re-shown cropped as soon as its own detection is in, and held
+   * until the delayed stream reaches it, with the audio silent as long.
+   */
   setMode(mode: VertixMode): void {
+    const changed = mode !== this.mode;
     this.mode = mode;
     if (this.outputCtx) this.outputCtx = this.canvas?.getContext("2d") ?? null;
     this.engine?.reset();
     this.resetTrackingState();
+    if (changed) {
+      // Like a cut: the first detection in 9:16 commits the speaker count at once.
+      this.commitCountAtNextDetection = mode === "9:16";
+      this.refreshLookahead("flush");
+      this.showCurrentFrameAfterModeSwitch();
+    }
     this.emitState();
   }
 
@@ -953,6 +980,28 @@ export class VertixEngine {
     this.emitMetrics();
   }
 
+  /** Draws the current video frame for the new mode right away, so the switch never shows a stale or black frame. */
+  private showCurrentFrameAfterModeSwitch(): void {
+    const video = this.video;
+    if (!video || !this.canvas || !this.srcDimsInitialized) return;
+    const now = performance.now();
+    const mediaTimeSec = video.currentTime;
+    const { w, h } = this.srcDims;
+    if (this.lookaheadLengthMs === 0) {
+      this.renderFrame(video, w, h, null, mediaTimeSec, now, 0);
+      this.displayedMediaTimeSec = mediaTimeSec;
+      return;
+    }
+    const anchor = this.bufferFrame(video, mediaTimeSec, now, true);
+    const { canvas } = anchor.slot;
+    this.renderFrame(canvas, canvas.width, canvas.height, mediaTimeSec, mediaTimeSec, now, 0);
+    this.displayedMediaTimeSec = mediaTimeSec;
+    this.hasFrameSinceReset = true;
+    if (!this.detectionInFlight) this.dispatchDetection(canvas, mediaTimeSec, ...this.cropArgs());
+    clearTimeout(this.heldFrameTimeout);
+    this.heldFrameTimeout = setTimeout(() => this.releaseHeldFrames(), HELD_FRAME_TIMEOUT_MS);
+  }
+
   private onSeeking(): void {
     this.resetTrackingState();
     this.commitCountAtNextDetection = this.video?.paused ?? false;
@@ -969,13 +1018,13 @@ export class VertixEngine {
    * to its end. The last frame shown stays on the canvas until new frames
    * are due.
    */
-  private flushLookahead(): void {
+  private flushLookahead({ silenceDelayLine = true } = {}): void {
     this.frameBuffer?.flush();
     this.stopDisplayLoop();
     clearTimeout(this.heldFrameTimeout);
     clearTimeout(this.stallWatchdog);
     this.delaySchedule.set(this.lookaheadLengthMs);
-    if (this.lookaheadLengthMs > 0) this.audioMonitor.setOutputDelay(this.lookaheadLengthMs / 1000);
+    if (silenceDelayLine && this.lookaheadLengthMs > 0) this.audioMonitor.setOutputDelay(this.lookaheadLengthMs / 1000);
   }
 
   /**
@@ -995,7 +1044,7 @@ export class VertixEngine {
         : this.audioMonitor.silentPathSuspected
           ? "silent-audio-path"
           : null;
-    const active = this.lookaheadEnabled && this.lookaheadUnavailable === null;
+    const active = this.lookaheadEnabled && this.lookaheadUnavailable === null && this.mode === "9:16";
     if (!active) {
       if (this.lookaheadLengthMs > 0) this.applyLookaheadLength({ frames: 0, lengthMs: 0 });
     } else if (this.lookaheadLengthMs === 0 || how === "flush") {
@@ -1009,7 +1058,8 @@ export class VertixEngine {
 
   /** Switches to `delay` at once, behind a flush. */
   private applyLookaheadLength(delay: FrameAlignedDelay): void {
-    this.flushLookahead();
+    // The delay change below silences the output itself.
+    this.flushLookahead({ silenceDelayLine: false });
     const wasOff = this.lookaheadLengthMs === 0;
     this.lookaheadLengthMs = delay.lengthMs;
     this.delayFrames = delay.frames;
@@ -1077,6 +1127,8 @@ export class VertixEngine {
     return {
       enabled: this.lookaheadEnabled,
       unavailableReason: this.lookaheadEnabled ? this.lookaheadUnavailable : null,
+      bypassed: this.lookaheadEnabled && this.lookaheadUnavailable === null && this.mode === "16:9",
+      audioDelayMs: Math.round(this.audioMonitor.outputDelaySec * 1000),
       lengthMs: Math.round(this.lookaheadLengthMs),
       delayFrames: this.delayFrames,
       detectionP95Ms: this.lookaheadLengthMs > 0 ? this.lookaheadDetectionP95Ms : null,
@@ -1087,6 +1139,8 @@ export class VertixEngine {
       bufferBytes: allocatedSlots * (this.slotSize?.bytesPerSlot ?? 0),
       bufferedFrames: buffer?.length ?? 0,
       droppedFrames: buffer ? buffer.overflowDrops + buffer.skippedOnDisplay : 0,
+      overflowDrops: buffer?.overflowDrops ?? 0,
+      skippedOnDisplay: buffer?.skippedOnDisplay ?? 0,
     };
   }
 
@@ -1360,6 +1414,8 @@ export class VertixEngine {
     this.lastResolvedFaces = this.activeSpeaker.resolve(this.lastFaces, audioEnergy, mediaTimeSec);
     const count = this.lastResolvedFaces.length;
     const commitAtOnce = sceneCut.isCut || this.commitCountAtNextDetection;
+    // A count committed at once after a seek or a mode switch replaces whatever was on screen: no dissolve from it.
+    const snapWithoutCut = commitAtOnce && !sceneCut.isCut;
     this.commitCountAtNextDetection = false;
     const stablePersonCount = commitAtOnce
       ? this.personCount.commitNow(count, mediaTimeSec)
@@ -1378,7 +1434,7 @@ export class VertixEngine {
         : decisionSec < mediaTimeSec
           ? "localised"
           : "tick";
-    this.decideLayout(decisionSec, count, stablePersonCount, cutSource, srcW, srcH, cropW, cropH);
+    this.decideLayout(decisionSec, count, stablePersonCount, cutSource, snapWithoutCut, srcW, srcH, cropW, cropH);
 
     if (this.lastDetectionMediaTime !== null && mediaTimeSec > this.lastDetectionMediaTime) {
       const interval = mediaTimeSec - this.lastDetectionMediaTime;
@@ -1426,6 +1482,7 @@ export class VertixEngine {
     count: number,
     stablePersonCount: number,
     cutSource: CutSource | null,
+    snap: boolean,
     srcW: number,
     srcH: number,
     cropW: number,
@@ -1433,7 +1490,7 @@ export class VertixEngine {
   ): void {
     const isCut = cutSource !== null;
     const countChanged = stablePersonCount !== this.decidedSpeakerCount;
-    let reframe: Reframe | null = isCut ? "snap" : null;
+    let reframe: Reframe | null = isCut || snap ? "snap" : null;
     if (stablePersonCount === 0) {
       this.decidedTargetPanes = [];
     } else if (count === stablePersonCount) {
@@ -1466,7 +1523,7 @@ export class VertixEngine {
       cutSource,
       skinRejectedFaces: this.lastSkinRejectedFaces,
     });
-    if (this.video?.paused) this.releaseHeldFrames();
+    if (this.frameBuffer?.hasHeld) this.releaseHeldFrames();
   }
 
   /** Applies the decisions due for the frame about to be drawn; with `onlyUpToSec` null, every queued one (no lookahead: they are already late). */

@@ -102,6 +102,11 @@ export class FrameRingBuffer<Slot> {
     return taken[taken.length - 1];
   }
 
+  /** Whether a held frame is waiting. */
+  get hasHeld(): boolean {
+    return this.queue.some((f) => f.held);
+  }
+
   /** Releases every held frame, to be shown at the next display. */
   releaseHeld(): void {
     for (const frame of this.queue) {

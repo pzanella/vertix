@@ -25,10 +25,17 @@ const LOOKAHEAD_UNAVAILABLE_LABEL: Record<NonNullable<ReframeMetrics["lookahead"
   "silent-audio-path": "unavailable (silent audio)",
 };
 
-function lookaheadValue({ enabled, unavailableReason, lengthMs }: ReframeMetrics["lookahead"]): string {
+function lookaheadValue({
+  enabled,
+  unavailableReason,
+  bypassed,
+  lengthMs,
+  delayFrames,
+}: ReframeMetrics["lookahead"]): string {
   if (!enabled) return "off";
   if (unavailableReason) return LOOKAHEAD_UNAVAILABLE_LABEL[unavailableReason];
-  return lengthMs > 0 ? `${lengthMs} ms` : "—";
+  if (bypassed) return "bypassed in 16:9";
+  return lengthMs > 0 ? `${lengthMs} ms (${delayFrames} frames)` : "—";
 }
 
 const LAYOUT_LABEL: Record<ReturnType<typeof classifyLayout>, (speakerCount: number) => string> = {

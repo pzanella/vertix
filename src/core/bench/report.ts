@@ -289,7 +289,10 @@ export function benchmarkSummaryRows(report: BenchmarkReport): BenchmarkTableRow
     clip,
     mode,
     build: mode === "16:9" ? "n/a" : wasmBuild.variant,
-    lookahead: lookahead.enabled ? (lookahead.unavailableReason ?? `${lookahead.lengthMs} ms`) : "off",
+    lookahead: !lookahead.enabled
+      ? "off"
+      : (lookahead.unavailableReason ?? (lookahead.bypassed ? "bypassed" : `${lookahead.lengthMs} ms`)),
+    "audio delay ms": lookahead.audioDelayMs,
     "build order": wasmBuild.runOrder ? `${wasmBuild.runOrder.position}/${wasmBuild.runOrder.sequence.length}` : null,
     "render fps": round(summary.effectiveFps, 1),
     "frame work p50 ms": round(summary.frameWorkMs.p50),
@@ -316,7 +319,8 @@ export function benchmarkSummaryRows(report: BenchmarkReport): BenchmarkTableRow
     "display error p95 ms": round(summary.display.errorMs.p95),
     "trigger p95 ms": round(summary.trigger.mainThreadMs.p95, 3),
     "irregular detection gaps": `${summary.detectionGaps.irregular}/${summary.detectionGaps.pairs}`,
-    "buffer drops": lookahead.droppedFrames,
+    "buffer drops": lookahead.overflowDrops,
+    "skipped on display": lookahead.skippedOnDisplay,
     "long tasks": summary.longTasks.supported ? summary.longTasks.count : "n/a",
     "page hidden": pageHiddenDuringRun ? "yes (invalid)" : "no",
     "duplicate callbacks": summary.frames.duplicateCallbacks,

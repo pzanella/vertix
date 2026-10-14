@@ -255,7 +255,13 @@ export interface BenchmarkClipRaw {
 export interface BenchmarkLookahead {
   enabled: boolean;
   unavailableReason: string | null;
+  /** Added within v5: on but not running because the mode is 16:9. */
+  bypassed: boolean;
+  /** Added within v5: the audio delay actually applied (0 when off or bypassed). */
+  audioDelayMs: number;
   lengthMs: number;
+  /** Added within v5: lengthMs in whole frames. */
+  delayFrames: number;
   /** Detection p95 behind lengthMs, and where it came from (measured / stored / default). Added within v5. */
   detectionP95Ms: number | null;
   lengthSource: string;
@@ -264,8 +270,12 @@ export interface BenchmarkLookahead {
   allocatedSlots: number;
   /** Estimated frame-buffer memory (RGBA). */
   bufferBytes: number;
-  /** Frames dropped by the buffer (full) or superseded on display. */
+  /** Frames dropped by the buffer (full) or superseded on display: overflowDrops + skippedOnDisplay. */
   droppedFrames: number;
+  /** Added within v5: frames dropped because the pool was full (should be 0). */
+  overflowDrops: number;
+  /** Added within v5: frames passed over on display, following a skipped frame callback or a shrinking delay. */
+  skippedOnDisplay: number;
 }
 
 export interface BenchmarkClipResult {

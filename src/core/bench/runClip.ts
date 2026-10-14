@@ -184,28 +184,7 @@ export async function runBenchmarkClip(
 }
 
 function lookaheadSnapshot(engine: VertixEngine): BenchmarkLookahead {
-  const {
-    enabled,
-    unavailableReason,
-    lengthMs,
-    detectionP95Ms,
-    lengthSource,
-    slotWidth,
-    slotHeight,
-    allocatedSlots,
-    bufferBytes,
-    droppedFrames,
-  } = engine.getLookaheadStatus();
-  return {
-    enabled,
-    unavailableReason,
-    lengthMs,
-    detectionP95Ms,
-    lengthSource,
-    slotWidth,
-    slotHeight,
-    allocatedSlots,
-    bufferBytes,
-    droppedFrames,
-  };
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  const { bufferedFrames, ...lookahead } = engine.getLookaheadStatus();
+  return lookahead;
 }

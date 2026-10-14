@@ -41,7 +41,10 @@ function sampleResult(): BenchmarkClipResult {
     lookahead: {
       enabled: true,
       unavailableReason: null,
-      lengthMs: 170,
+      bypassed: false,
+      audioDelayMs: 160,
+      lengthMs: 160,
+      delayFrames: 4,
       detectionP95Ms: 60,
       lengthSource: "default",
       slotWidth: 1280,
@@ -49,6 +52,8 @@ function sampleResult(): BenchmarkClipResult {
       allocatedSlots: 9,
       bufferBytes: 9 * 1280 * 720 * 4,
       droppedFrames: 0,
+      overflowDrops: 0,
+      skippedOnDisplay: 0,
     },
   };
 }
@@ -76,7 +81,7 @@ describe("benchmarkReportToCsv", () => {
     expect(lines[0].startsWith("kind,clip,mode,wasm_build,wasm_build_position,index,warmup")).toBe(true);
     expect(lines).toHaveLength(1 + 10 + 1 + 1 + 1);
     expect(lines[1].startsWith('frame,"clip, one",9:16,simd,1,0,0,0,0,0.3,0')).toBe(true);
-    expect(lines[1].includes(",170,")).toBe(true);
+    expect(lines[1].includes(",160,")).toBe(true);
     expect(lines.some((line) => line.startsWith("skipped_detection,"))).toBe(true);
     expect(lines.some((line) => line.startsWith("layout_change,"))).toBe(true);
     expect(
@@ -85,7 +90,7 @@ describe("benchmarkReportToCsv", () => {
       )
     ).toBe(true);
     expect(
-      lines.find((line) => line.startsWith("detection,"))!.endsWith(",2,1,1,0,,1.2,0.4,0.3,1,170,0,NaN,NaN,,,,")
+      lines.find((line) => line.startsWith("detection,"))!.endsWith(",2,1,1,0,,1.2,0.4,0.3,1,160,0,NaN,NaN,,,,")
     ).toBe(true);
   });
 });
@@ -105,7 +110,7 @@ describe("benchmarkSummaryRows", () => {
     expect(row["skin rejected (speaker-sized)"]).toBe(0);
     expect(row["scene cuts"]).toBe(1);
     expect(report.schemaVersion).toBe(5);
-    expect(row.lookahead).toBe("170 ms");
+    expect(row.lookahead).toBe("160 ms");
     expect(row["render fps"]).toBe(25);
     expect(report.precisionWarnings.length).toBeGreaterThan(0);
   });

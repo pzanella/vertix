@@ -18,6 +18,7 @@ vi.mock("./audioActivity", () => ({
   AudioActivityMonitor: class {
     available = true;
     silentPathSuspected = false;
+    outputDelaySec = 0;
     attach() {}
     detach() {}
     energy() {
@@ -27,9 +28,11 @@ vi.mock("./audioActivity", () => ({
       return false;
     }
     setOutputDelay(seconds: number) {
+      this.outputDelaySec = seconds;
       audio.setOutputDelay(seconds);
     }
     rampOutputDelay(seconds: number, durationSec: number) {
+      this.outputDelaySec = seconds;
       audio.rampOutputDelay(seconds, durationSec);
     }
     muteFor() {}
@@ -126,6 +129,10 @@ class FakeVideo {
     this.listeners.get(type)?.forEach((listener) => listener());
   }
 
+  get currentTime(): number {
+    return this.mediaTime;
+  }
+
   /** Advances one frame without running any frame callback (a dropped frame / skipped callback). */
   skipFrame(): void {
     this.mediaTime = Math.round((this.mediaTime + 1 / this.fps) * 1e6) / 1e6;
@@ -190,7 +197,7 @@ const LEFT_FACE = new Float64Array([0.3, 0.5, 0.2, 0.2, 0, 0.9, 0]);
 const CUT: SceneCutScores = { hist: 0.5, grid: 0.5, isCut: true };
 const NO_CUT: SceneCutScores = { hist: 0, grid: 0, isCut: false };
 
-function fakeCanvas(): HTMLCanvasElement {
+function fakeCanvas(): HTMLCanvasElement & { width: number } {
   return { width: 0, height: 0, clientHeight: 0, getContext: fake2dContext } as unknown as HTMLCanvasElement;
 }
 
@@ -198,7 +205,8 @@ function setUp({ lookahead = true } = {}) {
   const engine = new VertixEngine();
   const video = new FakeVideo();
   vi.spyOn(performance, "now").mockImplementation(() => video.clockMs);
-  engine.attach(video as unknown as HTMLVideoElement, fakeCanvas());
+  const canvas = fakeCanvas();
+  engine.attach(video as unknown as HTMLVideoElement, canvas);
   if (lookahead) engine.setLookaheadEnabled(true);
   const internals = engine as unknown as EngineInternals;
   const result = (sceneCut: SceneCutScores) => (mediaTimeSec: number) =>
@@ -217,7 +225,7 @@ function setUp({ lookahead = true } = {}) {
     pendingRefresh.clear();
     for (const callback of callbacks) callback(video.clockMs);
   };
-  return { engine, video, internals, detectCut: result(CUT), detect: result(NO_CUT), play, runRefresh };
+  return { engine, video, canvas, internals, detectCut: result(CUT), detect: result(NO_CUT), play, runRefresh };
 }
 
 /** Rounds to microseconds: media times built by repeated addition. */
@@ -459,6 +467,51 @@ describe("VertixEngine lookahead", () => {
     detect(video.mediaTime);
     play(20);
     expect(engine.getState().speakerCount).toBe(0);
+    engine.destroy();
+  });
+
+  it("is bypassed in 16:9: no delay for video or audio, frames drawn as decoded", () => {
+    const { engine, video, play } = setUp();
+    play(10);
+    engine.setMode("16:9");
+    expect(engine.getLookaheadStatus()).toMatchObject({
+      enabled: true,
+      bypassed: true,
+      lengthMs: 0,
+      audioDelayMs: 0,
+      bufferedFrames: 0,
+    });
+    expect(audio.setOutputDelay).toHaveBeenLastCalledWith(0);
+    // The current frame is drawn at once, live.
+    expect(engine.getDisplayedMediaTime()).toBe(video.mediaTime);
+    play(1);
+    expect(engine.getDisplayedMediaTime()).toBe(video.mediaTime);
+    engine.destroy();
+  });
+
+  it("back in 9:16, shows the current frame at once as 9:16, re-shows it cropped, and holds it until the stream reaches it", () => {
+    const { engine, video, canvas, detect, play } = setUp();
+    play(10);
+    engine.setMode("16:9");
+    play(10);
+    engine.setMode("9:16");
+    const anchorSec = video.mediaTime;
+    const { lengthMs, delayFrames, bypassed, audioDelayMs } = engine.getLookaheadStatus();
+    expect({ bypassed, audioDelayMs }).toEqual({ bypassed: false, audioDelayMs: lengthMs });
+    expect(engine.getDisplayedMediaTime()).toBe(anchorSec);
+    expect(canvas.width).toBe(405);
+    expect(engine.getState().speakerCount).toBe(0);
+
+    // Its own detection arrives: the count commits at once and the anchor is shown cropped.
+    detect(anchorSec);
+    play(1);
+    expect(engine.getDisplayedMediaTime()).toBe(anchorSec);
+    expect(engine.getState().speakerCount).toBe(1);
+
+    const shown = play(delayFrames + 5);
+    expect(shown.slice(0, delayFrames - 1).every((t) => t === anchorSec)).toBe(true);
+    for (let i = 1; i < shown.length; i++) expect(shown[i]!).toBeGreaterThanOrEqual(shown[i - 1]!);
+    expect(us(engine.getDisplayedMediaTime())).toBe(us(video.mediaTime - delayFrames / 25));
     engine.destroy();
   });
 
