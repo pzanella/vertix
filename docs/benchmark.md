@@ -363,8 +363,23 @@ lookaheadComparison, precisionWarnings, results[] }`. Each result contains `summ
       frame (`framesLate` null when the crop never changed for it).
     - `summary.display`: `{ count, errorMs, workMs }`. `errorMs` (lookahead
       only) is when a frame reaches the screen minus when it should
-      (its own display time + the lookahead). The audio delay is exact,
-      so this is the audio/video offset as far as the page can measure it.
+      (its own display time + the lookahead). It counts the presentation
+      jitter of both frames: on a phone that drops frames it reads about
+      ±30 ms even when the exact frame is shown. Added later within v5:
+      - `clockErrorMs` (with and without lookahead): when a frame reaches
+        the screen minus when its audio is heard, against a steady clock
+        fitted to the video element's display times (median of
+        `expectedDisplayTime − mediaTime` over ±2 s of frame callbacks;
+        playback rate 1). Without lookahead it is the video element's own
+        jitter: the baseline to compare the lookahead run with.
+        `clockErrorAbsMs` is the same as absolute values.
+      - `frameOffset` (lookahead only): frames between the due frame and
+        the one shown, positive when the one shown is older; 0 is exact.
+        When the due frame was never captured (its callback was skipped)
+        and the screen would fall behind, the nearest captured frame is
+        shown, the newer one on a tie (-1).
+      - Raw: `frames.expectedDisplayMs`, and per display `onScreenAtMs`,
+        `delayMs`, `frameOffset` and `clockErrorMs`.
     - `summary.trigger`: `{ count, mainThreadMs, triggeredDetections }`,
       the main-thread cost per frame of the cut trigger and how many
       detections it started. Added later within v5: `drawMs` (preparing

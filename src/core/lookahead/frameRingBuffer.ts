@@ -112,11 +112,42 @@ export class FrameRingBuffer<Slot> {
    * skipped. Null when none is due. Call `release` once it has been drawn.
    */
   takeLatest(isDue: (frame: BufferedFrame<Slot>) => boolean): BufferedFrame<Slot> | null {
+    return this.takeThrough(this.latestIndex(isDue));
+  }
+
+  /**
+   * The frame to show for media time `dueSec`, taken like `takeLatest`:
+   * the frame at that time (within a quarter frame) or a held frame just
+   * released; else, with `catchUp` (the screen shows a frame from before
+   * the due one, whose frame was never captured: a skipped frame
+   * callback), the waiting frame nearest the due time, at most one frame
+   * newer, the newer on a tie (audio leading the picture is the more
+   * noticeable error); else the latest earlier frame, if any.
+   */
+  takeNearest(dueSec: number, intervalSec: number, catchUp: boolean): BufferedFrame<Slot> | null {
+    const slackSec = intervalSec / 4;
+    const older = this.latestIndex((f) => f.mediaTimeSec <= dueSec + slackSec);
+    const olderFrame = older >= 0 ? this.queue[older] : null;
+    if (olderFrame && (olderFrame.forced || olderFrame.mediaTimeSec >= dueSec - slackSec))
+      return this.takeThrough(older);
+    const newer = this.queue[older + 1];
+    if (catchUp && newer && !newer.held && newer.mediaTimeSec <= dueSec + intervalSec + slackSec) {
+      const newerIsNearer = !olderFrame || newer.mediaTimeSec - dueSec <= dueSec - olderFrame.mediaTimeSec + 1e-6;
+      if (newerIsNearer) return this.takeThrough(older + 1);
+    }
+    return this.takeThrough(older);
+  }
+
+  private latestIndex(isDue: (frame: BufferedFrame<Slot>) => boolean): number {
     let index = -1;
     for (let i = 0; i < this.queue.length; i++) {
       const frame = this.queue[i];
       if (frame.forced || (!frame.held && isDue(frame))) index = i;
     }
+    return index;
+  }
+
+  private takeThrough(index: number): BufferedFrame<Slot> | null {
     if (index < 0) return null;
     const taken = this.queue.splice(0, index + 1);
     for (let i = 0; i < taken.length - 1; i++) this.release(taken[i]);

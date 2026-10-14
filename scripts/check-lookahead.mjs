@@ -105,6 +105,9 @@ async function runInPage(clips, extras, triggerAb) {
       cutsShown: summary.cutsShown,
       sceneCuts: summary.sceneCuts,
       displayErrorMs: summary.display.errorMs,
+      clockErrorMs: summary.display.clockErrorMs,
+      clockErrorAbsMs: summary.display.clockErrorAbsMs,
+      frameOffset: summary.display.frameOffset,
       displayed: summary.display.count,
       effectiveFps: summary.effectiveFps,
       frames: summary.frames,
@@ -354,6 +357,9 @@ try {
         run.displayErrorMs.count > 0
           ? `${run.displayErrorMs.p50.toFixed(1)}/${run.displayErrorMs.p95.toFixed(1)}`
           : "-",
+      "clock err p95 / |p95| ms":
+        run.clockErrorMs.count > 0 ? `${run.clockErrorMs.p95.toFixed(1)} / ${run.clockErrorAbsMs.p95.toFixed(1)}` : "-",
+      "frame offset p95": run.frameOffset.count > 0 ? run.frameOffset.p95.toFixed(2) : "-",
       "trigger path": run.trigger.path ?? "-",
       "trigger p95 ms (draw / post)":
         run.trigger.mainThreadMs.p95 === null

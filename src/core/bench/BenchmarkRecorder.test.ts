@@ -133,4 +133,32 @@ describe("BenchmarkRecorder", () => {
     expect(trigger.drawMs.p50).toBeCloseTo(0.2);
     expect(trigger.postMs.max).toBeCloseTo(0.1);
   });
+
+  it("reports the trigger path and frames skipped while a VideoFrame was in the worker", () => {
+    const recorder = new BenchmarkRecorder({ clipName: "a", video: fakeVideo(10), warmupSec: 0, nominalFps: 25 });
+    recorder.recordFrame(0, 1, 0, 0);
+    recorder.recordTriggerCost(0.3, 0.1, 0.2, "videoframe");
+    recorder.recordTriggerSkippedBusy();
+    expect(recorder.finish("9:16").summary.trigger).toMatchObject({ path: "videoframe", skippedBusy: 1 });
+  });
+
+  it("measures the A/V offset against the video element's clock, with and without lookahead", () => {
+    const off = new BenchmarkRecorder({ clipName: "a", video: fakeVideo(10), warmupSec: 0, nominalFps: 25 });
+    const on = new BenchmarkRecorder({ clipName: "a", video: fakeVideo(10), warmupSec: 0, nominalFps: 25 });
+    const shownAt = (frame: number) => 1000 + frame * 40 + (frame % 3 === 0 ? 8 : 0);
+    for (let frame = 0; frame < 100; frame++) {
+      off.recordFrame(shownAt(frame), 1, frame * 0.04, frame, shownAt(frame));
+      off.recordDisplay(shownAt(frame), frame * 0.04, 0.1, NaN, shownAt(frame), 0);
+      on.recordFrame(shownAt(frame), 1, frame * 0.04, frame, shownAt(frame));
+      // Eight frames behind; every 10th display shows the frame before the due one.
+      const late = frame % 10 === 0 ? 1 : 0;
+      if (frame >= 9) on.recordDisplay(shownAt(frame), (frame - 8 - late) * 0.04, 0.1, NaN, shownAt(frame), 320, late);
+    }
+    const offDisplay = off.finish("9:16").summary.display;
+    const onDisplay = on.finish("9:16").summary.display;
+    expect(offDisplay.clockErrorAbsMs.max).toBeLessThanOrEqual(8);
+    expect(offDisplay.frameOffset.count).toBe(0);
+    expect(onDisplay.clockErrorMs.max).toBeGreaterThanOrEqual(40);
+    expect(onDisplay.frameOffset.max).toBe(1);
+  });
 });

@@ -1777,7 +1777,15 @@ export class VertixEngine {
       this.renderLiveFrame(video, metadata, now, frameDtSec);
     }
 
-    if (probe) probe.recordFrame(now, performance.now() - workStart, metadata.mediaTime, metadata.presentedFrames);
+    if (probe) {
+      probe.recordFrame(
+        now,
+        performance.now() - workStart,
+        metadata.mediaTime,
+        metadata.presentedFrames,
+        metadata.expectedDisplayTime ?? now
+      );
+    }
     this.scheduleNextFrame(video);
   }
 
@@ -1803,16 +1811,26 @@ export class VertixEngine {
     const renderStart = this.benchmarkProbe ? performance.now() : 0;
     this.renderFrame(video, srcW, srcH, null, metadata.mediaTime, now, frameDtSec);
     this.displayedMediaTimeSec = metadata.mediaTime;
-    this.benchmarkProbe?.recordDisplay(now, metadata.mediaTime, performance.now() - renderStart, NaN);
+    this.benchmarkProbe?.recordDisplay(
+      now,
+      metadata.mediaTime,
+      performance.now() - renderStart,
+      NaN,
+      metadata.expectedDisplayTime ?? now,
+      0
+    );
   }
 
   /**
    * Lookahead, while playing: copies the frame into the buffer, runs
    * detection on it if due, then shows the buffered frame whose time has
-   * come — the newest with mediaTime <= this frame's mediaTime minus the
-   * delay. Picking by media time keeps audio and video in sync when a
-   * callback is skipped. The delay is a whole number of frames, so that
-   * frame appears exactly when the video element would show it.
+   * come: the one at this frame's mediaTime minus the delay. Picking by
+   * media time keeps audio and video in sync when a callback is skipped;
+   * if the due frame itself was never captured (its callback was skipped)
+   * and the screen would fall behind, the nearest captured frame is shown
+   * (see FrameRingBuffer.takeNearest). The delay is a whole number of
+   * frames, so that frame appears exactly when the video element would
+   * show it.
    */
   private captureFrame(video: HTMLVideoElement, metadata: VideoFrameCallbackMetadata, now: number): void {
     this.followFrameRate();
@@ -1835,10 +1853,11 @@ export class VertixEngine {
 
     this.stopDisplayLoop();
     const delayMs = this.delaySchedule.valueAt(presentedAtMs);
-    // A quarter frame of slack absorbs rounding in media timestamps.
-    const dueUpToSec = metadata.mediaTime - (delayMs / 1000) * rate + intervalSec / 4;
-    const due = this.frameBuffer!.takeLatest((f) => f.mediaTimeSec <= dueUpToSec);
-    if (due) this.showBufferedFrame(due, now, presentedAtMs - (due.presentedAtMs + delayMs));
+    const dueSec = metadata.mediaTime - (delayMs / 1000) * rate;
+    const shownSec = this.displayedMediaTimeSec;
+    const catchUp = shownSec !== null && shownSec < dueSec - intervalSec / 2;
+    const due = this.frameBuffer!.takeNearest(dueSec, intervalSec, catchUp);
+    if (due) this.showBufferedFrame(due, now, presentedAtMs, delayMs, (dueSec - due.mediaTimeSec) / intervalSec);
     this.applyPendingMaxSlots(now);
     this.armStallWatchdog(intervalSec / rate);
   }
@@ -1874,7 +1893,18 @@ export class VertixEngine {
     this.stallWatchdog = setTimeout(() => this.ensureDisplayLoop(), frameWallSec * 1000 * STALL_FRAMES);
   }
 
-  private showBufferedFrame(frame: BufferedFrame<FrameSlot>, now: number, errorMs: number): void {
+  /**
+   * Draws a buffered frame that reaches the screen at `onScreenAtMs`, due
+   * `delayMs` after its own display time; `frameOffset` is how many frames
+   * it is from the due one (positive: older).
+   */
+  private showBufferedFrame(
+    frame: BufferedFrame<FrameSlot>,
+    now: number,
+    onScreenAtMs: number,
+    delayMs: number,
+    frameOffset: number
+  ): void {
     const frameDtSec = this.lastDisplayedAt !== null ? (now - this.lastDisplayedAt) / 1000 : 0;
     this.lastDisplayedAt = now;
     const renderStart = performance.now();
@@ -1882,7 +1912,15 @@ export class VertixEngine {
     this.renderFrame(canvas, canvas.width, canvas.height, frame.mediaTimeSec, frame.mediaTimeSec, now, frameDtSec);
     this.frameBuffer?.release(frame);
     this.displayedMediaTimeSec = frame.mediaTimeSec;
-    this.benchmarkProbe?.recordDisplay(now, frame.mediaTimeSec, performance.now() - renderStart, errorMs);
+    this.benchmarkProbe?.recordDisplay(
+      now,
+      frame.mediaTimeSec,
+      performance.now() - renderStart,
+      onScreenAtMs - (frame.presentedAtMs + delayMs),
+      onScreenAtMs,
+      delayMs,
+      frameOffset
+    );
   }
 
   private ensureCutTriggerWorker(): Worker | null {
@@ -2140,7 +2178,12 @@ export class VertixEngine {
     const onScreenAt = now + this.refreshIntervalMs;
     const delayMs = this.delaySchedule.valueAt(onScreenAt);
     const frame = buffer.takeLatest((f) => f.presentedAtMs + delayMs <= onScreenAt + this.refreshIntervalMs / 2);
-    if (frame) this.showBufferedFrame(frame, now, onScreenAt - (frame.presentedAtMs + delayMs));
+    if (frame) {
+      const frameWallMs =
+        ((this.knownIntervalSec() ?? DEFAULT_FRAME_INTERVAL_MS / 1000) * 1000) / (this.video?.playbackRate || 1);
+      const frameOffset = (onScreenAt - (frame.presentedAtMs + delayMs)) / frameWallMs;
+      this.showBufferedFrame(frame, now, onScreenAt, delayMs, frameOffset);
+    }
 
     if (buffer.length > 0) {
       this.ensureDisplayLoop();

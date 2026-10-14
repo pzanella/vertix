@@ -144,4 +144,48 @@ describe("FrameRingBuffer", () => {
     expect(buffer.allocatedBytes).toBe(buffer.allocatedSlots);
     expect(buffer.allocatedBytes).toBeLessThanOrEqual(8);
   });
+
+  describe("takeNearest", () => {
+    it("takes the frame at the due time", () => {
+      const { buffer, capture } = setUp();
+      capture(1.0);
+      capture(1.02);
+      capture(1.04);
+      expect(buffer.takeNearest(1.02, 0.02, true)?.mediaTimeSec).toBe(1.02);
+      expect(buffer.skippedOnDisplay).toBe(1);
+    });
+
+    it("waits when the due frame is not there yet and the screen is not behind", () => {
+      const { buffer, capture } = setUp();
+      capture(1.02);
+      expect(buffer.takeNearest(1.0, 0.02, false)).toBeNull();
+    });
+
+    it("never shows a frame early at the start (nothing shown yet)", () => {
+      const { buffer, capture } = setUp();
+      capture(1.02);
+      capture(1.04);
+      expect(buffer.takeNearest(1.0, 0.02, false)).toBeNull();
+    });
+
+    it("when the due frame was never captured and the screen is behind, takes the newer frame on a tie", () => {
+      const { buffer, capture } = setUp();
+      capture(0.98);
+      capture(1.02);
+      expect(buffer.takeNearest(1.0, 0.02, true)?.mediaTimeSec).toBe(1.02);
+    });
+
+    it("takes the nearer earlier frame when the newer one is further", () => {
+      const { buffer, capture } = setUp();
+      capture(0.99);
+      capture(1.02);
+      expect(buffer.takeNearest(1.0, 0.02, true)?.mediaTimeSec).toBe(0.99);
+    });
+
+    it("never takes a frame more than one frame newer", () => {
+      const { buffer, capture } = setUp();
+      capture(1.06);
+      expect(buffer.takeNearest(1.0, 0.02, true)).toBeNull();
+    });
+  });
 });

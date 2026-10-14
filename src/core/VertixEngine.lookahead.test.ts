@@ -326,6 +326,26 @@ describe("VertixEngine lookahead", () => {
     engine.destroy();
   });
 
+  it("when the due frame was never captured and the screen would fall behind, shows the next frame, never going back", () => {
+    const { engine, video, play } = setUp();
+    const { delayFrames } = engine.getLookaheadStatus();
+    play(delayFrames + 5);
+    // Frame X's callback is skipped, and so is the one that would have shown the frame before X.
+    video.skipFrame();
+    const missingSec = video.mediaTime;
+    play(delayFrames - 2);
+    video.skipFrame();
+    play(1);
+    expect(us(video.mediaTime - delayFrames / 25)).toBe(us(missingSec));
+    // Not the frame before X (a frame late): the one after it (a frame early).
+    expect(us(engine.getDisplayedMediaTime())).toBe(us(missingSec + 1 / 25));
+    play(1);
+    expect(us(engine.getDisplayedMediaTime())).toBe(us(missingSec + 1 / 25));
+    play(1);
+    expect(us(engine.getDisplayedMediaTime())).toBe(us(video.mediaTime - delayFrames / 25));
+    engine.destroy();
+  });
+
   it("follows a frame-rate change with a ramp: no flush, never backwards, then whole frames of the new rate", () => {
     const { engine, video, play } = setUp();
     play(30);
