@@ -42,6 +42,8 @@ function sampleResult(): BenchmarkClipResult {
       enabled: true,
       unavailableReason: null,
       lengthMs: 170,
+      detectionP95Ms: 60,
+      lengthSource: "default",
       slotWidth: 1280,
       slotHeight: 720,
       allocatedSlots: 9,

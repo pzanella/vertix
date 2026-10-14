@@ -253,6 +253,9 @@ export interface BenchmarkLookahead {
   enabled: boolean;
   unavailableReason: string | null;
   lengthMs: number;
+  /** Detection p95 behind lengthMs, and where it came from (measured / stored / default). Added within v5. */
+  detectionP95Ms: number | null;
+  lengthSource: string;
   slotWidth: number | null;
   slotHeight: number | null;
   allocatedSlots: number;

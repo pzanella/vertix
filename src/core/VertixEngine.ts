@@ -23,6 +23,7 @@ import {
 } from "./lookahead/decisionTimeline";
 import { FrameRingBuffer, type BufferedFrame } from "./lookahead/frameRingBuffer";
 import { TRIGGER_H, TRIGGER_W, locateCut, type ScoredFrame } from "./lookahead/cutTrigger";
+import { DetectionLatencyTracker } from "./lookahead/detectionLatency";
 import {
   DEFAULT_DETECTION_P95_MS,
   DEFAULT_FRAME_INTERVAL_MS,
@@ -125,6 +126,9 @@ export type LookaheadUnavailableReason =
   /** The graph carries exact silence while a cross-origin element plays unmuted audio (same cause, detected from the audio side). */
   | "silent-audio-path";
 
+/** Where the detection p95 behind the lookahead length came from. */
+export type LookaheadLengthSource = "measured" | "stored" | "default";
+
 export interface LookaheadStatus {
   /** The switch: lookahead wanted. */
   enabled: boolean;
@@ -132,6 +136,9 @@ export interface LookaheadStatus {
   unavailableReason: LookaheadUnavailableReason | null;
   /** How far behind the decoded frame the output (and audio) is shown, in ms. 0 when off. */
   lengthMs: number;
+  /** Detection p95 the length was computed from, and where it came from: this device's warm detections, an earlier session, or the device default. */
+  detectionP95Ms: number | null;
+  lengthSource: LookaheadLengthSource;
   /** Size of one buffered frame, null until the first frame is buffered. */
   slotWidth: number | null;
   slotHeight: number | null;
@@ -188,6 +195,8 @@ export const INITIAL_METRICS: VertixMetrics = {
     enabled: false,
     unavailableReason: null,
     lengthMs: 0,
+    detectionP95Ms: null,
+    lengthSource: "default",
     slotWidth: null,
     slotHeight: null,
     allocatedSlots: 0,
@@ -245,6 +254,10 @@ const WORKER_READY_TIMEOUT_MS = 4000;
 // constructed (React StrictMode always creates at least two in dev).
 let sharedWorker: Worker | null = null;
 let sharedWorkerReady = false;
+// When the current shared worker reported ready, and how many results it has
+// returned since: its first detections are warm-up (see detectionLatency.ts).
+let sharedWorkerReadyAt = 0;
+let sharedWorkerResults = 0;
 // True while a worker is starting up. Detection ticks are skipped then
 // instead of falling back to the main thread, which would download the
 // other copy of the .wasm binary for nothing.
@@ -365,6 +378,8 @@ function getSharedDetectionWorker(): Promise<boolean> {
           return;
         }
         sharedWorkerReady = true;
+        sharedWorkerReadyAt = performance.now();
+        sharedWorkerResults = 0;
         settle(true);
         return;
       }
@@ -593,8 +608,12 @@ export class VertixEngine {
   private refreshIntervalMs = 1000 / 60;
   private displayedMediaTimeSec: number | null = null;
   // Detection round trips (dispatch → result) of the current WASM build, for the lookahead length.
-  private detectionLatency = new RollingP95();
-  private detectionLatencyBuild: WasmBuildVariant | null = null;
+  private detectionLatency = new DetectionLatencyTracker();
+  private lookaheadLengthSource: LookaheadLengthSource = "default";
+  private lookaheadDetectionP95Ms: number | null = null;
+  // Main-thread fallback detector: when it became ready, and its results since.
+  private mainThreadReadyAt = 0;
+  private mainThreadResults = 0;
   private triggerLatency = new RollingP95();
   private taintProbeCtx: OffscreenCanvasRenderingContext2D | null = null;
 
@@ -811,6 +830,8 @@ export class VertixEngine {
       if (this.engineBuild !== build) return;
       this.engine = new bindings.ReframeEngine();
       this.wasmReady = true;
+      this.mainThreadReadyAt = performance.now();
+      this.mainThreadResults = 0;
       this.emitState();
     });
   }
@@ -948,15 +969,15 @@ export class VertixEngine {
     this.emitMetrics();
   }
 
+  /** From this build's warm detections, else the value stored by an earlier session, else the device default. Only a measured value is stored. */
   private computeLookaheadLengthMs(): number {
     const build = getActiveWasmBuild().variant;
-    if (this.detectionLatencyBuild !== build) {
-      this.detectionLatency = new RollingP95();
-      this.detectionLatencyBuild = build;
-    }
-    const measured = this.detectionLatency.p95();
+    const measured = this.detectionLatency.p95(build);
+    const stored = measured === null ? loadStoredDetectionP95(build) : null;
     if (measured !== null) storeDetectionP95(build, measured);
-    const detectionP95 = measured ?? loadStoredDetectionP95(build) ?? DEFAULT_DETECTION_P95_MS[this.deviceClass][build];
+    this.lookaheadLengthSource = measured !== null ? "measured" : stored !== null ? "stored" : "default";
+    const detectionP95 = measured ?? stored ?? DEFAULT_DETECTION_P95_MS[this.deviceClass][build];
+    this.lookaheadDetectionP95Ms = detectionP95;
     const playbackRate = this.video?.playbackRate || 1;
     const frameIntervalMs =
       this.frameIntervalMediaSec !== null
@@ -972,6 +993,8 @@ export class VertixEngine {
       enabled: this.lookaheadEnabled,
       unavailableReason: this.lookaheadEnabled ? this.lookaheadUnavailable : null,
       lengthMs: this.lookaheadLengthMs,
+      detectionP95Ms: this.lookaheadLengthMs > 0 ? this.lookaheadDetectionP95Ms : null,
+      lengthSource: this.lookaheadLengthSource,
       slotWidth: buffer ? (this.slotSize?.width ?? null) : null,
       slotHeight: buffer ? (this.slotSize?.height ?? null) : null,
       allocatedSlots,
@@ -1075,6 +1098,7 @@ export class VertixEngine {
   ): void {
     const probe = this.benchmarkProbe;
     const dispatchedAt = performance.now();
+    const build = getActiveWasmBuild().variant;
     const previousDetectionSec = this.lastDispatchedDetectionSec;
     const audioEnergy = this.audioMonitor.energy();
 
@@ -1090,7 +1114,13 @@ export class VertixEngine {
         // discard it instead of feeding stale positions into the layout.
         if (generation !== this.detectionRequestGeneration) return;
         const postStart = performance.now();
-        this.detectionLatency.push(postStart - dispatchedAt);
+        sharedWorkerResults += 1;
+        this.detectionLatency.record(
+          build,
+          postStart - dispatchedAt,
+          dispatchedAt - sharedWorkerReadyAt,
+          sharedWorkerResults
+        );
         this.processDetectionResult(
           facesFlat,
           unpackSceneCutScores(cutScoresFlat),
@@ -1174,7 +1204,13 @@ export class VertixEngine {
       const start = performance.now();
       const facesFlat = this.engine.update_faces(new Uint8Array(faceImageData.data.buffer), mediaTimeSec);
       const tookMs = performance.now() - start;
-      this.detectionLatency.push(performance.now() - dispatchedAt);
+      this.mainThreadResults += 1;
+      this.detectionLatency.record(
+        build,
+        performance.now() - dispatchedAt,
+        dispatchedAt - this.mainThreadReadyAt,
+        this.mainThreadResults
+      );
       this.processDetectionResult(
         facesFlat,
         unpackSceneCutScores(this.engine.last_cut_scores()),

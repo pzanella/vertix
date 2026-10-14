@@ -1,5 +1,6 @@
 export { VertixEngine, INITIAL_METRICS } from "./VertixEngine";
 export type {
+  LookaheadLengthSource,
   LookaheadStatus,
   LookaheadUnavailableReason,
   VertixMode,

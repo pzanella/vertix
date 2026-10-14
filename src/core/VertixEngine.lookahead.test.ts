@@ -3,6 +3,8 @@ import { VertixEngine } from "./VertixEngine";
 import type { SceneCutScores } from "./layoutEngine";
 import type { BenchmarkProbe } from "./bench/BenchmarkRecorder";
 import type { ScoredFrame } from "./lookahead/cutTrigger";
+import type { DetectionLatencyTracker } from "./lookahead/detectionLatency";
+import { getActiveWasmBuild } from "./VertixEngine";
 
 const audio = vi.hoisted(() => ({
   setOutputDelay: vi.fn(),
@@ -144,6 +146,7 @@ class FakeVideo {
 
 interface EngineInternals {
   scoredFrames: ScoredFrame[];
+  detectionLatency: DetectionLatencyTracker;
   processDetectionResult(
     facesFlat: Float64Array,
     sceneCut: SceneCutScores,
@@ -305,6 +308,32 @@ describe("VertixEngine lookahead", () => {
     internals.processDetectionResult(LEFT_FACE, CUT, null, 3 / 25, 1280, 720, 405, 720, "worker", 1, 0, true);
     runRefresh(2000);
     expect(cuts.map((c) => c.source)).toEqual(["trigger"]);
+    engine.destroy();
+  });
+
+  it("never stores or uses a length from warm-up detections, and uses warm ones once there are enough", () => {
+    const storage = new Map<string, string>();
+    const withStorage = globalThis as unknown as { localStorage?: unknown };
+    withStorage.localStorage = {
+      getItem: (key: string) => storage.get(key) ?? null,
+      setItem: (key: string, value: string) => storage.set(key, value),
+    };
+    const { engine, internals } = setUp();
+    const build = getActiveWasmBuild().variant;
+    const defaultLength = engine.getLookaheadStatus().lengthMs;
+    // A fresh worker: every detection in its first 2 s is slow.
+    for (let i = 0; i < 10; i++) internals.detectionLatency.record(build, 900, i * 150, i + 1);
+    engine.setLookaheadEnabled(false);
+    engine.setLookaheadEnabled(true);
+    expect(engine.getLookaheadStatus()).toMatchObject({ lengthSource: "default", lengthMs: defaultLength });
+    expect(storage.size).toBe(0);
+
+    for (let i = 0; i < 12; i++) internals.detectionLatency.record(build, 100, 3000 + i * 200, 20 + i);
+    engine.setLookaheadEnabled(false);
+    engine.setLookaheadEnabled(true);
+    expect(engine.getLookaheadStatus()).toMatchObject({ lengthSource: "measured", detectionP95Ms: 100 });
+    expect([...storage.values()]).toEqual(["100"]);
+    delete withStorage.localStorage;
     engine.destroy();
   });
 

@@ -184,7 +184,28 @@ export async function runBenchmarkClip(
 }
 
 function lookaheadSnapshot(engine: VertixEngine): BenchmarkLookahead {
-  const { enabled, unavailableReason, lengthMs, slotWidth, slotHeight, allocatedSlots, bufferBytes, droppedFrames } =
-    engine.getLookaheadStatus();
-  return { enabled, unavailableReason, lengthMs, slotWidth, slotHeight, allocatedSlots, bufferBytes, droppedFrames };
+  const {
+    enabled,
+    unavailableReason,
+    lengthMs,
+    detectionP95Ms,
+    lengthSource,
+    slotWidth,
+    slotHeight,
+    allocatedSlots,
+    bufferBytes,
+    droppedFrames,
+  } = engine.getLookaheadStatus();
+  return {
+    enabled,
+    unavailableReason,
+    lengthMs,
+    detectionP95Ms,
+    lengthSource,
+    slotWidth,
+    slotHeight,
+    allocatedSlots,
+    bufferBytes,
+    droppedFrames,
+  };
 }
