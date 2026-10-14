@@ -16,7 +16,7 @@
 //
 // --cpu-throttle slows the page's CPU by that factor (DevTools CPU
 // throttling), a rough stand-in for a phone. 50 fps clips also run with
-// lookahead on the scalar build. --trigger-ab adds, per clip, a run with
+// lookahead off and on on the other WASM build. --trigger-ab adds, per clip, a run with
 // lookahead on and VideoFrame hidden, so the cut trigger takes its bitmap
 // path (labelled "bitmap trigger").
 //
@@ -143,6 +143,7 @@ async function runInPage(clips, extras, triggerAb) {
         loadSource: load(clip.url),
         seconds: 3,
       });
+      await run(clip, false, "clips");
       await run(clip, true, "clips");
       await core.switchWasmBuild(pageBuild);
     }
