@@ -46,6 +46,12 @@ import {
 import { DelaySchedule } from "./lookahead/delaySchedule";
 import { FrameIntervalTracker } from "./lookahead/frameInterval";
 import {
+  HIGH_FRAME_RATE_FPS,
+  REDUCED_SLOT_HEIGHT,
+  SlotHeightGovernor,
+  type SlotHeightChangeReason,
+} from "./lookahead/slotHeightGovernor";
+import {
   defaultWasmBuild,
   importWasmBindings,
   type WasmBindings,
@@ -135,6 +141,14 @@ export type LookaheadUnavailableReason =
   /** The graph carries exact silence while a cross-origin element plays unmuted audio (same cause, detected from the audio side). */
   | "silent-audio-path";
 
+/** A change of the frame-copy height: the governor's decision ("drops", "overflow", "recovered", "frame-rate") or a new pool size ("pool"). */
+export interface SlotHeightChange {
+  /** Media time of the frame being captured when it changed. */
+  mediaTimeSec: number;
+  height: number;
+  reason: SlotHeightChangeReason | "pool";
+}
+
 /** Where the detection p95 behind the lookahead length came from. */
 export type LookaheadLengthSource = "measured" | "stored" | "default";
 
@@ -168,6 +182,10 @@ export interface LookaheadStatus {
   overflowDrops: number;
   /** Passed over on display: the frame callback for their counterpart was skipped, or the delay was shrinking. */
   skippedOnDisplay: number;
+  /** Frame-copy height changes since this source was loaded (see SlotHeightGovernor). */
+  slotHeightChanges: SlotHeightChange[];
+  /** Wall time spent at each frame-copy height since this source was loaded, in ms, keyed by height. */
+  timeAtSlotHeightMs: Record<string, number>;
 }
 
 export interface VertixState {
@@ -227,6 +245,8 @@ export const INITIAL_METRICS: VertixMetrics = {
     droppedFrames: 0,
     overflowDrops: 0,
     skippedOnDisplay: 0,
+    slotHeightChanges: [],
+    timeAtSlotHeightMs: {},
   },
 };
 
@@ -641,6 +661,11 @@ export class VertixEngine {
   private readonly deviceClass = detectDeviceClass();
   private frameBuffer: FrameRingBuffer<FrameSlot> | null = null;
   private slotSize: SlotSize | null = null;
+  private slotHeightGovernor = new SlotHeightGovernor();
+  private slotHeightChanges: SlotHeightChange[] = [];
+  private timeAtSlotHeightMs: Record<string, number> = {};
+  private slotHeightSince: { height: number; atMs: number } | null = null;
+  private lastScoredMediaSec: number | null = null;
   private captureIndex = 0;
   private nextDetectionFrameIndex = FACE_DETECT_INTERVAL;
   private lastCapturedMediaTime: number | null = null;
@@ -932,6 +957,10 @@ export class VertixEngine {
     this.captureIndex = 0;
     this.nextDetectionFrameIndex = FACE_DETECT_INTERVAL;
     this.frameInterval.reset();
+    this.slotHeightGovernor.reset();
+    this.slotHeightChanges = [];
+    this.timeAtSlotHeightMs = {};
+    this.slotHeightSince = null;
     this.displayedMediaTimeSec = null;
     this.meta = null;
     this.lastFrameTime = null;
@@ -1108,6 +1137,36 @@ export class VertixEngine {
     this.sizePool(now, shrinkAt);
   }
 
+  /** Accumulates the time spent at each copy height, and logs height changes. */
+  private trackSlotHeight(height: number, now: number, reason: SlotHeightChange["reason"]): void {
+    const since = this.slotHeightSince;
+    if (since?.height === height) return;
+    if (since) {
+      this.accumulateSlotHeightTime(now);
+      this.slotHeightChanges.push({ mediaTimeSec: this.lastCapturedMediaTime ?? 0, height, reason });
+    }
+    this.slotHeightSince = { height, atMs: now };
+  }
+
+  private accumulateSlotHeightTime(now: number): void {
+    const since = this.slotHeightSince;
+    if (!since) return;
+    this.timeAtSlotHeightMs[since.height] = (this.timeAtSlotHeightMs[since.height] ?? 0) + (now - since.atMs);
+    since.atMs = now;
+  }
+
+  /** Feeds the slot-height governor (a few times a second while lookahead runs); a new decision resizes the copies. */
+  private updateSlotHeight(video: HTMLVideoElement, now: number): void {
+    const buffer = this.frameBuffer;
+    if (this.lookaheadLengthMs === 0 || !buffer) return;
+    const interval = this.knownIntervalSec();
+    const frameRateFps = interval ? (video.playbackRate || 1) / interval : null;
+    const quality = video.getVideoPlaybackQuality?.() ?? null;
+    const reason = this.slotHeightGovernor.update(now, frameRateFps, quality, buffer.overflowDrops);
+    if (reason) this.sizePool(now, now, reason);
+    this.accumulateSlotHeightTime(now);
+  }
+
   /** Media seconds per frame: measured, else the host's hint, else null. */
   private knownIntervalSec(): number | null {
     return this.frameInterval.intervalSec ?? (this.frameRateHintFps !== null ? 1 / this.frameRateHintFps : null);
@@ -1125,13 +1184,15 @@ export class VertixEngine {
    * applies now; a smaller limit from `shrinkAt` (the end of a shrinking
    * ramp), when fewer frames wait.
    */
-  private sizePool(now: number, shrinkAt: number): void {
+  private sizePool(now: number, shrinkAt: number, reason: SlotHeightChange["reason"] = "pool"): void {
     const buffer = this.frameBuffer;
     if (!buffer) return;
     const { w, h } = this.srcDims;
     const neededSlots = slotsForDelay(this.poolDelayFrames());
-    const size = chooseSlotSize(w, h, neededSlots, this.outputHeightOnScreenPx());
+    const heightCap = this.slotHeightGovernor.reduced ? REDUCED_SLOT_HEIGHT : null;
+    const size = chooseSlotSize(w, h, neededSlots, this.outputHeightOnScreenPx(), heightCap);
     this.slotSize = size;
+    this.trackSlotHeight(size.height, now, reason);
     const slots = maxSlotsFor(size, neededSlots);
     if (slots >= buffer.maxSlots || shrinkAt <= now) {
       buffer.setMaxSlots(slots);
@@ -1188,6 +1249,8 @@ export class VertixEngine {
       droppedFrames: buffer ? buffer.overflowDrops + buffer.skippedOnDisplay : 0,
       overflowDrops: buffer?.overflowDrops ?? 0,
       skippedOnDisplay: buffer?.skippedOnDisplay ?? 0,
+      slotHeightChanges: [...this.slotHeightChanges],
+      timeAtSlotHeightMs: { ...this.timeAtSlotHeightMs },
     };
   }
 
@@ -1660,6 +1723,7 @@ export class VertixEngine {
     this.frameInterval.push(metadata.mediaTime);
     if (now - this.lastMetricsPush > 300) {
       this.lastMetricsPush = now;
+      this.updateSlotHeight(video, now);
       if (this.audioMonitor.silentPathSuspected !== this.audioMonitor.checkSilentPath(video, now)) {
         this.refreshLookahead("keep");
       }
@@ -1746,6 +1810,8 @@ export class VertixEngine {
   private captureFrame(video: HTMLVideoElement, metadata: VideoFrameCallbackMetadata, now: number): void {
     this.followFrameRate();
     const presentedAtMs = metadata.expectedDisplayTime ?? now;
+    const rate = video.playbackRate || 1;
+    const intervalSec = this.knownIntervalSec() ?? DEFAULT_FRAME_INTERVAL_MS / 1000;
     const frame = this.bufferFrame(video, metadata.mediaTime, presentedAtMs, false);
     if (this.mode === "9:16") {
       this.hasFrameSinceReset = true;
@@ -1757,19 +1823,27 @@ export class VertixEngine {
           this.benchmarkProbe?.recordSkippedDetection();
         }
       }
-      this.scoreFrameForCut(frame);
+      if (this.shouldScoreForCut(frame.mediaTimeSec, intervalSec, rate)) this.scoreFrameForCut(frame);
     }
 
     this.stopDisplayLoop();
     const delayMs = this.delaySchedule.valueAt(presentedAtMs);
-    const rate = video.playbackRate || 1;
-    const intervalSec = this.knownIntervalSec() ?? DEFAULT_FRAME_INTERVAL_MS / 1000;
     // A quarter frame of slack absorbs rounding in media timestamps.
     const dueUpToSec = metadata.mediaTime - (delayMs / 1000) * rate + intervalSec / 4;
     const due = this.frameBuffer!.takeLatest((f) => f.mediaTimeSec <= dueUpToSec);
     if (due) this.showBufferedFrame(due, now, presentedAtMs - (due.presentedAtMs + delayMs));
     this.applyPendingMaxSlots(now);
     this.armStallWatchdog(intervalSec / rate);
+  }
+
+  /**
+   * Every frame up to HIGH_FRAME_RATE_FPS; above it, a frame at most every
+   * second frame (a cut between two scored frames is found on the second).
+   */
+  private shouldScoreForCut(mediaTimeSec: number, intervalSec: number, rate: number): boolean {
+    const last = this.lastScoredMediaSec;
+    if (rate / intervalSec <= HIGH_FRAME_RATE_FPS + 0.5 || last === null || mediaTimeSec < last) return true;
+    return mediaTimeSec - last >= intervalSec * 1.5;
   }
 
   /** A frame-rate change (another rendition) or the first measured interval moves the length to whole frames of the new rate. */
@@ -1829,6 +1903,7 @@ export class VertixEngine {
   private scoreFrameForCut(frame: BufferedFrame<FrameSlot>): void {
     const worker = this.ensureCutTriggerWorker();
     if (!worker) return;
+    this.lastScoredMediaSec = frame.mediaTimeSec;
     const start = performance.now();
     this.pendingTriggerFrames.set(frame.frameIndex, { mediaTimeSec: frame.mediaTimeSec, capturedAt: start });
     this.triggerSourceCanvas ??= new OffscreenCanvas(TRIGGER_SOURCE_W, TRIGGER_SOURCE_H);
@@ -1889,6 +1964,7 @@ export class VertixEngine {
     this.cutTriggerGeneration += 1;
     this.pendingTriggerFrames.clear();
     this.scoredFrames = [];
+    this.lastScoredMediaSec = null;
     this.cutTriggerWorker?.postMessage({ type: "reset" });
   }
 

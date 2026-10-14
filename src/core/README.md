@@ -168,9 +168,13 @@ dissolve or a layout change lands on the frame it belongs to.
   shrinks with the delay or the frame rate without dropping frames; when
   it needs a smaller copy size, new slots get it and old-size slots are
   freed as their frames are shown (within one delay length, outside the
-  budget). Copies are drawn from the video
+  budget). Above 30 fps, while the video element drops more than 5% of
+  its frames over 3 s or the buffer overflows, new copies are 540 lines
+  high; full height returns after 10 s under 2%
+  (`lookahead/slotHeightGovernor.ts`). Copies are drawn from the video
   synchronously, so no decoder frame is held.
-- **Cut trigger**: every buffered frame is scaled on the GPU to 160×120
+- **Cut trigger**: every buffered frame (above 30 fps, at most every
+  second frame) is scaled on the GPU to 160×120
   and transferred (no readback on the main thread) to
   `cutTriggerWorker.ts`, which scores it at 64×48; a likely cut starts a
   detection on that frame at once instead of at the next 5-frame tick. The WASM detector still

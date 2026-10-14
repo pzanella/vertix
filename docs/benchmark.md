@@ -342,6 +342,13 @@ lookaheadComparison, precisionWarnings, results[] }`. Each result contains `summ
         `skippedOnDisplay` (a buffered frame passed over because the frame
         callback of its counterpart was skipped, or while the delay
         shrinks); `droppedFrames` is their sum.
+      - `slotHeightChanges` (`{ mediaTimeSec, height, reason }` per change
+        of the frame-copy height; `reason` is `drops`, `overflow`,
+        `recovered`, `frame-rate` from the slot-height governor, or `pool`
+        for a new pool size) and `timeAtSlotHeightMs` (wall time at each
+        height, keyed by height). Above 30 fps the copies drop to 540 lines
+        while the video element drops more than 5% of its frames over 3 s
+        or the buffer overflows, and go back after 10 s under 2%.
     - `summary.cutsShown[]`: every applied cut decision,
       `{ cutMediaTimeSec, shownMediaTimeSec, framesLate, source }`, where
       `framesLate` counts displayed frames from the cut frame up to the one

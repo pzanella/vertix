@@ -276,6 +276,10 @@ export interface BenchmarkLookahead {
   overflowDrops: number;
   /** Added within v5: frames passed over on display, following a skipped frame callback or a shrinking delay. */
   skippedOnDisplay: number;
+  /** Added within v5: frame-copy height changes, `{ mediaTimeSec, height, reason }`. */
+  slotHeightChanges: { mediaTimeSec: number; height: number; reason: string }[];
+  /** Added within v5: wall time at each frame-copy height, in ms, keyed by height. */
+  timeAtSlotHeightMs: Record<string, number>;
 }
 
 export interface BenchmarkClipResult {

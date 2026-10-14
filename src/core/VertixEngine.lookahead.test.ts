@@ -63,12 +63,15 @@ vi.stubGlobal(
     }
   }
 );
+const workerMessages: { type: string }[] = [];
 vi.stubGlobal(
   "Worker",
   class {
     onmessage = null;
     onerror = null;
-    postMessage() {}
+    postMessage(message: { type: string }) {
+      workerMessages.push(message);
+    }
     terminate() {}
   }
 );
@@ -102,6 +105,9 @@ class FakeVideo {
   mediaTime = 0;
   clockMs = 0;
   presented = 0;
+  droppedVideoFrames = 0;
+  /** Share of frames the video element reports as dropped (getVideoPlaybackQuality). */
+  dropShare = 0;
   private nextId = 1;
   private readonly pending = new Map<number, FrameCallback>();
   private readonly listeners = new Map<string, Set<() => void>>();
@@ -133,8 +139,13 @@ class FakeVideo {
     return this.mediaTime;
   }
 
+  getVideoPlaybackQuality() {
+    return { droppedVideoFrames: this.droppedVideoFrames, totalVideoFrames: this.presented };
+  }
+
   /** Advances one frame without running any frame callback (a dropped frame / skipped callback). */
   skipFrame(): void {
+    this.droppedVideoFrames += this.dropShare;
     this.mediaTime = Math.round((this.mediaTime + 1 / this.fps) * 1e6) / 1e6;
     this.clockMs += 1000 / this.fps / this.playbackRate;
     this.presented += 1;
@@ -384,6 +395,48 @@ describe("VertixEngine lookahead", () => {
     internals.rampLookaheadLength({ frames: delayFrames * 2, lengthMs });
     expect(internals.frameBuffer!.maxSlots).toBe(slotsForDelay(delayFrames * 2));
     expect(audio.rampOutputDelay).not.toHaveBeenCalled();
+    engine.destroy();
+  });
+
+  it("at 50 fps, reduces the copies to 540 lines while the video element drops frames, and logs it", () => {
+    const { engine, video, play } = setUp();
+    video.fps = 50;
+    play(100);
+    expect(engine.getLookaheadStatus().slotHeight).toBe(720);
+    const skippedBefore = engine.getLookaheadStatus().skippedOnDisplay;
+    video.dropShare = 0.1;
+    play(250);
+    const status = engine.getLookaheadStatus();
+    expect(status.slotHeight).toBe(540);
+    expect(status.slotHeightChanges).toEqual([{ mediaTimeSec: expect.any(Number), height: 540, reason: "drops" }]);
+    expect(status.timeAtSlotHeightMs[720]).toBeGreaterThan(2000);
+    expect(status.timeAtSlotHeightMs[540]).toBeGreaterThan(0);
+    // The switch itself loses no frame.
+    expect(status.overflowDrops).toBe(0);
+    expect(status.skippedOnDisplay).toBe(skippedBefore);
+    engine.destroy();
+  });
+
+  it("keeps full-size copies at 25 fps even while frames are dropped", () => {
+    const { engine, video, play } = setUp();
+    video.dropShare = 0.2;
+    play(300);
+    expect(engine.getLookaheadStatus()).toMatchObject({ slotHeight: 720, slotHeightChanges: [] });
+    engine.destroy();
+  });
+
+  it("sends every frame to the cut trigger up to 30 fps, every second frame above", () => {
+    const { engine, video, play } = setUp();
+    const scored = () => workerMessages.filter((m) => m.type === "score").length;
+    play(20);
+    let before = scored();
+    play(40);
+    expect(scored() - before).toBe(40);
+    video.fps = 50;
+    play(20);
+    before = scored();
+    play(40);
+    expect(scored() - before).toBe(20);
     engine.destroy();
   });
 
