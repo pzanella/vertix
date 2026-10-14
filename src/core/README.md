@@ -58,7 +58,7 @@ engine.destroy();
 | `onMetricsUpdate(listener)` | Subscribe to live telemetry (FPS, detection confidence, motion, ...) — a few times a second. Fires once immediately with the current values, then on every update. Returns an unsubscribe function. |
 | `onStateChange(listener)` | Subscribe to everything else that changes (mode, video dimensions, speaker count, whether a transition is in progress, whether WASM has finished loading). Same immediate-fire-then-updates contract. Returns an unsubscribe function. |
 | `getMetrics()` / `getState()` | Read the current snapshot without subscribing. |
-| `setLookaheadEnabled(enabled)` | Lookahead on (default) or off at runtime: see [Lookahead](#lookahead). |
+| `setLookaheadEnabled(enabled)` | Lookahead on or off (default) at runtime: see [Lookahead](#lookahead). |
 | `getLookaheadStatus()` | Whether lookahead runs, its length, why it is unavailable, buffer size and memory. |
 | `getDisplayedMediaTime()` | Media time of the frame on screen (behind `video.currentTime` by the lookahead while playing). |
 | `setBenchmarkProbe(probe \| null)` | Benchmark mode only: report per-frame and per-detection timings to a `BenchmarkProbe` (e.g. a `BenchmarkRecorder`). `null` (the default) turns it off. See `docs/benchmark.md`. |
@@ -134,7 +134,7 @@ not the layout math itself.
 
 ## Lookahead
 
-With lookahead on (the default), every decoded frame is copied into a ring
+With lookahead on (off by default), every decoded frame is copied into a ring
 of `OffscreenCanvas` slots (`lookahead/frameRingBuffer.ts`) and drawn by a
 `requestAnimationFrame` loop at its own display time plus the lookahead
 length. The audio goes through the same delay (`audioActivity.ts`: a

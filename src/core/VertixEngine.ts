@@ -185,7 +185,7 @@ export const INITIAL_METRICS: VertixMetrics = {
   longTaskHistory: [],
   displayedMediaTimeSec: null,
   lookahead: {
-    enabled: true,
+    enabled: false,
     unavailableReason: null,
     lengthMs: 0,
     slotWidth: null,
@@ -573,7 +573,8 @@ export class VertixEngine {
 
   // Lookahead: the output is shown lookaheadLengthMs behind the decoded
   // frame, so each frame's detection result is in before it is displayed.
-  private lookaheadEnabled = true;
+  // Off by default until it has been checked on phones; the dashboard switch turns it on.
+  private lookaheadEnabled = false;
   private lookaheadUnavailable: LookaheadUnavailableReason | null = null;
   private lookaheadLengthMs = 0;
   private sourceTainted = false;

@@ -186,6 +186,7 @@ function setUp() {
   const video = new FakeVideo();
   const canvas = { width: 0, height: 0, getContext: fake2dContext } as unknown as HTMLCanvasElement;
   engine.attach(video as unknown as HTMLVideoElement, canvas);
+  engine.setLookaheadEnabled(true);
   const internals = engine as unknown as EngineInternals;
   /** A cut detection result for the frame at `mediaTimeSec`, with one face. */
   const detectCut = (mediaTimeSec: number) =>
@@ -213,7 +214,22 @@ describe("VertixEngine lookahead", () => {
   });
   afterEach(() => pendingRefresh.clear());
 
-  it("is on by default and delays the audio by its length", () => {
+  it("is off by default", () => {
+    const engine = new VertixEngine();
+    engine.attach(
+      new FakeVideo() as unknown as HTMLVideoElement,
+      {
+        width: 0,
+        height: 0,
+        getContext: fake2dContext,
+      } as unknown as HTMLCanvasElement
+    );
+    expect(engine.getLookaheadStatus()).toMatchObject({ enabled: false, lengthMs: 0 });
+    expect(engine.getMetrics().lookahead.enabled).toBe(false);
+    engine.destroy();
+  });
+
+  it("when switched on, delays the audio by its length", () => {
     const { engine } = setUp();
     const { enabled, lengthMs, unavailableReason } = engine.getLookaheadStatus();
     expect({ enabled, unavailableReason }).toEqual({ enabled: true, unavailableReason: null });

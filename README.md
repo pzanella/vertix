@@ -261,8 +261,8 @@ Sourced from [Pexels](https://www.pexels.com/), free to use under the
 ![Vertix frame processing pipeline: a decoded video frame flows through pane smoothing, cross-dissolve, and canvas draw every rendered frame, while face detection, filtering, debounce, and layout decision run every Nth frame and feed new pane targets back into the smoothing step](docs/architecture-pipeline.svg)
 
 1. `VertixEngine.attach(video, canvas)` starts a frame loop driven by
-   `requestVideoFrameCallback`. By default (lookahead on) each decoded
-   frame is copied into a short buffer and drawn a fixed delay later
+   `requestVideoFrameCallback`. With lookahead on (off by default; the
+   dashboard has a switch) each decoded frame is copied into a short buffer and drawn a fixed delay later
    (about 0.17 s on desktop, 0.3 s on a phone), with the audio delayed by
    the same amount through Web Audio, so every frame's detection result is
    known before it is shown and a crop change lands on the exact frame of

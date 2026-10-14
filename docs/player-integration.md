@@ -106,7 +106,8 @@ turns lookahead off, so the delay never causes silence.
 
 ## Lookahead and the player's time display
 
-With lookahead on (the default), the canvas shows each frame a fixed
+Lookahead is off by default; `engine.setLookaheadEnabled(true)` turns it
+on. With lookahead on, the canvas shows each frame a fixed
 delay after the video element decodes it (about 0.17 s on desktop, 0.3 s
 on a phone; `engine.getLookaheadStatus().lengthMs`), and the audio is
 delayed by the same amount. The engine still never controls playback, so
@@ -115,8 +116,7 @@ native controls) runs ahead of the picture by that delay while playing,
 and matches it again once paused (the buffer drains to the paused frame).
 A host that draws its own controls can show
 `engine.getDisplayedMediaTime()` instead, as this app's scrub bar does.
-Call `engine.setLookaheadEnabled(false)` to draw frames as they are
-decoded.
+With it off, frames are drawn as they are decoded.
 
 ## hls.js / Video.js / a plain `<video src>`
 
