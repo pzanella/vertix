@@ -32,6 +32,7 @@ export class AudioActivityMonitor {
   private outputDelay = 0;
   private exactSilenceSinceMs: number | null = null;
   private _silentPathSuspected = false;
+  private heardSoundOnSource = false;
   private sourceVideo: HTMLVideoElement | null = null;
   private sourceNode: MediaElementAudioSourceNode | null = null;
   private data: Uint8Array | null = null;
@@ -152,9 +153,11 @@ export class AudioActivityMonitor {
    * Only judged for a cross-origin http(s) source (a same-origin, blob or
    * MediaSource one can't be tainted, and a silent audio track — every
    * sample clip has one — must not count), while `video` plays unmuted and
-   * reports decoded audio. Cleared by any non-zero sample.
+   * reports decoded audio. Once a non-zero sample was seen on the source,
+   * the path is known to work and silence is never judged again for it.
    */
   checkSilentPath(video: HTMLVideoElement, nowMs: number): boolean {
+    if (this.heardSoundOnSource) return false;
     if (!this._available || !this.analyser || !this.data) return this._silentPathSuspected;
     // A suspended context reads as zeros too, but that is a different (and
     // temporary) state: nothing plays at all until it resumes.
@@ -166,6 +169,7 @@ export class AudioActivityMonitor {
     this.analyser.getByteTimeDomainData(this.data);
     const exactSilence = this.data.every((v) => v === 128);
     if (!exactSilence) {
+      this.heardSoundOnSource = true;
       this.exactSilenceSinceMs = null;
       this._silentPathSuspected = false;
     } else {
@@ -175,10 +179,11 @@ export class AudioActivityMonitor {
     return this._silentPathSuspected;
   }
 
-  /** Forgets the silent-path verdict: a new source is judged on its own. */
+  /** Forgets the silent-path verdict and whether sound was heard: a new source is judged on its own. */
   resetSilentPath(): void {
     this.exactSilenceSinceMs = null;
     this._silentPathSuspected = false;
+    this.heardSoundOnSource = false;
   }
 
   detach(): void {
@@ -194,8 +199,7 @@ export class AudioActivityMonitor {
     this.analyser = null;
     this.delay = null;
     this.gain = null;
-    this.exactSilenceSinceMs = null;
-    this._silentPathSuspected = false;
+    this.resetSilentPath();
     this.sourceNode = null;
     this.sourceVideo = null;
     this.data = null;

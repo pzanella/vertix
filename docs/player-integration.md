@@ -100,8 +100,8 @@ it does read the audio: `VertixEngine` routes the element's audio through
 its own Web Audio graph (`src/core/audioActivity.ts`), for the
 voice-activity signal and to delay the audio as much as the lookahead
 delays the picture. When it detects a cross-origin source without CORS
-(a tainted canvas, or exact silence from a cross-origin element that
-plays audio) it
+(a tainted canvas, or exact silence for 3 s from a cross-origin element
+that plays audio and has never produced sound) it
 turns lookahead off, so the delay never causes silence.
 
 ## Lookahead and the player's time display

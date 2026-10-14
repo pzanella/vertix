@@ -158,8 +158,8 @@ dissolve or a layout change lands on the frame it belongs to.
   the biggest frame-to-frame jump.
 - **Unavailable**: without a Web Audio graph (the element's own audio
   could not be delayed), or for a cross-origin source without CORS (a
-  tainted canvas, or exact silence from a cross-origin element that is
-  playing audio),
+  tainted canvas, or exact silence for 3 s from a cross-origin element
+  that is playing audio and has never produced sound),
   lookahead is forced off and reported in `getLookaheadStatus()`.
 - **Playback events**: pause drains the buffer (video and audio stop
   together, on the frame at `currentTime`); play and seek refill it (the
