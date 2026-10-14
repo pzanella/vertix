@@ -17,8 +17,9 @@
  */
 // Longest output delay the graph supports (lookahead never exceeds 600 ms).
 const MAX_OUTPUT_DELAY_SEC = 1;
-// Gain ramp around an output-delay change, so the jump is a short silence, not a click.
-const MUTE_RAMP_SEC = 0.005;
+// Gain fade around an output-delay jump, so it is a short silence, not a
+// click: 15 ms is well above the few ms where a fade becomes audible as one.
+const MUTE_RAMP_SEC = 0.015;
 // Exact digital silence for this long, while the element is playing
 // unmuted and has decoded audio, reads as a tainted (cross-origin, no CORS)
 // source rather than a quiet passage.
@@ -118,18 +119,38 @@ export class AudioActivityMonitor {
   };
 
   /**
-   * Changes the output delay without replaying or clicking: the output
-   * fades out, the delay changes, and the output stays silent until audio
-   * that entered after the change comes out (`seconds` later).
+   * Jumps to a new output delay without replaying or clicking: the output
+   * fades out, the delay jumps (any ramp in progress ends), and the output
+   * stays silent until audio that entered after the jump comes out
+   * (`seconds` later). Also the way to silence the delay line after a seek.
    */
   setOutputDelay(seconds: number): void {
     const delaySec = Math.min(MAX_OUTPUT_DELAY_SEC, Math.max(0, seconds));
-    if (delaySec === this.outputDelay) return;
+    if (delaySec === 0 && this.outputDelay === 0) return;
     this.outputDelay = delaySec;
     if (!this.ctx || !this.delay) return;
+    const delayTime = this.delay.delayTime;
     this.muteFor(delaySec, () => {
-      this.delay!.delayTime.setValueAtTime(delaySec, this.ctx!.currentTime + MUTE_RAMP_SEC);
+      const at = this.ctx!.currentTime + MUTE_RAMP_SEC;
+      delayTime.cancelScheduledValues(0);
+      delayTime.setValueAtTime(delaySec, at);
     });
+  }
+
+  /**
+   * Moves the output delay to `seconds` over `durationSec` without a gap:
+   * the audio plays slightly slower (delay growing) or faster (shrinking)
+   * during the ramp, which the lookahead keeps within 5%.
+   */
+  rampOutputDelay(seconds: number, durationSec: number): void {
+    const delaySec = Math.min(MAX_OUTPUT_DELAY_SEC, Math.max(0, seconds));
+    this.outputDelay = delaySec;
+    if (!this.ctx || !this.delay) return;
+    const delayTime = this.delay.delayTime;
+    const t = this.ctx.currentTime;
+    delayTime.cancelScheduledValues(t);
+    delayTime.setValueAtTime(delayTime.value, t);
+    delayTime.linearRampToValueAtTime(delaySec, t + Math.max(durationSec, 0.001));
   }
 
   /** Silences the output for `seconds` (plus short ramps), e.g. while the delay line still holds audio from before a seek. */

@@ -37,51 +37,81 @@ export function detectDeviceClass(): DeviceClass {
   return coarse && navigator.maxTouchPoints > 0 ? "mobile" : "desktop";
 }
 
+export interface FrameAlignedDelay {
+  /** Whole frames of delay. */
+  frames: number;
+  /** frames × the frame interval in wall time. */
+  lengthMs: number;
+}
+
+/**
+ * Rounds a lookahead length up to whole frames (down if that would pass
+ * MAX_LOOKAHEAD_MS), so each displayed frame is exactly the one decoded
+ * `frames` frames earlier and appears together with a decoded frame.
+ */
+export function alignToFrames(
+  lengthMs: number,
+  frameIntervalMediaSec: number,
+  playbackRate: number
+): FrameAlignedDelay {
+  const frameWallMs = (frameIntervalMediaSec * 1000) / (playbackRate || 1);
+  let frames = Math.max(1, Math.ceil(lengthMs / frameWallMs - 1e-6));
+  if (frames * frameWallMs > MAX_LOOKAHEAD_MS + 1e-6) frames = Math.max(1, Math.floor(MAX_LOOKAHEAD_MS / frameWallMs));
+  return { frames, lengthMs: frames * frameWallMs };
+}
+
 /** Total memory the frame buffer may use (96 MiB). */
 export const FRAME_BUFFER_BUDGET_BYTES = 96 * 1024 * 1024;
 const BYTES_PER_PIXEL = 4;
-// Slots beyond length × fps: the frame being drawn, the one being captured,
-// and one for timing jitter.
-const SLOT_HEADROOM = 3;
 const MAX_SLOTS = 64;
 // Smaller sizes tried, in order, when the source size does not fit.
 const FALLBACK_SLOT_HEIGHTS = [1080, 720, 540];
+/**
+ * A crop never shows more than this many source pixels per output pixel of
+ * height: a two-speaker pane shows about a third of the source height in
+ * half the output height (1.5x); a single-speaker crop shows less.
+ */
+export const DISPLAY_CAP_FACTOR = 1.5;
+
+/** Slots for a delay of `delayFrames` frames: those frames, the frame being captured, and one spare for a late callback. */
+export function slotsForDelay(delayFrames: number): number {
+  return delayFrames + 2;
+}
 
 export interface SlotSize {
   width: number;
   height: number;
-  /** Slots the lookahead needs at the assumed frame rate and speed. */
-  neededSlots: number;
-  /** Pool limit: as many as fit the budget (for higher frame rates or speeds), at least neededSlots. */
-  maxSlots: number;
   bytesPerSlot: number;
 }
 
 /**
- * Picks the largest frame size (source size first, never upscaled) at which
- * the frames the lookahead needs fit FRAME_BUFFER_BUDGET_BYTES.
+ * The largest frame-copy size, never above the source, never above what
+ * the output canvas can show (DISPLAY_CAP_FACTOR × its height on screen in
+ * device pixels, when known), at which `neededSlots` copies fit
+ * FRAME_BUFFER_BUDGET_BYTES.
  */
 export function chooseSlotSize(
   srcW: number,
   srcH: number,
-  lengthMs: number,
-  fps: number,
-  playbackRate: number
+  neededSlots: number,
+  displayHeightPx: number | null
 ): SlotSize {
-  const neededSlots = Math.ceil((lengthMs / 1000) * fps * Math.max(1, playbackRate)) + SLOT_HEADROOM;
-  const heights = [srcH, ...FALLBACK_SLOT_HEIGHTS.filter((h) => h < srcH)];
+  const displayCap = displayHeightPx && displayHeightPx > 0 ? Math.ceil(displayHeightPx * DISPLAY_CAP_FACTOR) : srcH;
+  const top = Math.min(srcH, displayCap);
+  const heights = [top, ...FALLBACK_SLOT_HEIGHTS.filter((h) => h < top)];
   const sizeAt = (height: number) => {
     const width = Math.max(2, Math.round((srcW * height) / srcH / 2) * 2);
     return { width, height, bytesPerSlot: width * height * BYTES_PER_PIXEL };
   };
-  const fitting = heights.map(sizeAt).find((s) => s.bytesPerSlot * neededSlots <= FRAME_BUFFER_BUDGET_BYTES);
-  const size = fitting ?? sizeAt(heights[heights.length - 1]);
-  const fitInBudget = Math.floor(FRAME_BUFFER_BUDGET_BYTES / size.bytesPerSlot);
-  return {
-    ...size,
-    neededSlots,
-    maxSlots: Math.min(MAX_SLOTS, Math.max(neededSlots, fitInBudget)),
-  };
+  return (
+    heights.map(sizeAt).find((s) => s.bytesPerSlot * neededSlots <= FRAME_BUFFER_BUDGET_BYTES) ??
+    sizeAt(heights[heights.length - 1])
+  );
+}
+
+/** Pool limit for `neededSlots` copies of `size`: no more than needed, and no more than the budget holds. */
+export function maxSlotsFor(size: SlotSize, neededSlots: number): number {
+  return Math.max(1, Math.min(MAX_SLOTS, neededSlots, Math.floor(FRAME_BUFFER_BUDGET_BYTES / size.bytesPerSlot)));
 }
 
 /** Rolling sample window for a p95 that adapts to this device. */

@@ -1,14 +1,14 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { VertixEngine } from "./VertixEngine";
+import { VertixEngine, getActiveWasmBuild } from "./VertixEngine";
 import type { SceneCutScores } from "./layoutEngine";
 import type { BenchmarkProbe } from "./bench/BenchmarkRecorder";
 import type { ScoredFrame } from "./lookahead/cutTrigger";
 import type { DetectionLatencyTracker } from "./lookahead/detectionLatency";
-import { getActiveWasmBuild } from "./VertixEngine";
+import { slotsForDelay } from "./lookahead/lookaheadSizing";
 
 const audio = vi.hoisted(() => ({
   setOutputDelay: vi.fn(),
-  muteFor: vi.fn(),
+  rampOutputDelay: vi.fn(),
 }));
 
 vi.mock("./wasm/simd/wasm.js", () => ({ default: () => new Promise(() => {}), ReframeEngine: class {} }));
@@ -29,9 +29,10 @@ vi.mock("./audioActivity", () => ({
     setOutputDelay(seconds: number) {
       audio.setOutputDelay(seconds);
     }
-    muteFor(seconds: number) {
-      audio.muteFor(seconds);
+    rampOutputDelay(seconds: number, durationSec: number) {
+      audio.rampOutputDelay(seconds, durationSec);
     }
+    muteFor() {}
     resetSilentPath() {}
   },
 }));
@@ -54,6 +55,9 @@ vi.stubGlobal(
     getContext() {
       return fake2dContext();
     }
+    transferToImageBitmap() {
+      return { close() {} };
+    }
   }
 );
 vi.stubGlobal(
@@ -67,7 +71,7 @@ vi.stubGlobal(
 );
 vi.stubGlobal("createImageBitmap", () => new Promise(() => {}));
 
-// Manual requestAnimationFrame: runRefresh(now) runs what is pending, like one screen refresh.
+// Manual requestAnimationFrame: runRefresh() runs what is pending, like one screen refresh.
 const pendingRefresh = new Map<number, FrameRequestCallback>();
 let nextRefreshId = 1;
 vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => {
@@ -76,18 +80,13 @@ vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => {
   return id;
 });
 vi.stubGlobal("cancelAnimationFrame", (id: number) => pendingRefresh.delete(id));
-function runRefresh(now: number) {
-  const callbacks = [...pendingRefresh.values()];
-  pendingRefresh.clear();
-  for (const callback of callbacks) callback(now);
-}
 
 type FrameCallback = (now: number, metadata: VideoFrameCallbackMetadata) => void;
 
-const FRAME_MS = 40;
-const REFRESH_MS = 1000 / 60;
-
-/** A 25 fps video whose frame N is decoded at N × 40 ms and due on screen at the same time. */
+/**
+ * A video with its own clock (also performance.now()): each presented frame
+ * advances media time by 1/fps and the clock by that over playbackRate.
+ */
 class FakeVideo {
   paused = false;
   ended = false;
@@ -96,7 +95,10 @@ class FakeVideo {
   playbackRate = 1;
   videoWidth = 1280;
   videoHeight = 720;
-  frame = 0;
+  fps = 25;
+  mediaTime = 0;
+  clockMs = 0;
+  presented = 0;
   private nextId = 1;
   private readonly pending = new Map<number, FrameCallback>();
   private readonly listeners = new Map<string, Set<() => void>>();
@@ -124,29 +126,33 @@ class FakeVideo {
     this.listeners.get(type)?.forEach((listener) => listener());
   }
 
-  get mediaTime(): number {
-    return this.frame / 25;
+  /** Advances one frame without running any frame callback (a dropped frame / skipped callback). */
+  skipFrame(): void {
+    this.mediaTime = Math.round((this.mediaTime + 1 / this.fps) * 1e6) / 1e6;
+    this.clockMs += 1000 / this.fps / this.playbackRate;
+    this.presented += 1;
   }
 
   presentFrame(): void {
-    this.frame += 1;
-    const now = this.frame * FRAME_MS;
+    this.skipFrame();
     const callbacks = [...this.pending.values()];
     this.pending.clear();
     const metadata = {
       width: 1280,
       height: 720,
       mediaTime: this.mediaTime,
-      presentedFrames: this.frame,
-      expectedDisplayTime: now,
+      presentedFrames: this.presented,
+      expectedDisplayTime: this.clockMs,
     } as VideoFrameCallbackMetadata;
-    for (const callback of callbacks) callback(now, metadata);
+    for (const callback of callbacks) callback(this.clockMs, metadata);
   }
 }
 
 interface EngineInternals {
   scoredFrames: ScoredFrame[];
   detectionLatency: DetectionLatencyTracker;
+  adoptMeasuredLength(build: string): void;
+  frameBuffer: { maxSlots: number; allocatedSlots: number } | null;
   processDetectionResult(
     facesFlat: Float64Array,
     sceneCut: SceneCutScores,
@@ -184,90 +190,162 @@ const LEFT_FACE = new Float64Array([0.3, 0.5, 0.2, 0.2, 0, 0.9, 0]);
 const CUT: SceneCutScores = { hist: 0.5, grid: 0.5, isCut: true };
 const NO_CUT: SceneCutScores = { hist: 0, grid: 0, isCut: false };
 
-function setUp() {
+function fakeCanvas(): HTMLCanvasElement {
+  return { width: 0, height: 0, clientHeight: 0, getContext: fake2dContext } as unknown as HTMLCanvasElement;
+}
+
+function setUp({ lookahead = true } = {}) {
   const engine = new VertixEngine();
   const video = new FakeVideo();
-  const canvas = { width: 0, height: 0, getContext: fake2dContext } as unknown as HTMLCanvasElement;
-  engine.attach(video as unknown as HTMLVideoElement, canvas);
-  engine.setLookaheadEnabled(true);
+  vi.spyOn(performance, "now").mockImplementation(() => video.clockMs);
+  engine.attach(video as unknown as HTMLVideoElement, fakeCanvas());
+  if (lookahead) engine.setLookaheadEnabled(true);
   const internals = engine as unknown as EngineInternals;
-  /** A cut detection result for the frame at `mediaTimeSec`, with one face. */
-  const detectCut = (mediaTimeSec: number) =>
-    internals.processDetectionResult(LEFT_FACE, CUT, null, mediaTimeSec, 1280, 720, 405, 720, "worker", 1);
-  /** A plain (no cut) detection result for the frame at `mediaTimeSec`, with one face. */
-  const detect = (mediaTimeSec: number) =>
-    internals.processDetectionResult(LEFT_FACE, NO_CUT, null, mediaTimeSec, 1280, 720, 405, 720, "worker", 1);
-  /** Runs screen refreshes up to `untilMs`, returning the media time on screen after each one. */
-  const refreshUntil = (fromMs: number, untilMs: number) => {
+  const result = (sceneCut: SceneCutScores) => (mediaTimeSec: number) =>
+    internals.processDetectionResult(LEFT_FACE, sceneCut, null, mediaTimeSec, 1280, 720, 405, 720, "worker", 1);
+  /** Presents `count` frames, returning the media time on screen after each. */
+  const play = (count: number) => {
     const shown: (number | null)[] = [];
-    for (let t = fromMs; t <= untilMs; t += REFRESH_MS) {
-      runRefresh(t);
+    for (let i = 0; i < count; i++) {
+      video.presentFrame();
       shown.push(engine.getDisplayedMediaTime());
     }
     return shown;
   };
-  return { engine, video, internals, detectCut, detect, refreshUntil };
+  const runRefresh = () => {
+    const callbacks = [...pendingRefresh.values()];
+    pendingRefresh.clear();
+    for (const callback of callbacks) callback(video.clockMs);
+  };
+  return { engine, video, internals, detectCut: result(CUT), detect: result(NO_CUT), play, runRefresh };
 }
+
+/** Rounds to microseconds: media times built by repeated addition. */
+const us = (sec: number | null) => (sec === null ? null : Math.round(sec * 1e6) / 1e6);
 
 describe("VertixEngine lookahead", () => {
   beforeEach(() => {
     audio.setOutputDelay.mockClear();
-    audio.muteFor.mockClear();
+    audio.rampOutputDelay.mockClear();
     pendingRefresh.clear();
   });
-  afterEach(() => pendingRefresh.clear());
+  afterEach(() => {
+    pendingRefresh.clear();
+    vi.restoreAllMocks();
+  });
 
   it("is off by default", () => {
-    const engine = new VertixEngine();
-    engine.attach(
-      new FakeVideo() as unknown as HTMLVideoElement,
-      {
-        width: 0,
-        height: 0,
-        getContext: fake2dContext,
-      } as unknown as HTMLCanvasElement
-    );
+    const { engine } = setUp({ lookahead: false });
     expect(engine.getLookaheadStatus()).toMatchObject({ enabled: false, lengthMs: 0 });
     expect(engine.getMetrics().lookahead.enabled).toBe(false);
     engine.destroy();
   });
 
-  it("when switched on, delays the audio by its length", () => {
+  it("when switched on, delays video and audio by a whole number of frames", () => {
     const { engine } = setUp();
-    const { enabled, lengthMs, unavailableReason } = engine.getLookaheadStatus();
+    const { enabled, lengthMs, delayFrames, unavailableReason } = engine.getLookaheadStatus();
     expect({ enabled, unavailableReason }).toEqual({ enabled: true, unavailableReason: null });
+    expect(lengthMs).toBe(delayFrames * 40);
     expect(lengthMs).toBeGreaterThanOrEqual(120);
     expect(audio.setOutputDelay).toHaveBeenLastCalledWith(lengthMs / 1000);
     engine.destroy();
   });
 
-  it("shows a frame only once its display time plus the lookahead has come", () => {
-    const { engine, video, refreshUntil } = setUp();
-    const lengthMs = engine.getLookaheadStatus().lengthMs;
-    video.presentFrame();
-    const dueMs = FRAME_MS + lengthMs;
-    expect(refreshUntil(FRAME_MS, dueMs - 2 * REFRESH_MS).every((t) => t === null)).toBe(true);
-    refreshUntil(dueMs - REFRESH_MS, dueMs);
-    expect(engine.getDisplayedMediaTime()).toBe(video.mediaTime);
+  it("shows each frame exactly delayFrames frames after it was decoded, from the frame callback", () => {
+    const { engine, video, play } = setUp();
+    const { delayFrames } = engine.getLookaheadStatus();
+    const shown = play(delayFrames + 10);
+    expect(shown.slice(0, delayFrames).every((t) => t === null)).toBe(true);
+    expect(us(shown[delayFrames])).toBe(us(1 / 25));
+    expect(us(engine.getDisplayedMediaTime())).toBe(us(video.mediaTime - delayFrames / 25));
+    expect(pendingRefresh.size).toBe(0);
+    engine.destroy();
+  });
+
+  it("stays in sync by media time when a frame callback is skipped", () => {
+    const { engine, video, play } = setUp();
+    const { delayFrames } = engine.getLookaheadStatus();
+    play(delayFrames + 5);
+    video.skipFrame();
+    play(1);
+    expect(us(engine.getDisplayedMediaTime())).toBe(us(video.mediaTime - delayFrames / 25));
+    play(3);
+    expect(us(engine.getDisplayedMediaTime())).toBe(us(video.mediaTime - delayFrames / 25));
+    engine.destroy();
+  });
+
+  it("follows a frame-rate change with a ramp: no flush, never backwards, then whole frames of the new rate", () => {
+    const { engine, video, play } = setUp();
+    play(30);
+    const before = engine.getLookaheadStatus();
+    video.fps = 50;
+    const shown = play(400).filter((t): t is number => t !== null);
+    for (let i = 1; i < shown.length; i++) expect(shown[i]).toBeGreaterThanOrEqual(shown[i - 1]);
+    const after = engine.getLookaheadStatus();
+    expect(after.lengthMs).toBe(after.delayFrames * 20);
+    // Rounded up to whole 25 fps frames before, whole 50 fps frames now: at most one old frame apart.
+    expect(Math.abs(after.lengthMs - before.lengthMs)).toBeLessThanOrEqual(40);
+    expect(audio.setOutputDelay).toHaveBeenCalledTimes(1);
+    expect(us(engine.getDisplayedMediaTime())).toBe(us(video.mediaTime - after.delayFrames / 50));
+    engine.destroy();
+  });
+
+  it("moves to a measured length without a flush, a gap or a stale frame, and resizes the pool", () => {
+    const { engine, video, internals, play } = setUp();
+    play(40);
+    const before = engine.getLookaheadStatus();
+    expect(before.lengthSource).toBe("default");
+    const build = getActiveWasmBuild().variant;
+    for (let i = 0; i < 12; i++) internals.detectionLatency.record(build, 250, 3000 + i * 200, 20 + i);
+    internals.adoptMeasuredLength(build);
+    const after = engine.getLookaheadStatus();
+    expect(after).toMatchObject({ lengthSource: "measured", detectionP95Ms: 250 });
+    expect(after.lengthMs).toBeGreaterThan(before.lengthMs);
+    expect(audio.rampOutputDelay.mock.lastCall![0]).toBeCloseTo(after.lengthMs / 1000, 6);
+    expect(audio.setOutputDelay).toHaveBeenCalledTimes(1);
+    expect(internals.frameBuffer!.maxSlots).toBe(slotsForDelay(after.delayFrames));
+
+    const shown = play(200).filter((t): t is number => t !== null);
+    for (let i = 1; i < shown.length; i++) expect(shown[i]).toBeGreaterThanOrEqual(shown[i - 1]);
+    // While the delay grows, a frame is held now and then, never for long.
+    let longestHold = 0;
+    for (let i = 1, run = 0; i < shown.length; i++) {
+      run = shown[i] === shown[i - 1] ? run + 1 : 0;
+      longestHold = Math.max(longestHold, run);
+    }
+    expect(longestHold).toBeLessThanOrEqual(1);
+    expect(us(engine.getDisplayedMediaTime())).toBe(us(video.mediaTime - after.delayFrames / 25));
+    expect(engine.getLookaheadStatus().droppedFrames).toBe(0);
+    engine.destroy();
+  });
+
+  it("shrinks the pool once a shrinking ramp is over", () => {
+    const { engine, internals, play } = setUp();
+    const build = getActiveWasmBuild().variant;
+    for (let i = 0; i < 12; i++) internals.detectionLatency.record(build, 20, 3000 + i * 200, 20 + i);
+    play(20);
+    internals.adoptMeasuredLength(build);
+    const after = engine.getLookaheadStatus();
+    play(200);
+    expect(internals.frameBuffer!.maxSlots).toBe(slotsForDelay(after.delayFrames));
+    expect(internals.frameBuffer!.allocatedSlots).toBeLessThanOrEqual(slotsForDelay(after.delayFrames));
     engine.destroy();
   });
 
   it("applies a cut decision on the displayed frame it belongs to, not before", () => {
-    const { engine, video, detectCut } = setUp();
-    for (let i = 0; i < 4; i++) video.presentFrame();
+    const { engine, video, detectCut, play } = setUp();
+    play(4);
     const cutFrameSec = video.mediaTime;
-    for (let i = 0; i < 3; i++) video.presentFrame();
-    // The result arrives late (3 frames after the cut frame was decoded), but before it is shown.
+    play(3);
+    // The result arrives 3 frames after the cut frame was decoded, but before it is shown.
     detectCut(cutFrameSec);
-
-    const lengthMs = engine.getLookaheadStatus().lengthMs;
-    let countWhenCutShown: number | null = null;
     let countBeforeCut: number | null = null;
-    for (let t = FRAME_MS; t <= video.frame * FRAME_MS + lengthMs + 50; t += REFRESH_MS) {
-      runRefresh(t);
-      const shown = engine.getDisplayedMediaTime();
-      if (shown !== null && shown < cutFrameSec) countBeforeCut = engine.getState().speakerCount;
-      if (shown === cutFrameSec) countWhenCutShown = engine.getState().speakerCount;
+    let countWhenCutShown: number | null = null;
+    for (let i = 0; i < 20; i++) {
+      play(1);
+      const shown = us(engine.getDisplayedMediaTime());
+      if (shown !== null && shown < us(cutFrameSec)!) countBeforeCut = engine.getState().speakerCount;
+      if (shown === us(cutFrameSec)) countWhenCutShown = engine.getState().speakerCount;
     }
     expect(countBeforeCut).toBe(0);
     expect(countWhenCutShown).toBe(1);
@@ -275,39 +353,112 @@ describe("VertixEngine lookahead", () => {
   });
 
   it("moves a cut found on a regular detection back to the frame where it happened", () => {
-    const { engine, video, internals } = setUp();
+    const { engine, internals, play } = setUp();
     const { probe, cuts } = cutProbe();
     engine.setBenchmarkProbe(probe);
-    for (let i = 0; i < 9; i++) video.presentFrame();
-    // Frame-to-frame trigger scores: frame 7 (0.28 s) is the jump. Not
-    // triggered, so the regular detection on frame 9 finds the cut.
+    play(9);
+    // Frame 7 (0.28 s) has the biggest frame-to-frame jump; the regular detection on frame 9 finds the cut.
     internals.scoredFrames = Array.from({ length: 9 }, (_, i) => ({
-      mediaTimeSec: (i + 1) / 25,
+      mediaTimeSec: us((i + 1) / 25)!,
       score: i + 1 === 7 ? 0.6 : 0.01,
     }));
-    const cutFrameSec = 7 / 25;
-    internals.processDetectionResult(LEFT_FACE, CUT, null, 9 / 25, 1280, 720, 405, 720, "worker", 1, 5 / 25, false);
-
+    internals.processDetectionResult(LEFT_FACE, CUT, null, us(9 / 25)!, 1280, 720, 405, 720, "worker", 1, 0.2, false);
     const countShownAt = new Map<number, number>();
-    for (let t = FRAME_MS; t <= 2000; t += REFRESH_MS) {
-      runRefresh(t);
-      const shown = engine.getDisplayedMediaTime();
+    for (let i = 0; i < 30; i++) {
+      play(1);
+      const shown = us(engine.getDisplayedMediaTime());
       if (shown !== null) countShownAt.set(shown, engine.getState().speakerCount);
     }
-    expect(countShownAt.get(6 / 25)).toBe(0);
-    expect(countShownAt.get(cutFrameSec)).toBe(1);
-    expect(cuts).toEqual([{ cutMediaTimeSec: cutFrameSec, shownMediaTimeSec: cutFrameSec, source: "localised" }]);
+    expect(countShownAt.get(us(6 / 25)!)).toBe(0);
+    expect(countShownAt.get(us(7 / 25)!)).toBe(1);
+    expect(cuts).toEqual([{ cutMediaTimeSec: us(7 / 25), shownMediaTimeSec: us(7 / 25), source: "localised" }]);
     engine.destroy();
   });
 
   it("reports a cut from a triggered detection as found by the trigger", () => {
-    const { engine, video, internals } = setUp();
+    const { engine, internals, play } = setUp();
     const { probe, cuts } = cutProbe();
     engine.setBenchmarkProbe(probe);
-    for (let i = 0; i < 3; i++) video.presentFrame();
-    internals.processDetectionResult(LEFT_FACE, CUT, null, 3 / 25, 1280, 720, 405, 720, "worker", 1, 0, true);
-    runRefresh(2000);
+    play(3);
+    internals.processDetectionResult(LEFT_FACE, CUT, null, us(3 / 25)!, 1280, 720, 405, 720, "worker", 1, 0, true);
+    play(30);
     expect(cuts.map((c) => c.source)).toEqual(["trigger"]);
+    engine.destroy();
+  });
+
+  it("flushes the buffer on seek and silences the delayed audio", () => {
+    const { engine, video, play } = setUp();
+    play(3);
+    expect(engine.getLookaheadStatus().bufferedFrames).toBe(3);
+    audio.setOutputDelay.mockClear();
+    video.emit("seeking");
+    expect(engine.getLookaheadStatus().bufferedFrames).toBe(0);
+    expect(engine.getDisplayedMediaTime()).toBeNull();
+    expect(audio.setOutputDelay).toHaveBeenCalledWith(engine.getLookaheadStatus().lengthMs / 1000);
+    engine.destroy();
+  });
+
+  it("switches off at runtime: no delay, frames drawn as decoded, buffer dropped", () => {
+    const { engine, video, play } = setUp();
+    play(1);
+    engine.setLookaheadEnabled(false);
+    expect(audio.setOutputDelay).toHaveBeenLastCalledWith(0);
+    expect(engine.getLookaheadStatus()).toMatchObject({ enabled: false, lengthMs: 0, bufferedFrames: 0 });
+    play(1);
+    expect(engine.getDisplayedMediaTime()).toBe(video.mediaTime);
+    engine.destroy();
+  });
+
+  it("switches back on at runtime: the delay returns and frames wait again", () => {
+    const { engine, video, play } = setUp({ lookahead: false });
+    play(1);
+    const shownBefore = engine.getDisplayedMediaTime();
+    engine.setLookaheadEnabled(true);
+    const { lengthMs, delayFrames } = engine.getLookaheadStatus();
+    expect(audio.setOutputDelay).toHaveBeenLastCalledWith(lengthMs / 1000);
+    play(delayFrames);
+    expect(engine.getDisplayedMediaTime()).toBe(shownBefore);
+    play(1);
+    expect(us(engine.getDisplayedMediaTime())).toBe(us(video.mediaTime - delayFrames / 25));
+    engine.destroy();
+  });
+
+  it("drains the buffer after pause, ending on the last decoded frame", () => {
+    const { engine, video, play, runRefresh } = setUp();
+    play(20);
+    video.paused = true;
+    video.emit("pause");
+    const lastDecoded = video.mediaTime;
+    for (let i = 0; i < 60; i++) {
+      video.clockMs += 1000 / 60;
+      runRefresh();
+    }
+    expect(engine.getDisplayedMediaTime()).toBe(lastDecoded);
+    expect(engine.getLookaheadStatus().bufferedFrames).toBe(0);
+    engine.destroy();
+  });
+
+  it("after a seek while paused, shows the new frame already cropped", () => {
+    const { engine, video, detect, play, runRefresh } = setUp();
+    play(2);
+    video.paused = true;
+    video.emit("seeking");
+    video.presentFrame();
+    const seekedFrameSec = video.mediaTime;
+    expect(engine.getDisplayedMediaTime()).toBeNull();
+    detect(seekedFrameSec);
+    runRefresh();
+    expect(engine.getDisplayedMediaTime()).toBe(seekedFrameSec);
+    expect(engine.getState().speakerCount).toBe(1);
+    engine.destroy();
+  });
+
+  it("keeps the normal debounce for the first detection without a seek", () => {
+    const { engine, video, detect, play } = setUp();
+    play(1);
+    detect(video.mediaTime);
+    play(20);
+    expect(engine.getState().speakerCount).toBe(0);
     engine.destroy();
   });
 
@@ -323,6 +474,7 @@ describe("VertixEngine lookahead", () => {
     const defaultLength = engine.getLookaheadStatus().lengthMs;
     // A fresh worker: every detection in its first 2 s is slow.
     for (let i = 0; i < 10; i++) internals.detectionLatency.record(build, 900, i * 150, i + 1);
+    internals.adoptMeasuredLength(build);
     engine.setLookaheadEnabled(false);
     engine.setLookaheadEnabled(true);
     expect(engine.getLookaheadStatus()).toMatchObject({ lengthSource: "default", lengthMs: defaultLength });
@@ -334,83 +486,6 @@ describe("VertixEngine lookahead", () => {
     expect(engine.getLookaheadStatus()).toMatchObject({ lengthSource: "measured", detectionP95Ms: 100 });
     expect([...storage.values()]).toEqual(["100"]);
     delete withStorage.localStorage;
-    engine.destroy();
-  });
-
-  it("flushes the buffer on seek and silences the delayed audio", () => {
-    const { engine, video } = setUp();
-    for (let i = 0; i < 3; i++) video.presentFrame();
-    expect(engine.getLookaheadStatus().bufferedFrames).toBe(3);
-    video.emit("seeking");
-    expect(engine.getLookaheadStatus().bufferedFrames).toBe(0);
-    expect(engine.getDisplayedMediaTime()).toBeNull();
-    expect(audio.muteFor).toHaveBeenCalledWith(engine.getLookaheadStatus().lengthMs / 1000);
-    runRefresh(10_000);
-    expect(engine.getDisplayedMediaTime()).toBeNull();
-    engine.destroy();
-  });
-
-  it("switches off at runtime: no delay, frames drawn as decoded, buffer dropped", () => {
-    const { engine, video } = setUp();
-    video.presentFrame();
-    engine.setLookaheadEnabled(false);
-    expect(audio.setOutputDelay).toHaveBeenLastCalledWith(0);
-    expect(engine.getLookaheadStatus()).toMatchObject({ enabled: false, lengthMs: 0, bufferedFrames: 0 });
-    video.presentFrame();
-    expect(engine.getDisplayedMediaTime()).toBe(video.mediaTime);
-    engine.destroy();
-  });
-
-  it("switches back on at runtime: the delay returns and frames wait again", () => {
-    const { engine, video } = setUp();
-    engine.setLookaheadEnabled(false);
-    video.presentFrame();
-    engine.setLookaheadEnabled(true);
-    const { lengthMs } = engine.getLookaheadStatus();
-    expect(audio.setOutputDelay).toHaveBeenLastCalledWith(lengthMs / 1000);
-    const shownBefore = engine.getDisplayedMediaTime();
-    video.presentFrame();
-    runRefresh(video.frame * FRAME_MS);
-    expect(engine.getDisplayedMediaTime()).toBe(shownBefore);
-    runRefresh(video.frame * FRAME_MS + lengthMs);
-    expect(engine.getDisplayedMediaTime()).toBe(video.mediaTime);
-    engine.destroy();
-  });
-
-  it("after a seek while paused, shows the new frame already cropped", () => {
-    const { engine, video, detect } = setUp();
-    video.presentFrame();
-    video.presentFrame();
-    video.paused = true;
-    video.emit("seeking");
-    video.presentFrame();
-    const seekedFrameSec = video.mediaTime;
-    expect(engine.getDisplayedMediaTime()).toBeNull();
-    detect(seekedFrameSec);
-    runRefresh(performance.now() + 1000);
-    expect(engine.getDisplayedMediaTime()).toBe(seekedFrameSec);
-    expect(engine.getState().speakerCount).toBe(1);
-    engine.destroy();
-  });
-
-  it("keeps the normal debounce for the first detection without a seek", () => {
-    const { engine, video, detect } = setUp();
-    video.presentFrame();
-    detect(video.mediaTime);
-    runRefresh(10_000);
-    expect(engine.getDisplayedMediaTime()).toBe(video.mediaTime);
-    expect(engine.getState().speakerCount).toBe(0);
-    engine.destroy();
-  });
-
-  it("drains the buffer after pause, ending on the last decoded frame", () => {
-    const { engine, video } = setUp();
-    for (let i = 0; i < 5; i++) video.presentFrame();
-    video.paused = true;
-    const lastDecoded = video.mediaTime;
-    runRefresh(video.frame * FRAME_MS + engine.getLookaheadStatus().lengthMs);
-    expect(engine.getDisplayedMediaTime()).toBe(lastDecoded);
-    expect(engine.getLookaheadStatus().bufferedFrames).toBe(0);
     engine.destroy();
   });
 });

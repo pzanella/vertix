@@ -2,36 +2,48 @@
 export interface BufferedFrame<Slot> {
   slot: Slot;
   mediaTimeSec: number;
-  /** performance.now() time at which the frame should be on screen. Infinity until set (a paused frame waiting for its detection). */
-  dueMs: number;
+  /** performance.now() time at which the video element would have shown this frame (rVFC expectedDisplayTime). */
+  presentedAtMs: number;
   /** Capture order since the source was loaded. */
   frameIndex: number;
+  /** Not shown until released: a frame captured while paused (or on a mode switch) waiting for its own detection. */
+  held: boolean;
+  /** Released from held: shown at the next display, whatever its time. */
+  forced: boolean;
 }
 
 /**
- * Fixed pool of frame slots, used as a FIFO of captured frames waiting for
- * their display time. Slots are reused, never freed while the pool lives:
- * at most `maxSlots` exist. If every slot is waiting, the oldest waiting
- * frame is dropped to make room (counted in `overflowDrops`).
+ * Pool of frame slots, used as a FIFO of captured frames waiting to be
+ * displayed. Slots are reused; at most `maxSlots` exist. The limit can
+ * change at any time without dropping waiting frames: a lower limit frees
+ * slots as frames are released. If every slot is waiting, the oldest
+ * waiting frame is dropped to make room (counted in `overflowDrops`).
  */
 export class FrameRingBuffer<Slot> {
   private readonly free: Slot[] = [];
   private readonly queue: BufferedFrame<Slot>[] = [];
   private allocated = 0;
+  private _maxSlots: number;
   private _overflowDrops = 0;
   private _skippedOnDisplay = 0;
 
   constructor(
     private readonly createSlot: () => Slot,
-    readonly maxSlots: number
-  ) {}
+    maxSlots: number
+  ) {
+    this._maxSlots = maxSlots;
+  }
+
+  get maxSlots(): number {
+    return this._maxSlots;
+  }
 
   /** Frames waiting for display. */
   get length(): number {
     return this.queue.length;
   }
 
-  /** Slots created so far (each holds one frame's pixels). */
+  /** Slots that exist right now (each holds one frame's pixels). */
   get allocatedSlots(): number {
     return this.allocated;
   }
@@ -41,16 +53,25 @@ export class FrameRingBuffer<Slot> {
     return this._overflowDrops;
   }
 
-  /** Frames that became due while a later frame was also due, so they were never shown (display loop too slow). */
+  /** Frames passed over on display because a later frame was already due (a late display, or a shrinking delay). */
   get skippedOnDisplay(): number {
     return this._skippedOnDisplay;
+  }
+
+  /** Changes the pool limit; extra slots are freed now if idle, else when their frames are released. */
+  setMaxSlots(maxSlots: number): void {
+    this._maxSlots = Math.max(1, maxSlots);
+    while (this.allocated > this._maxSlots && this.free.length > 0) {
+      this.free.pop();
+      this.allocated -= 1;
+    }
   }
 
   /** A slot to capture the next frame into. Fill it, then `enqueue` it. */
   acquire(): Slot {
     const reused = this.free.pop();
     if (reused !== undefined) return reused;
-    if (this.allocated < this.maxSlots) {
+    if (this.allocated < this._maxSlots) {
       this.allocated += 1;
       return this.createSlot();
     }
@@ -64,27 +85,36 @@ export class FrameRingBuffer<Slot> {
   }
 
   /**
-   * The latest waiting frame whose due time is at or before `nowMs`, removed
-   * from the queue; earlier due frames are released as skipped. Null when
-   * nothing is due. Call `release` with the frame once it has been drawn.
+   * The latest waiting frame for which `isDue` holds (or that was released
+   * from held), removed from the queue; frames before it are released as
+   * skipped. Null when none is due. Call `release` once it has been drawn.
    */
-  takeDue(nowMs: number): BufferedFrame<Slot> | null {
-    let dueCount = 0;
-    while (dueCount < this.queue.length && this.queue[dueCount].dueMs <= nowMs) dueCount += 1;
-    if (dueCount === 0) return null;
-    const taken = this.queue.splice(0, dueCount);
-    for (let i = 0; i < taken.length - 1; i++) this.free.push(taken[i].slot);
+  takeLatest(isDue: (frame: BufferedFrame<Slot>) => boolean): BufferedFrame<Slot> | null {
+    let index = -1;
+    for (let i = 0; i < this.queue.length; i++) {
+      const frame = this.queue[i];
+      if (frame.forced || (!frame.held && isDue(frame))) index = i;
+    }
+    if (index < 0) return null;
+    const taken = this.queue.splice(0, index + 1);
+    for (let i = 0; i < taken.length - 1; i++) this.release(taken[i]);
     this._skippedOnDisplay += taken.length - 1;
     return taken[taken.length - 1];
   }
 
-  /** Earliest due time among waiting frames, or null when empty. */
-  nextDueMs(): number | null {
-    return this.queue.length > 0 ? this.queue[0].dueMs : null;
+  /** Releases every held frame, to be shown at the next display. */
+  releaseHeld(): void {
+    for (const frame of this.queue) {
+      if (frame.held) {
+        frame.held = false;
+        frame.forced = true;
+      }
+    }
   }
 
   release(frame: BufferedFrame<Slot>): void {
-    this.free.push(frame.slot);
+    if (this.allocated > this._maxSlots) this.allocated -= 1;
+    else this.free.push(frame.slot);
   }
 
   /** The waiting frame with this media time, if it has not been displayed yet. */
@@ -92,15 +122,9 @@ export class FrameRingBuffer<Slot> {
     return this.queue.find((f) => f.mediaTimeSec === mediaTimeSec) ?? null;
   }
 
-  /** Makes every frame still held back (due Infinity) due at `nowMs`. */
-  releaseHeld(nowMs: number): void {
-    for (const frame of this.queue) if (frame.dueMs === Infinity) frame.dueMs = nowMs;
-  }
-
   /** Drops every waiting frame (seek, source change, lookahead switched). */
   flush(): void {
-    for (const frame of this.queue) this.free.push(frame.slot);
-    this.queue.length = 0;
+    for (const frame of this.queue.splice(0)) this.release(frame);
   }
 
   resetCounters(): void {
