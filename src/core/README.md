@@ -171,8 +171,9 @@ dissolve or a layout change lands on the frame it belongs to.
   created on demand, so a generous limit costs nothing. The pool grows or
   shrinks with the delay or the frame rate without dropping frames; when
   it needs a smaller copy size, new slots get it and old-size slots are
-  freed as their frames are shown (within one delay length, outside the
-  budget). Above 30 fps, while the video element drops more than 5% of
+  freed as their frames are shown. Old-size slots still count against the
+  budget: when they leave no room for a new slot, the oldest waiting frame
+  is dropped (counted in `overflowDrops`) rather than going over it. Above 30 fps, while the video element drops more than 5% of
   its frames over 3 s or the buffer overflows, new copies are 540 lines
   high; full height returns after 10 s under 2%
   (`lookahead/slotHeightGovernor.ts`). Copies are drawn from the video

@@ -186,6 +186,8 @@ export interface LookaheadStatus {
   slotHeightChanges: SlotHeightChange[];
   /** Wall time spent at each frame-copy height since this source was loaded, in ms, keyed by height. */
   timeAtSlotHeightMs: Record<string, number>;
+  /** Most frame-buffer memory used at once (RGBA estimate), never above the 96 MiB budget. */
+  peakBufferBytes: number;
 }
 
 export interface VertixState {
@@ -247,6 +249,7 @@ export const INITIAL_METRICS: VertixMetrics = {
     skippedOnDisplay: 0,
     slotHeightChanges: [],
     timeAtSlotHeightMs: {},
+    peakBufferBytes: 0,
   },
 };
 
@@ -1309,6 +1312,7 @@ export class VertixEngine {
       skippedOnDisplay: buffer?.skippedOnDisplay ?? 0,
       slotHeightChanges: [...this.slotHeightChanges],
       timeAtSlotHeightMs: { ...this.timeAtSlotHeightMs },
+      peakBufferBytes: buffer?.peakAllocatedBytes ?? 0,
     };
   }
 

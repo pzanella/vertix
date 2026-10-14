@@ -337,6 +337,8 @@ export interface BenchmarkLookahead {
   slotHeightChanges: { mediaTimeSec: number; height: number; reason: string }[];
   /** Added within v5: wall time at each frame-copy height, in ms, keyed by height. */
   timeAtSlotHeightMs: Record<string, number>;
+  /** Added within v5: most frame-buffer memory used at once (RGBA estimate), within the 96 MiB budget. */
+  peakBufferBytes: number;
 }
 
 export interface BenchmarkClipResult {

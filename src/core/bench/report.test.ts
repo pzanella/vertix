@@ -56,6 +56,7 @@ function sampleResult(): BenchmarkClipResult {
       skippedOnDisplay: 0,
       slotHeightChanges: [],
       timeAtSlotHeightMs: { 720: 400 },
+      peakBufferBytes: 9 * 1280 * 720 * 4,
     },
   };
 }

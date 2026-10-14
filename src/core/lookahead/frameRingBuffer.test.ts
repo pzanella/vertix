@@ -126,23 +126,64 @@ describe("FrameRingBuffer", () => {
     expect(buffer.overflowDrops).toBe(2);
   });
 
-  it("switches to a smaller slot size without dropping frames, retiring old slots as they are released", () => {
-    const { buffer, capture, upTo, size } = setUp(4, 8);
-    size.bytes = 2;
-    for (let i = 1; i <= 4; i++) capture(i);
-    expect(buffer.allocatedBytes).toBe(8);
-    // More frames must wait than fit at the old size: smaller slots from now on.
-    size.bytes = 1;
-    buffer.setMaxSlots(8);
-    for (let t = 5; t <= 16; t++) {
-      capture(t);
-      const due = buffer.takeLatest(upTo(t - 6));
-      if (due) buffer.release(due);
+  describe("720p -> 540p copies at the 96 MiB budget limit", () => {
+    const BUDGET = 96 * 1024 * 1024;
+    const BYTES_720 = 1280 * 720 * 4;
+    const BYTES_540 = 960 * 540 * 4;
+
+    /** Plays `frames` frames at `fps`, each shown `delayFrames(t)` frames after capture; returns the frames shown. */
+    function playThrough(
+      env: ReturnType<typeof setUp>,
+      from: number,
+      frames: number,
+      delayFrames: (i: number) => number
+    ) {
+      const shown: number[] = [];
+      for (let i = from; i < from + frames; i++) {
+        env.capture(i);
+        const due = env.buffer.takeLatest(env.upTo(i - delayFrames(i)));
+        if (due) {
+          shown.push(due.mediaTimeSec);
+          env.buffer.release(due);
+        }
+      }
+      return shown;
     }
-    expect(buffer.overflowDrops).toBe(0);
-    // Old-size slots drained: every slot is new, within the budget.
-    expect(buffer.allocatedBytes).toBe(buffer.allocatedSlots);
-    expect(buffer.allocatedBytes).toBeLessThanOrEqual(8);
+
+    it("same delay: old copies are swapped one for one, no frame dropped, never over the budget", () => {
+      const env = setUp(Math.floor(BUDGET / BYTES_720), BUDGET);
+      env.size.bytes = BYTES_720;
+      // 26 frames waiting + the one being captured: 27 slots of 720p, the most the budget holds.
+      playThrough(env, 0, 100, () => 26);
+      expect(env.buffer.allocatedSlots).toBe(27);
+      env.size.bytes = BYTES_540;
+      env.buffer.setMaxSlots(27);
+      playThrough(env, 100, 100, () => 26);
+      expect(env.buffer.overflowDrops).toBe(0);
+      expect(env.buffer.peakAllocatedBytes).toBeLessThanOrEqual(BUDGET);
+      expect(env.buffer.allocatedBytes).toBeLessThanOrEqual(27 * BYTES_540);
+      console.log(
+        `720p -> 540p, same delay: peak ${env.buffer.peakAllocatedBytes} B of ${BUDGET} B, overflow ${env.buffer.overflowDrops}`
+      );
+    });
+
+    it("delay growing at the switch: drops the oldest waiting frames rather than going over the budget", () => {
+      const env = setUp(Math.floor(BUDGET / BYTES_720), BUDGET);
+      env.size.bytes = BYTES_720;
+      playThrough(env, 0, 100, () => 26);
+      env.size.bytes = BYTES_540;
+      env.buffer.setMaxSlots(42);
+      // The delay grows to 40 frames at once: more frames must wait than the old copies leave room for.
+      const shown = playThrough(env, 100, 200, () => 40);
+      expect(env.buffer.peakAllocatedBytes).toBeLessThanOrEqual(BUDGET);
+      expect(env.buffer.overflowDrops).toBeGreaterThan(0);
+      for (let i = 1; i < shown.length; i++) expect(shown[i]).toBeGreaterThan(shown[i - 1]);
+      // Once the old copies are gone, the 40-frame delay fits in 540p copies.
+      expect(env.buffer.allocatedBytes).toBe(env.buffer.allocatedSlots * BYTES_540);
+      console.log(
+        `720p -> 540p, delay 26 -> 40: peak ${env.buffer.peakAllocatedBytes} B of ${BUDGET} B, overflow ${env.buffer.overflowDrops}`
+      );
+    });
   });
 
   describe("takeNearest", () => {

@@ -347,7 +347,7 @@ try {
       "L source": run.lookahead.lengthSource,
       "audio delay ms": run.lookahead.audioDelayMs,
       slot: run.lookahead.slotWidth ? `${run.lookahead.slotWidth}x${run.lookahead.slotHeight}` : "-",
-      "slots / MB": `${run.lookahead.allocatedSlots} / ${Math.round((run.lookahead.bufferBytes / 1048576) * 10) / 10}`,
+      "slots / MB (peak)": `${run.lookahead.allocatedSlots} / ${Math.round((run.lookahead.bufferBytes / 1048576) * 10) / 10} (${Math.round((run.lookahead.peakBufferBytes / 1048576) * 10) / 10})`,
       "overflow / skipped": `${run.lookahead.overflowDrops} / ${run.lookahead.skippedOnDisplay}`,
       "ms at slot height": Object.entries(run.lookahead.timeAtSlotHeightMs ?? {})
         .map(([height, ms]) => `${height}: ${Math.round(ms)}`)
