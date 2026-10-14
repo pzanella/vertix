@@ -160,8 +160,18 @@ class FakeVideo {
     return this.mediaTime;
   }
 
+  /** Like Chrome's VideoPlaybackQuality: the fields are getters on the prototype. */
   getVideoPlaybackQuality() {
-    return { droppedVideoFrames: this.droppedVideoFrames, totalVideoFrames: this.presented };
+    const dropped = this.droppedVideoFrames;
+    const total = this.presented;
+    return new (class {
+      get droppedVideoFrames() {
+        return dropped;
+      }
+      get totalVideoFrames() {
+        return total;
+      }
+    })();
   }
 
   /** Advances one frame without running any frame callback (a dropped frame / skipped callback). */

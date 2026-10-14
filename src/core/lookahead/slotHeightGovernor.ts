@@ -83,7 +83,12 @@ export class SlotHeightGovernor {
 
   private dropRatio(nowMs: number, quality: PlaybackQualitySample | null): number | null {
     if (!quality) return null;
-    this.samples.push({ atMs: nowMs, ...quality });
+    // VideoPlaybackQuality's fields are prototype getters: a spread would copy none.
+    this.samples.push({
+      atMs: nowMs,
+      droppedVideoFrames: quality.droppedVideoFrames,
+      totalVideoFrames: quality.totalVideoFrames,
+    });
     while (this.samples.length > 2 && this.samples[1].atMs <= nowMs - DROP_WINDOW_MS) this.samples.shift();
     const first = this.samples[0];
     const frames = quality.totalVideoFrames - first.totalVideoFrames;
