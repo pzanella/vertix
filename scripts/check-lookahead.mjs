@@ -12,7 +12,11 @@
 //
 // Usage (after `npm run build:wasm && npm run build:worker` and
 // `npm run make:bench-clips`):
-//   node scripts/check-lookahead.mjs [--only=<clip file>] [--chrome=/path/to/chrome] [--headed]
+//   node scripts/check-lookahead.mjs [--only=<clip file>] [--chrome=/path/to/chrome] [--headed] [--cpu-throttle=<rate>]
+//
+// --cpu-throttle slows the page's CPU by that factor (DevTools CPU
+// throttling), a rough stand-in for a phone. 50 fps clips also run with
+// lookahead on the scalar build.
 //
 // Timings in headless Chrome are not representative of a real device; the
 // frame counts are what this checks.
@@ -29,6 +33,7 @@ const chromePath =
   args.find((arg) => arg.startsWith("--chrome="))?.slice("--chrome=".length) ??
   "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
 const headed = args.includes("--headed");
+const cpuThrottle = Number(args.find((arg) => arg.startsWith("--cpu-throttle="))?.slice("--cpu-throttle=".length) ?? 1);
 const DEBUG_PORT = 9333;
 const CLIP_TIMEOUT_MS = 10 * 60 * 1000;
 
@@ -115,6 +120,19 @@ async function runInPage(clips, extras) {
   for (const clip of clips) {
     await run(clip, false, "clips");
     await run(clip, true, "clips");
+    if (clip.fps > 30) {
+      const pageBuild = core.getActiveWasmBuild();
+      const other = pageBuild.variant === "simd" ? "scalar" : "simd";
+      await core.switchWasmBuild({ variant: other, reason: "benchmark-suite" });
+      await core.runUnrecordedWarmup(engine, video, {
+        mode: "9:16",
+        lookahead: true,
+        loadSource: load(clip.url),
+        seconds: 3,
+      });
+      await run(clip, true, "clips");
+      await core.switchWasmBuild(pageBuild);
+    }
   }
 
   const modeSwitches = [];
@@ -271,6 +289,7 @@ try {
     }
   });
   await cdp.send("Runtime.enable");
+  if (cpuThrottle > 1) await cdp.send("Emulation.setCPUThrottlingRate", { rate: cpuThrottle });
   await cdp.send("Page.enable");
   const loaded = new Promise((resolve) =>
     cdp.listeners.push((msg) => msg.method === "Page.loadEventFired" && resolve())
@@ -303,6 +322,7 @@ try {
       });
     }
   }
+  if (cpuThrottle > 1) console.log(`CPU throttled ${cpuThrottle}x`);
   console.table(rows);
   console.table(
     runs.map((run) => ({
@@ -353,7 +373,7 @@ try {
   writeFileSync(
     join(root, ".eval/lookahead-check.json"),
     JSON.stringify(
-      { checkedAt: new Date().toISOString(), runs, modeSwitches, activeSpeakerAgreement: agreement },
+      { checkedAt: new Date().toISOString(), cpuThrottle, runs, modeSwitches, activeSpeakerAgreement: agreement },
       null,
       2
     )
