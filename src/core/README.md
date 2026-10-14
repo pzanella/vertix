@@ -126,7 +126,11 @@ score of at least 0.12 that is also 3x its recent median, and at least
 count at once and snaps the crop. Within a stable layout, individual
 crops move only past a dead zone, then glide; the full layout decision
 never reruns, except when the active speaker switches to someone far
-away, which cross-dissolves instead of panning. This two-layer design, a stable layout plus independently-smoothed
+away, which cross-dissolves instead of panning. A cross-dissolve blends
+the old crop rects into the new ones, both cut from the frame being drawn
+(never a still of an earlier frame), so it can never mix two scenes; a
+cut during one snaps. A new source clears the canvas, the buffer and the
+crop state. This two-layer design, a stable layout plus independently-smoothed
 positions within it, came out of several rounds of tuning against real
 footage. If camera movement still feels off, look at the constants in
 `layoutEngine.ts` (`PANE_SMOOTHING_TAU_SEC`), `VertixEngine.ts`

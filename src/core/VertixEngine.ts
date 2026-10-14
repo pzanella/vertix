@@ -505,6 +505,28 @@ const LAYOUT_TRANSITION_MS = 250;
  * `filter: blur()`, just on a quarter as many pixels) to keep this cheap
  * without looking blocky.
  */
+/** Draws the `rect` crop (source-video pixels, scaled to the source's own size) into `dest`, on whole pixels. */
+function drawCrop(
+  ctx: CanvasRenderingContext2D,
+  source: CanvasImageSource,
+  rect: PaneRect,
+  dest: PaneRect,
+  scaleX: number,
+  scaleY: number
+): void {
+  ctx.drawImage(
+    source,
+    Math.round(rect.x * scaleX),
+    Math.round(rect.y * scaleY),
+    Math.round(rect.w * scaleX),
+    Math.round(rect.h * scaleY),
+    Math.round(dest.x),
+    Math.round(dest.y),
+    Math.round(dest.w),
+    Math.round(dest.h)
+  );
+}
+
 function drawFitFrame(
   ctx: CanvasRenderingContext2D,
   blurCanvas: OffscreenCanvas,
@@ -533,6 +555,12 @@ function drawFitFrame(
   const fitScale = outW / srcW;
   const fgH = Math.round(srcH * fitScale);
   ctx.drawImage(video, 0, Math.round((outH - fgH) / 2), outW, fgH);
+}
+
+/** A framing to draw from the current frame: the fitted full frame (B-roll), or crops into panes. */
+interface DrawnLayout {
+  broll: boolean;
+  panes: { source: PaneRect; dest: PaneRect }[];
 }
 
 interface FrameSlot {
@@ -642,8 +670,17 @@ export class VertixEngine {
   private layoutSignature = "";
   // Set by an applied decision, consumed by the frame it was applied on.
   private pendingReframe: Reframe | null = null;
-  private transitionSnapshotCanvas: OffscreenCanvas | null = null;
+  // A dissolve crossfades from the framing on screen when it started to
+  // the new one, both cropped from the frame being drawn: it never shows
+  // pixels of an earlier frame, so it can never mix two scenes.
+  private transitionFrom: DrawnLayout | null = null;
   private transitionStart: number | null = null;
+  // What the last 9:16 frame was drawn with (references, not copies).
+  private drawnLayout: { broll: boolean; targetPanes: PaneTarget[]; smoothedPanes: PaneRect[] } = {
+    broll: true,
+    targetPanes: [],
+    smoothedPanes: [],
+  };
 
   // Lookahead: the output is shown lookaheadLengthMs behind the decoded
   // frame, so each frame's detection result is in before it is displayed.
@@ -839,8 +876,8 @@ export class VertixEngine {
   /**
    * Draws detections the skin-tone filter rejected as dashed boxes on
    * `canvas`, which the host lays exactly over the output canvas. They are
-   * never drawn on the output itself, so they can't leak into the video or
-   * a layout-change snapshot. Pass null to stop.
+   * never drawn on the output itself, so they can't leak into the video.
+   * Pass null to stop.
    */
   setSkinRejectionOverlay(canvas: HTMLCanvasElement | null): void {
     this.skinRejectionOverlay = canvas;
@@ -953,7 +990,14 @@ export class VertixEngine {
     });
   }
 
+  /**
+   * A new source (or the first): nothing of the previous one may be shown
+   * after this. The canvas is cleared, the buffer flushed, the crop and
+   * dissolve state reset, and late detection and cut-trigger results are
+   * dropped by their generation.
+   */
   private resetForNewSource(): void {
+    this.clearOutput();
     this.srcDimsInitialized = false;
     this.frameCounter = 0;
     this.sourceTainted = false;
@@ -983,6 +1027,13 @@ export class VertixEngine {
     this.resetTrackingState();
     this.emitState();
     this.emitMetrics();
+  }
+
+  private clearOutput(): void {
+    const canvas = this.canvas;
+    if (!canvas) return;
+    this.outputCtx ??= canvas.getContext("2d");
+    this.outputCtx?.clearRect(0, 0, canvas.width, canvas.height);
   }
 
   /** Clears face-tracking/layout state without touching video dimensions or WASM readiness — used on seek and mode changes. */
@@ -1018,7 +1069,7 @@ export class VertixEngine {
     this.targetPanes = [];
     this.layoutSignature = "";
     this.pendingReframe = null;
-    this.transitionStart = null;
+    this.endLayoutDissolve();
     this.metrics = {
       ...this.metrics,
       faceSizes: [],
@@ -1659,27 +1710,27 @@ export class VertixEngine {
   }
 
   /**
-   * Snapshots the current output so the next framing cross-dissolves in
-   * over LAYOUT_TRANSITION_MS. If a fade is already running, the canvas
-   * holds a partial blend, not a clean frame, so this cuts straight to the
-   * new framing instead of stacking a second fade on top of it.
+   * Starts a cross-dissolve from the framing on screen (its crop rects,
+   * kept fixed) to the new one, over LAYOUT_TRANSITION_MS. If a dissolve
+   * is already running, this cuts straight to the new framing instead of
+   * stacking a second one on top of it.
    */
-  private startLayoutDissolve(canvas: HTMLCanvasElement, cropW: number, cropH: number, now: number): void {
+  private startLayoutDissolve(now: number): void {
     if (this.transitionStart !== null) {
-      this.transitionStart = null;
+      this.endLayoutDissolve();
       return;
     }
-    if (
-      !this.transitionSnapshotCanvas ||
-      this.transitionSnapshotCanvas.width !== cropW ||
-      this.transitionSnapshotCanvas.height !== cropH
-    ) {
-      this.transitionSnapshotCanvas = new OffscreenCanvas(cropW, cropH);
-    }
-    const snapCtx = this.transitionSnapshotCanvas.getContext("2d")!;
-    snapCtx.clearRect(0, 0, cropW, cropH);
-    snapCtx.drawImage(canvas, 0, 0);
+    const { broll, targetPanes, smoothedPanes } = this.drawnLayout;
+    this.transitionFrom = {
+      broll,
+      panes: broll ? [] : targetPanes.map((p, i) => ({ source: { ...smoothedPanes[i] }, dest: { ...p.pane.dest } })),
+    };
     this.transitionStart = now;
+  }
+
+  private endLayoutDissolve(): void {
+    this.transitionStart = null;
+    this.transitionFrom = null;
   }
 
   // Runs on every decoded frame. Without lookahead the frame is rendered
@@ -2247,14 +2298,14 @@ export class VertixEngine {
       this.pendingReframe = null;
       // After a source cut, the old frame shows the previous shot: never
       // fade from it, and stop any fade still running.
-      if (reframe === "snap") this.transitionStart = null;
+      if (reframe === "snap") this.endLayoutDissolve();
 
       if (targetSignature !== this.layoutSignature) {
         // Skipped on the very first commit — there's no prior frame to fade from.
         if (this.layoutSignature !== "") {
           this.sceneSwitchCount += 1;
           probe?.recordLayoutChange(now);
-          if (reframe !== "snap") this.startLayoutDissolve(canvas, cropW, cropH, now);
+          if (reframe !== "snap") this.startLayoutDissolve(now);
         }
         this.layoutSignature = targetSignature;
 
@@ -2277,7 +2328,7 @@ export class VertixEngine {
       } else if (reframe !== null && speakerCount > 0) {
         // Same pane count, new framing (a cut, or another speaker): jump
         // to the target instead of gliding across the frame.
-        if (reframe === "dissolve") this.startLayoutDissolve(canvas, cropW, cropH, now);
+        if (reframe === "dissolve") this.startLayoutDissolve(now);
         this.smoothedPanes = this.targetPanes.map((p) => ({ ...p.pane.source }));
       }
 
@@ -2292,30 +2343,29 @@ export class VertixEngine {
         for (let i = 0; i < this.targetPanes.length; i++) {
           const target = this.targetPanes[i].pane;
           const smoothed = lerpPaneRectInto(this.smoothedPanes[i], target.source, smoothingAlpha);
-          ctx.drawImage(
-            source,
-            Math.round(smoothed.x * scaleX),
-            Math.round(smoothed.y * scaleY),
-            Math.round(smoothed.w * scaleX),
-            Math.round(smoothed.h * scaleY),
-            Math.round(target.dest.x),
-            Math.round(target.dest.y),
-            Math.round(target.dest.w),
-            Math.round(target.dest.h)
-          );
+          drawCrop(ctx, source, smoothed, target.dest, scaleX, scaleY);
         }
       }
+      this.drawnLayout.broll = speakerCount === 0;
+      this.drawnLayout.targetPanes = this.targetPanes;
+      this.drawnLayout.smoothedPanes = this.smoothedPanes;
 
-      if (this.transitionStart !== null) {
+      const from = this.transitionFrom;
+      if (this.transitionStart !== null && from) {
         const t = Math.min(1, (now - this.transitionStart) / LAYOUT_TRANSITION_MS);
-        // Ease-in-out: the old frame dissolves away gradually at both ends
-        // of the transition instead of snapping out almost immediately, so
-        // a speaker coming into focus reads as a smooth reveal.
+        // Ease-in-out: the old framing dissolves away gradually at both
+        // ends of the transition instead of snapping out almost
+        // immediately, so a speaker coming into focus reads as a smooth
+        // reveal. Drawn from this same frame, at the old crop.
         ctx.globalAlpha = 1 - easeInOutCubic(t);
-        ctx.drawImage(this.transitionSnapshotCanvas!, 0, 0);
+        if (from.broll) {
+          drawFitFrame(ctx, this.blurCanvas, source, srcW, srcH, cropW, cropH);
+        } else {
+          for (const pane of from.panes) drawCrop(ctx, source, pane.source, pane.dest, scaleX, scaleY);
+        }
         ctx.globalAlpha = 1;
         if (t >= 1) {
-          this.transitionStart = null;
+          this.endLayoutDissolve();
           this.emitState();
         }
       }

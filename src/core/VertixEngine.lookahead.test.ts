@@ -40,23 +40,38 @@ vi.mock("./audioActivity", () => ({
   },
 }));
 
-const fake2dContext = () => ({
-  drawImage() {},
-  clearRect() {},
+/** Every drawImage / clearRect on any canvas: onto what, from what, at which alpha. */
+interface DrawEntry {
+  target: object;
+  source?: object;
+  alpha?: number;
+  clear?: boolean;
+}
+const drawLog: DrawEntry[] = [];
+
+const fake2dContext = (target: object) => ({
+  drawImage(source: object) {
+    drawLog.push({ target, source, alpha: this.globalAlpha });
+  },
+  clearRect() {
+    drawLog.push({ target, clear: true });
+  },
   getImageData: () => ({ data: new Uint8ClampedArray(4) }),
   filter: "none",
   globalAlpha: 1,
+  imageSmoothingQuality: "low",
 });
 
 vi.stubGlobal(
   "OffscreenCanvas",
   class {
+    private ctx: ReturnType<typeof fake2dContext> | null = null;
     constructor(
       public width: number,
       public height: number
     ) {}
     getContext() {
-      return fake2dContext();
+      return (this.ctx ??= fake2dContext(this));
     }
     transferToImageBitmap() {
       return { close() {} };
@@ -202,6 +217,7 @@ interface EngineInternals {
   detectionLatency: DetectionLatencyTracker;
   adoptMeasuredLength(build: string): void;
   rampLookaheadLength(delay: { frames: number; lengthMs: number }): void;
+  decisions: { push(decision: object): void };
   frameBuffer: { maxSlots: number; allocatedSlots: number } | null;
   processDetectionResult(
     facesFlat: Float64Array,
@@ -242,7 +258,30 @@ const CUT: SceneCutScores = { hist: 0.5, grid: 0.5, isCut: true };
 const NO_CUT: SceneCutScores = { hist: 0, grid: 0, isCut: false };
 
 function fakeCanvas(): HTMLCanvasElement & { width: number } {
-  return { width: 0, height: 0, clientHeight: 0, getContext: fake2dContext } as unknown as HTMLCanvasElement;
+  const canvas = { width: 0, height: 0, clientHeight: 0 } as { getContext?: () => object };
+  const ctx = fake2dContext(canvas);
+  canvas.getContext = () => ctx;
+  return canvas as unknown as HTMLCanvasElement;
+}
+
+/**
+ * What the output canvas was drawn from since log index `from`: the single
+ * frame source (the video, or a buffered copy), and whether everything else
+ * drawn onto it was redrawn from that same source within the same span
+ * (the blurred background). Also whether anything was blended in.
+ */
+function outputSince(canvas: object, from: number) {
+  const entries = drawLog.slice(from);
+  const onOutput = entries.filter((e) => e.target === canvas && e.source);
+  const redrawnFrom = new Map(entries.filter((e) => e.target !== canvas && e.source).map((e) => [e.target, e.source]));
+  const frameSources = new Set(
+    onOutput.map((e) => (redrawnFrom.has(e.source!) ? redrawnFrom.get(e.source!) : e.source))
+  );
+  return {
+    frameSources,
+    blended: onOutput.some((e) => (e.alpha ?? 1) < 1),
+    cleared: entries.some((e) => e.target === canvas && e.clear),
+  };
 }
 
 function setUp({ lookahead = true } = {}) {
@@ -787,5 +826,107 @@ describe("VertixEngine lookahead", () => {
     expect([...storage.values()]).toEqual(["100"]);
     delete withStorage.localStorage;
     engine.destroy();
+  });
+
+  describe("scenes never mix", () => {
+    /** Feeds a one-face detection on every frame until the count change starts a dissolve (B-roll -> one speaker). */
+    const untilDissolve = (env: ReturnType<typeof setUp>) => {
+      for (let i = 0; i < 300 && !env.engine.getState().isTransitioning; i++) {
+        env.play(1);
+        env.detect(env.video.mediaTime);
+      }
+      expect(env.engine.getState().isTransitioning).toBe(true);
+    };
+
+    it("without lookahead, a dissolve blends two crops of the frame being drawn, never an earlier frame", () => {
+      const env = setUp({ lookahead: false });
+      untilDissolve(env);
+      let blendedFrames = 0;
+      while (env.engine.getState().isTransitioning) {
+        const from = drawLog.length;
+        env.play(1);
+        const drawn = outputSince(env.canvas, from);
+        expect([...drawn.frameSources]).toEqual([env.video]);
+        if (drawn.blended) blendedFrames += 1;
+      }
+      expect(blendedFrames).toBeGreaterThan(2);
+      env.engine.destroy();
+    });
+
+    it("with lookahead, a speaker-switch dissolve blends two crops of the displayed frame only", () => {
+      const env = setUp();
+      const { delayFrames } = env.engine.getLookaheadStatus();
+      env.play(3);
+      env.detectCut(env.video.mediaTime);
+      env.play(delayFrames + 2);
+      expect(env.engine.getState().speakerCount).toBe(1);
+      const switchSec = us(env.video.mediaTime)!;
+      env.internals.decisions.push({
+        mediaTimeSec: switchSec,
+        speakerCount: 1,
+        targetPanes: [{ pane: { source: { x: 800, y: 0, w: 405, h: 720 }, dest: { x: 0, y: 0, w: 405, h: 720 } } }],
+        reframe: "dissolve",
+        isCut: false,
+        cutSource: null,
+        skinRejectedFaces: [],
+      });
+      let blendedFrames = 0;
+      for (let i = 0; i < delayFrames + 12; i++) {
+        const from = drawLog.length;
+        env.play(1);
+        const drawn = outputSince(env.canvas, from);
+        if (drawn.frameSources.size === 0) continue;
+        expect(drawn.frameSources.size).toBe(1);
+        expect(drawn.frameSources.has(env.canvas)).toBe(false);
+        if (drawn.blended) blendedFrames += 1;
+      }
+      expect(blendedFrames).toBeGreaterThan(2);
+      env.engine.destroy();
+    });
+
+    it("a cut during a dissolve snaps: no blend from the frame it is applied on", () => {
+      const env = setUp({ lookahead: false });
+      untilDissolve(env);
+      env.play(1);
+      env.detectCut(env.video.mediaTime);
+      const from = drawLog.length;
+      env.play(1);
+      expect(env.engine.getState().isTransitioning).toBe(false);
+      expect(outputSince(env.canvas, from).blended).toBe(false);
+      env.engine.destroy();
+    });
+
+    it("a cut decided late is still a snap", () => {
+      const env = setUp({ lookahead: false });
+      env.play(5);
+      const cutSec = env.video.mediaTime;
+      env.play(5);
+      env.detectCut(cutSec);
+      const from = drawLog.length;
+      env.play(1);
+      expect(env.engine.getState()).toMatchObject({ speakerCount: 1, isTransitioning: false });
+      expect(outputSince(env.canvas, from).blended).toBe(false);
+      env.engine.destroy();
+    });
+
+    it("on a source change, clears the canvas and shows nothing from the previous clip", () => {
+      const env = setUp();
+      const { delayFrames } = env.engine.getLookaheadStatus();
+      env.play(3);
+      env.detectCut(env.video.mediaTime);
+      env.play(delayFrames + 5);
+      expect(env.engine.getState().speakerCount).toBe(1);
+      const from = drawLog.length;
+      env.video.emit("loadedmetadata");
+      const changedAtSec = env.video.mediaTime;
+      expect(outputSince(env.canvas, from).cleared).toBe(true);
+      expect(env.engine.getDisplayedMediaTime()).toBeNull();
+      expect(env.engine.getLookaheadStatus().bufferedFrames).toBe(0);
+      expect(env.engine.getState()).toMatchObject({ speakerCount: 0, isTransitioning: false });
+      const shown = env.play(delayFrames + 3).filter((t): t is number => t !== null);
+      expect(shown.length).toBeGreaterThan(0);
+      expect(shown.every((t) => t > changedAtSec)).toBe(true);
+      env.engine.destroy();
+    });
   });
 });
