@@ -174,12 +174,18 @@ dissolve or a layout change lands on the frame it belongs to.
   (`lookahead/slotHeightGovernor.ts`). Copies are drawn from the video
   synchronously, so no decoder frame is held.
 - **Cut trigger**: every buffered frame (above 30 fps, at most every
-  second frame) is scaled on the GPU to 160×120
-  and transferred (no readback on the main thread) to
-  `cutTriggerWorker.ts`, which scores it at 64×48; a likely cut starts a
-  detection on that frame at once instead of at the next 5-frame tick. The WASM detector still
-  decides. A cut found on a regular tick is moved back to the frame with
-  the biggest frame-to-frame jump.
+  second frame) goes to `cutTriggerWorker.ts`, which scores it at 64×48;
+  a likely cut starts a detection on that frame at once instead of at the
+  next 5-frame tick. The frame is sent as a `VideoFrame` of the video (no
+  draw on the main thread; the worker scales it on the GPU, reads back
+  160×120 and closes it, also on errors), at most one at a time so no
+  decoder frame is held; if the source cannot be wrapped (cross-origin
+  without CORS) or the worker cannot draw it, the buffered copy is scaled
+  on the GPU to 160×120 and transferred instead. No readback on the main
+  thread either way. Scores carry the generation of the last reset (seek,
+  mode change, new source), so late ones from before it are ignored. The
+  WASM detector still decides. A cut found on a regular tick is moved
+  back to the frame with the biggest frame-to-frame jump.
 - **Unavailable**: without a Web Audio graph (the element's own audio
   could not be delayed), or for a cross-origin source without CORS (a
   tainted canvas, or exact silence for 3 s from a cross-origin element

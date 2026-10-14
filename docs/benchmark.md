@@ -367,13 +367,19 @@ lookaheadComparison, precisionWarnings, results[] }`. Each result contains `summ
       so this is the audio/video offset as far as the page can measure it.
     - `summary.trigger`: `{ count, mainThreadMs, triggeredDetections }`,
       the main-thread cost per frame of the cut trigger and how many
-      detections it started. Added later within v5: `drawMs` (scaling the
-      frame into a small canvas and `transferToImageBitmap`) and `postMs`
-      (`postMessage`), the two parts of `mainThreadMs`.
+      detections it started. Added later within v5: `drawMs` (preparing
+      the frame: `new VideoFrame(video)`, or scaling the buffered copy into
+      a small canvas and `transferToImageBitmap`) and `postMs`
+      (`postMessage`), the two parts of `mainThreadMs`; `path`
+      (`videoframe`, `bitmap`, or `mixed` when a run used both: the
+      VideoFrame path falls back to the bitmap one for a source it cannot
+      wrap or the worker cannot draw); `skippedBusy` (frames not scored
+      because the previous VideoFrame was still in the worker: one at a
+      time, so no decoder frame is held).
     - `summary.detectionGaps`: `{ pairs, irregular, histogram }`, gaps
       between detections in frames (mouth motion is measured over the gap;
       regular is 5).
-    - Raw: `displays`, `cutsShown`, `triggers` (with `drawMs` and `postMs`),
+    - Raw: `displays`, `cutsShown`, `triggers` (with `drawMs`, `postMs` and `path`),
       and per detection `triggered`, `resolvedFaces`, `resolvedCx`.
   - New in v4: `summary.sceneCutCount` and `summary.sceneCuts[]`
     (`{ mediaTimeSec, histScore, gridScore, warmup }`, the hard cuts the

@@ -282,6 +282,8 @@ const FACE_DETECT_INTERVAL = 5;
 // Per-frame cut-trigger scores kept for cut localisation: a few seconds,
 // well over the gap between two detections.
 const SCORED_FRAME_HISTORY = 120;
+// A VideoFrame sent to the cut trigger with no answer after this long no longer blocks the next one.
+const VIDEO_FRAME_IN_FLIGHT_TIMEOUT_MS = 250;
 // A frame shown while paused waits for its own detection this long at most.
 const HELD_FRAME_TIMEOUT_MS = 500;
 // With lookahead, frames are shown from the frame callback while playing.
@@ -695,7 +697,11 @@ export class VertixEngine {
   private triggerSourceCanvas: OffscreenCanvas | null = null;
   private detectionSourceCanvas: OffscreenCanvas | null = null;
   private cutTriggerUnavailable = false;
+  // Bumped on every reset (seek, mode change, new source): scores from before it are ignored.
   private cutTriggerGeneration = 0;
+  // VideoFrame trigger path: the decoded frame itself goes to the worker, one at a time.
+  private videoFrameTriggerUnavailable = false;
+  private videoFrameInFlightSince: number | null = null;
   private pendingTriggerFrames = new Map<number, { mediaTimeSec: number; capturedAt: number }>();
   private scoredFrames: ScoredFrame[] = [];
   private pendingCutDetectionSec: number | null = null;
@@ -951,6 +957,7 @@ export class VertixEngine {
     this.srcDimsInitialized = false;
     this.frameCounter = 0;
     this.sourceTainted = false;
+    this.videoFrameTriggerUnavailable = false;
     this.audioMonitor.resetSilentPath();
     this.flushLookahead();
     this.frameBuffer = null;
@@ -1823,7 +1830,7 @@ export class VertixEngine {
           this.benchmarkProbe?.recordSkippedDetection();
         }
       }
-      if (this.shouldScoreForCut(frame.mediaTimeSec, intervalSec, rate)) this.scoreFrameForCut(frame);
+      if (this.shouldScoreForCut(frame.mediaTimeSec, intervalSec, rate)) this.scoreFrameForCut(frame, video);
     }
 
     this.stopDisplayLoop();
@@ -1897,21 +1904,66 @@ export class VertixEngine {
   }
 
   /**
-   * Sends a small copy of a buffered frame to the cut trigger: a GPU scale
-   * (drawImage) and a transfer, both synchronous, no pixel readback here.
+   * Sends the frame just buffered to the cut trigger. Preferred: the
+   * decoded frame itself as a VideoFrame (no draw on the main thread; the
+   * worker scales it and closes it), at most one in the worker at a time
+   * so no decoder frame is held for long. Fallback (no VideoFrame, or a
+   * source it cannot wrap): a GPU scale of the buffered copy and a
+   * transfer. Neither reads pixels back here.
    */
-  private scoreFrameForCut(frame: BufferedFrame<FrameSlot>): void {
+  private scoreFrameForCut(frame: BufferedFrame<FrameSlot>, video: HTMLVideoElement): void {
     const worker = this.ensureCutTriggerWorker();
     if (!worker) return;
-    this.lastScoredMediaSec = frame.mediaTimeSec;
     const start = performance.now();
-    this.pendingTriggerFrames.set(frame.frameIndex, { mediaTimeSec: frame.mediaTimeSec, capturedAt: start });
-    this.triggerSourceCanvas ??= new OffscreenCanvas(TRIGGER_SOURCE_W, TRIGGER_SOURCE_H);
-    const bitmap = scaledBitmap(this.triggerSourceCanvas, frame.slot.canvas);
+    const useVideoFrame = this.canUseVideoFrameTrigger();
+    if (useVideoFrame && this.videoFrameInFlightSince !== null) {
+      if (start - this.videoFrameInFlightSince < VIDEO_FRAME_IN_FLIGHT_TIMEOUT_MS) {
+        this.benchmarkProbe?.recordTriggerSkippedBusy();
+        return;
+      }
+      this.videoFrameInFlightSince = null;
+    }
+    const videoFrame = useVideoFrame ? this.wrapVideoFrame(video, frame.mediaTimeSec) : null;
+    let source: VideoFrame | ImageBitmap;
+    if (videoFrame) {
+      source = videoFrame;
+    } else {
+      this.triggerSourceCanvas ??= new OffscreenCanvas(TRIGGER_SOURCE_W, TRIGGER_SOURCE_H);
+      source = scaledBitmap(this.triggerSourceCanvas, frame.slot.canvas);
+    }
     const drawnAt = performance.now();
-    worker.postMessage({ type: "score", frameId: frame.frameIndex, bitmap }, [bitmap]);
+    const message = { type: "score", generation: this.cutTriggerGeneration, frameId: frame.frameIndex, source };
+    try {
+      worker.postMessage(message, [source]);
+    } catch {
+      source.close();
+      if (videoFrame) this.videoFrameTriggerUnavailable = true;
+      return;
+    }
+    if (videoFrame) this.videoFrameInFlightSince = start;
+    this.lastScoredMediaSec = frame.mediaTimeSec;
+    this.pendingTriggerFrames.set(frame.frameIndex, { mediaTimeSec: frame.mediaTimeSec, capturedAt: start });
     const end = performance.now();
-    this.benchmarkProbe?.recordTriggerCost(end - start, drawnAt - start, end - drawnAt);
+    this.benchmarkProbe?.recordTriggerCost(
+      end - start,
+      drawnAt - start,
+      end - drawnAt,
+      videoFrame ? "videoframe" : "bitmap"
+    );
+  }
+
+  private canUseVideoFrameTrigger(): boolean {
+    return !this.videoFrameTriggerUnavailable && typeof VideoFrame !== "undefined";
+  }
+
+  /** The video's current frame as a VideoFrame, or null (cross-origin without CORS throws; then never again for this source). */
+  private wrapVideoFrame(video: HTMLVideoElement, mediaTimeSec: number): VideoFrame | null {
+    try {
+      return new VideoFrame(video, { timestamp: Math.round(mediaTimeSec * 1e6) });
+    } catch {
+      this.videoFrameTriggerUnavailable = true;
+      return null;
+    }
   }
 
   /**
@@ -1928,7 +1980,23 @@ export class VertixEngine {
     return Promise.resolve(scaledBitmap(this.detectionSourceCanvas, source));
   }
 
-  private onCutTriggerScore(msg: { frameId: number; hist: number; grid: number; triggered: boolean }): void {
+  private onCutTriggerScore(msg: {
+    generation: number;
+    frameId: number;
+    wasVideoFrame: boolean;
+    failed: boolean;
+    hist: number;
+    grid: number;
+    triggered: boolean;
+  }): void {
+    if (msg.wasVideoFrame) this.videoFrameInFlightSince = null;
+    if (msg.generation !== this.cutTriggerGeneration) return;
+    if (msg.failed) {
+      // The worker could not draw a VideoFrame of this source: buffered copies from now on.
+      if (msg.wasVideoFrame) this.videoFrameTriggerUnavailable = true;
+      this.pendingTriggerFrames.delete(msg.frameId);
+      return;
+    }
     const pending = this.pendingTriggerFrames.get(msg.frameId);
     if (!pending) return;
     this.pendingTriggerFrames.delete(msg.frameId);

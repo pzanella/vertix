@@ -13,6 +13,7 @@ export type {
   DetectionSummary,
   DisplaySummary,
   KnownCutResult,
+  TriggerPath,
   TriggerSummary,
   FrameAccounting,
   LongTaskSummary,

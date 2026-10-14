@@ -12,11 +12,13 @@
 //
 // Usage (after `npm run build:wasm && npm run build:worker` and
 // `npm run make:bench-clips`):
-//   node scripts/check-lookahead.mjs [--only=<clip file>] [--chrome=/path/to/chrome] [--headed] [--cpu-throttle=<rate>]
+//   node scripts/check-lookahead.mjs [--only=<clip file>] [--chrome=/path/to/chrome] [--headed] [--cpu-throttle=<rate>] [--trigger-ab]
 //
 // --cpu-throttle slows the page's CPU by that factor (DevTools CPU
 // throttling), a rough stand-in for a phone. 50 fps clips also run with
-// lookahead on the scalar build.
+// lookahead on the scalar build. --trigger-ab adds, per clip, a run with
+// lookahead on and VideoFrame hidden, so the cut trigger takes its bitmap
+// path (labelled "bitmap trigger").
 //
 // Timings in headless Chrome are not representative of a real device; the
 // frame counts are what this checks.
@@ -33,6 +35,7 @@ const chromePath =
   args.find((arg) => arg.startsWith("--chrome="))?.slice("--chrome=".length) ??
   "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
 const headed = args.includes("--headed");
+const triggerAb = args.includes("--trigger-ab");
 const cpuThrottle = Number(args.find((arg) => arg.startsWith("--cpu-throttle="))?.slice("--cpu-throttle=".length) ?? 1);
 const DEBUG_PORT = 9333;
 const CLIP_TIMEOUT_MS = 10 * 60 * 1000;
@@ -55,7 +58,7 @@ const CLIPS = ONLY ? ALL_CLIPS.filter((clip) => clip.file === ONLY) : ALL_CLIPS;
  * - one 16:9 run (lookahead must be bypassed);
  * - a 16:9 -> 9:16 switch per build, timed.
  */
-async function runInPage(clips, extras) {
+async function runInPage(clips, extras, triggerAb) {
   const core = await import("/src/core/index.ts");
   const video = document.createElement("video");
   video.muted = false;
@@ -120,6 +123,12 @@ async function runInPage(clips, extras) {
   for (const clip of clips) {
     await run(clip, false, "clips");
     await run(clip, true, "clips");
+    if (triggerAb) {
+      const videoFrame = globalThis.VideoFrame;
+      globalThis.VideoFrame = undefined;
+      await run(clip, true, "bitmap trigger");
+      globalThis.VideoFrame = videoFrame;
+    }
     if (clip.fps > 30) {
       const pageBuild = core.getActiveWasmBuild();
       const other = pageBuild.variant === "simd" ? "scalar" : "simd";
@@ -298,7 +307,7 @@ try {
   await loaded;
 
   const evaluation = cdp.send("Runtime.evaluate", {
-    expression: `(${runInPage.toString()})(${JSON.stringify(CLIPS)}, ${JSON.stringify(!ONLY)})`,
+    expression: `(${runInPage.toString()})(${JSON.stringify(CLIPS)}, ${JSON.stringify(!ONLY)}, ${JSON.stringify(triggerAb)})`,
     awaitPromise: true,
     returnByValue: true,
   });
@@ -345,7 +354,12 @@ try {
         run.displayErrorMs.count > 0
           ? `${run.displayErrorMs.p50.toFixed(1)}/${run.displayErrorMs.p95.toFixed(1)}`
           : "-",
-      "trigger p95 ms": run.trigger.mainThreadMs.p95?.toFixed(3) ?? "-",
+      "trigger path": run.trigger.path ?? "-",
+      "trigger p95 ms (draw / post)":
+        run.trigger.mainThreadMs.p95 === null
+          ? "-"
+          : `${run.trigger.mainThreadMs.p95.toFixed(2)} (${run.trigger.drawMs.p95.toFixed(2)} / ${run.trigger.postMs.p95.toFixed(2)})`,
+      "trigger skipped busy": run.trigger.skippedBusy ?? "-",
       "triggered detections": run.trigger.triggeredDetections,
       "irregular gaps": `${run.detectionGaps.irregular}/${run.detectionGaps.pairs}`,
       "detect p95 ms": run.detectionTotalMs.p95?.toFixed(1) ?? "-",
