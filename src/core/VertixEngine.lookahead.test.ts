@@ -1,6 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { VertixEngine } from "./VertixEngine";
 import type { SceneCutScores } from "./layoutEngine";
+import type { BenchmarkProbe } from "./bench/BenchmarkRecorder";
+import type { ScoredFrame } from "./lookahead/cutTrigger";
 
 const audio = vi.hoisted(() => ({
   setOutputDelay: vi.fn(),
@@ -141,6 +143,7 @@ class FakeVideo {
 }
 
 interface EngineInternals {
+  scoredFrames: ScoredFrame[];
   processDetectionResult(
     facesFlat: Float64Array,
     sceneCut: SceneCutScores,
@@ -151,8 +154,27 @@ interface EngineInternals {
     cropW: number,
     cropH: number,
     detectionMode: "worker" | "main-thread",
-    inferenceMs: number
+    inferenceMs: number,
+    previousDetectionSec?: number | null,
+    triggeredByCut?: boolean
   ): void;
+}
+
+/** A probe that only keeps the cuts shown. */
+function cutProbe() {
+  const cuts: { cutMediaTimeSec: number; shownMediaTimeSec: number; source: string }[] = [];
+  const noop = () => {};
+  const probe: BenchmarkProbe = {
+    recordFrame: noop,
+    recordDetection: noop,
+    recordSkippedDetection: noop,
+    recordLayoutChange: noop,
+    recordTriggerCost: noop,
+    recordDisplay: noop,
+    recordCutShown: (_now, cutMediaTimeSec, shownMediaTimeSec, source) =>
+      cuts.push({ cutMediaTimeSec, shownMediaTimeSec, source }),
+  };
+  return { probe, cuts };
 }
 
 const LEFT_FACE = new Float64Array([0.3, 0.5, 0.2, 0.2, 0, 0.9, 0]);
@@ -180,7 +202,7 @@ function setUp() {
     }
     return shown;
   };
-  return { engine, video, detectCut, detect, refreshUntil };
+  return { engine, video, internals, detectCut, detect, refreshUntil };
 }
 
 describe("VertixEngine lookahead", () => {
@@ -230,6 +252,43 @@ describe("VertixEngine lookahead", () => {
     }
     expect(countBeforeCut).toBe(0);
     expect(countWhenCutShown).toBe(1);
+    engine.destroy();
+  });
+
+  it("moves a cut found on a regular detection back to the frame where it happened", () => {
+    const { engine, video, internals } = setUp();
+    const { probe, cuts } = cutProbe();
+    engine.setBenchmarkProbe(probe);
+    for (let i = 0; i < 9; i++) video.presentFrame();
+    // Frame-to-frame trigger scores: frame 7 (0.28 s) is the jump. Not
+    // triggered, so the regular detection on frame 9 finds the cut.
+    internals.scoredFrames = Array.from({ length: 9 }, (_, i) => ({
+      mediaTimeSec: (i + 1) / 25,
+      score: i + 1 === 7 ? 0.6 : 0.01,
+    }));
+    const cutFrameSec = 7 / 25;
+    internals.processDetectionResult(LEFT_FACE, CUT, null, 9 / 25, 1280, 720, 405, 720, "worker", 1, 5 / 25, false);
+
+    const countShownAt = new Map<number, number>();
+    for (let t = FRAME_MS; t <= 2000; t += REFRESH_MS) {
+      runRefresh(t);
+      const shown = engine.getDisplayedMediaTime();
+      if (shown !== null) countShownAt.set(shown, engine.getState().speakerCount);
+    }
+    expect(countShownAt.get(6 / 25)).toBe(0);
+    expect(countShownAt.get(cutFrameSec)).toBe(1);
+    expect(cuts).toEqual([{ cutMediaTimeSec: cutFrameSec, shownMediaTimeSec: cutFrameSec, source: "localised" }]);
+    engine.destroy();
+  });
+
+  it("reports a cut from a triggered detection as found by the trigger", () => {
+    const { engine, video, internals } = setUp();
+    const { probe, cuts } = cutProbe();
+    engine.setBenchmarkProbe(probe);
+    for (let i = 0; i < 3; i++) video.presentFrame();
+    internals.processDetectionResult(LEFT_FACE, CUT, null, 3 / 25, 1280, 720, 405, 720, "worker", 1, 0, true);
+    runRefresh(2000);
+    expect(cuts.map((c) => c.source)).toEqual(["trigger"]);
     engine.destroy();
   });
 
