@@ -12,24 +12,41 @@ export interface BufferedFrame<Slot> {
   forced: boolean;
 }
 
+/** Creates slots at the current size and tells their sizes apart. */
+export interface SlotAllocator<Slot> {
+  /** A new slot at the current size. */
+  create(): Slot;
+  /** Bytes a slot created now would take. */
+  bytesPerNewSlot(): number;
+  bytesOf(slot: Slot): number;
+  /** False for a slot of an earlier size: it is retired once released, when the budget allows a replacement. */
+  isCurrent(slot: Slot): boolean;
+}
+
 /**
  * Pool of frame slots, used as a FIFO of captured frames waiting to be
- * displayed. Slots are reused; at most `maxSlots` exist. The limit can
- * change at any time without dropping waiting frames: a lower limit frees
- * slots as frames are released. If every slot is waiting, the oldest
- * waiting frame is dropped to make room (counted in `overflowDrops`).
+ * displayed. Slots are created on demand and reused; at most `maxSlots`
+ * slots of the current size exist, and together they stay within
+ * `budgetBytes`. The limit and the slot size can change at any time
+ * without dropping waiting frames: extra slots are freed as their frames
+ * are released, and slots of an earlier size are retired the same way
+ * (they drain within one delay length, outside the limit and the budget).
+ * If no slot can be had, the oldest waiting frame is dropped to make room
+ * (counted in `overflowDrops`).
  */
 export class FrameRingBuffer<Slot> {
   private readonly free: Slot[] = [];
   private readonly queue: BufferedFrame<Slot>[] = [];
   private allocated = 0;
+  private _allocatedBytes = 0;
   private _maxSlots: number;
   private _overflowDrops = 0;
   private _skippedOnDisplay = 0;
 
   constructor(
-    private readonly createSlot: () => Slot,
-    maxSlots: number
+    private readonly allocator: SlotAllocator<Slot>,
+    maxSlots: number,
+    private readonly budgetBytes = Number.POSITIVE_INFINITY
   ) {
     this._maxSlots = maxSlots;
   }
@@ -48,6 +65,11 @@ export class FrameRingBuffer<Slot> {
     return this.allocated;
   }
 
+  /** Bytes of the slots that exist right now. */
+  get allocatedBytes(): number {
+    return this._allocatedBytes;
+  }
+
   /** Frames dropped before display because the pool was full. */
   get overflowDrops(): number {
     return this._overflowDrops;
@@ -61,19 +83,19 @@ export class FrameRingBuffer<Slot> {
   /** Changes the pool limit; extra slots are freed now if idle, else when their frames are released. */
   setMaxSlots(maxSlots: number): void {
     this._maxSlots = Math.max(1, maxSlots);
-    while (this.allocated > this._maxSlots && this.free.length > 0) {
-      this.free.pop();
-      this.allocated -= 1;
-    }
+    this.retireIdleSlots();
   }
 
   /** A slot to capture the next frame into. Fill it, then `enqueue` it. */
   acquire(): Slot {
+    this.retireIdleSlots();
     const reused = this.free.pop();
     if (reused !== undefined) return reused;
-    if (this.allocated < this._maxSlots) {
+    const current = this.currentSlotUse();
+    if (current.count < this._maxSlots && current.bytes + this.allocator.bytesPerNewSlot() <= this.budgetBytes) {
       this.allocated += 1;
-      return this.createSlot();
+      this._allocatedBytes += this.allocator.bytesPerNewSlot();
+      return this.allocator.create();
     }
     const oldest = this.queue.shift()!;
     this._overflowDrops += 1;
@@ -118,8 +140,34 @@ export class FrameRingBuffer<Slot> {
   }
 
   release(frame: BufferedFrame<Slot>): void {
-    if (this.allocated > this._maxSlots) this.allocated -= 1;
-    else this.free.push(frame.slot);
+    const { slot } = frame;
+    if (!this.allocator.isCurrent(slot) || this.currentSlotUse().count > this._maxSlots) this.discard(slot);
+    else this.free.push(slot);
+  }
+
+  /** Idle slots of an earlier size, or beyond the limit, are freed. */
+  private retireIdleSlots(): void {
+    for (let i = this.free.length - 1; i >= 0; i--) {
+      if (!this.allocator.isCurrent(this.free[i])) this.discard(this.free.splice(i, 1)[0]);
+    }
+    while (this.free.length > 0 && this.allocated > this._maxSlots) this.discard(this.free.pop()!);
+  }
+
+  /** Count and bytes of the slots of the current size (the ones the limit and the budget apply to). */
+  private currentSlotUse(): { count: number; bytes: number } {
+    let count = this.allocated;
+    let bytes = this._allocatedBytes;
+    for (const frame of this.queue) {
+      if (this.allocator.isCurrent(frame.slot)) continue;
+      count -= 1;
+      bytes -= this.allocator.bytesOf(frame.slot);
+    }
+    return { count, bytes };
+  }
+
+  private discard(slot: Slot): void {
+    this.allocated -= 1;
+    this._allocatedBytes -= this.allocator.bytesOf(slot);
   }
 
   /** The waiting frame with this media time, if it has not been displayed yet. */

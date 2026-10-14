@@ -1,9 +1,24 @@
 import { describe, expect, it } from "vitest";
 import { FrameRingBuffer, type BufferedFrame } from "./frameRingBuffer";
 
-function setUp(maxSlots = 4) {
+interface TestSlot {
+  id: number;
+  bytes: number;
+}
+
+function setUp(maxSlots = 4, budgetBytes = Number.POSITIVE_INFINITY) {
   let created = 0;
-  const buffer = new FrameRingBuffer(() => ({ id: created++ }), maxSlots);
+  const size = { bytes: 1 };
+  const buffer = new FrameRingBuffer<TestSlot>(
+    {
+      create: () => ({ id: created++, bytes: size.bytes }),
+      bytesPerNewSlot: () => size.bytes,
+      bytesOf: (slot) => slot.bytes,
+      isCurrent: (slot) => slot.bytes === size.bytes,
+    },
+    maxSlots,
+    budgetBytes
+  );
   let frameIndex = 0;
   const capture = (mediaTimeSec: number, held = false) => {
     const slot = buffer.acquire();
@@ -18,8 +33,8 @@ function setUp(maxSlots = 4) {
     buffer.enqueue(frame);
     return frame;
   };
-  const upTo = (sec: number) => (f: BufferedFrame<{ id: number }>) => f.mediaTimeSec <= sec;
-  return { buffer, capture, upTo, created: () => created };
+  const upTo = (sec: number) => (f: BufferedFrame<TestSlot>) => f.mediaTimeSec <= sec;
+  return { buffer, capture, upTo, size, created: () => created };
 }
 
 describe("FrameRingBuffer", () => {
@@ -101,5 +116,32 @@ describe("FrameRingBuffer", () => {
     buffer.release(buffer.takeLatest(upTo(2))!);
     expect(buffer.allocatedSlots).toBe(2);
     expect(buffer.length).toBe(2);
+  });
+
+  it("stays within the byte budget", () => {
+    const { buffer, capture } = setUp(10, 3);
+    for (let i = 1; i <= 5; i++) capture(i);
+    expect(buffer.allocatedSlots).toBe(3);
+    expect(buffer.allocatedBytes).toBe(3);
+    expect(buffer.overflowDrops).toBe(2);
+  });
+
+  it("switches to a smaller slot size without dropping frames, retiring old slots as they are released", () => {
+    const { buffer, capture, upTo, size } = setUp(4, 8);
+    size.bytes = 2;
+    for (let i = 1; i <= 4; i++) capture(i);
+    expect(buffer.allocatedBytes).toBe(8);
+    // More frames must wait than fit at the old size: smaller slots from now on.
+    size.bytes = 1;
+    buffer.setMaxSlots(8);
+    for (let t = 5; t <= 16; t++) {
+      capture(t);
+      const due = buffer.takeLatest(upTo(t - 6));
+      if (due) buffer.release(due);
+    }
+    expect(buffer.overflowDrops).toBe(0);
+    // Old-size slots drained: every slot is new, within the budget.
+    expect(buffer.allocatedBytes).toBe(buffer.allocatedSlots);
+    expect(buffer.allocatedBytes).toBeLessThanOrEqual(8);
   });
 });

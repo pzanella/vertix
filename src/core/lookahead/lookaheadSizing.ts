@@ -16,6 +16,8 @@ export const DEFAULT_DETECTION_P95_MS: Record<DeviceClass, Record<WasmBuildVaria
 /** Per-frame cut trigger (thumbnail → worker → verdict) p95 used until measured. */
 export const DEFAULT_TRIGGER_P95_MS = 10;
 export const DEFAULT_FRAME_INTERVAL_MS = 40;
+/** Until the frame rate is measured (or hinted), the pool may hold frames for up to this rate. */
+export const ASSUMED_MAX_FPS = 60;
 
 export const MIN_LOOKAHEAD_MS = 120;
 export const MAX_LOOKAHEAD_MS = 600;
@@ -62,7 +64,7 @@ export function alignToFrames(
 
 /** Total memory the frame buffer may use (96 MiB). */
 export const FRAME_BUFFER_BUDGET_BYTES = 96 * 1024 * 1024;
-const BYTES_PER_PIXEL = 4;
+export const BYTES_PER_PIXEL = 4;
 const MAX_SLOTS = 64;
 // Smaller sizes tried, in order, when the source size does not fit.
 const FALLBACK_SLOT_HEIGHTS = [1080, 720, 540];
@@ -88,16 +90,18 @@ export interface SlotSize {
  * The largest frame-copy size, never above the source, never above what
  * the output canvas can show (DISPLAY_CAP_FACTOR × its height on screen in
  * device pixels, when known), at which `neededSlots` copies fit
- * FRAME_BUFFER_BUDGET_BYTES.
+ * FRAME_BUFFER_BUDGET_BYTES. `maxHeight` caps it further (a reduced
+ * copy size while the device struggles).
  */
 export function chooseSlotSize(
   srcW: number,
   srcH: number,
   neededSlots: number,
-  displayHeightPx: number | null
+  displayHeightPx: number | null,
+  maxHeight: number | null = null
 ): SlotSize {
   const displayCap = displayHeightPx && displayHeightPx > 0 ? Math.ceil(displayHeightPx * DISPLAY_CAP_FACTOR) : srcH;
-  const top = Math.min(srcH, displayCap);
+  const top = Math.min(srcH, displayCap, maxHeight ?? srcH);
   const heights = [top, ...FALLBACK_SLOT_HEIGHTS.filter((h) => h < top)];
   const sizeAt = (height: number) => {
     const width = Math.max(2, Math.round((srcW * height) / srcH / 2) * 2);

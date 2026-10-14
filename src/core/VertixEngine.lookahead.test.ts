@@ -159,6 +159,7 @@ interface EngineInternals {
   scoredFrames: ScoredFrame[];
   detectionLatency: DetectionLatencyTracker;
   adoptMeasuredLength(build: string): void;
+  rampLookaheadLength(delay: { frames: number; lengthMs: number }): void;
   frameBuffer: { maxSlots: number; allocatedSlots: number } | null;
   processDetectionResult(
     facesFlat: Float64Array,
@@ -324,6 +325,65 @@ describe("VertixEngine lookahead", () => {
     expect(longestHold).toBeLessThanOrEqual(1);
     expect(us(engine.getDisplayedMediaTime())).toBe(us(video.mediaTime - after.delayFrames / 25));
     expect(engine.getLookaheadStatus().droppedFrames).toBe(0);
+    engine.destroy();
+  });
+
+  it("at 50 fps from the first frame, sizes the pool for 50 fps and never overflows", () => {
+    const { engine, video, internals, play } = setUp();
+    video.fps = 50;
+    play(200);
+    const status = engine.getLookaheadStatus();
+    expect(status.lengthMs).toBe(status.delayFrames * 20);
+    expect(internals.frameBuffer!.maxSlots).toBe(slotsForDelay(status.delayFrames));
+    expect(status.overflowDrops).toBe(0);
+    engine.destroy();
+  });
+
+  it("at 50 fps with most frame callbacks skipped, still measures 50 fps and never overflows", () => {
+    const { engine, video, play } = setUp();
+    video.fps = 50;
+    for (let i = 0; i < 150; i++) {
+      for (let skip = i % 3; skip > 0; skip--) video.skipFrame();
+      play(1);
+    }
+    const status = engine.getLookaheadStatus();
+    expect(status.lengthMs).toBe(status.delayFrames * 20);
+    expect(status.overflowDrops).toBe(0);
+    expect(us(engine.getDisplayedMediaTime())).toBeGreaterThanOrEqual(
+      us(video.mediaTime - status.delayFrames / 50 - 0.02)!
+    );
+    engine.destroy();
+  });
+
+  it("uses the host's frame-rate hint from the first frame", () => {
+    const { engine, video, internals, play } = setUp({ lookahead: false });
+    engine.setFrameRateHint(50);
+    engine.setLookaheadEnabled(true);
+    const { lengthMs, delayFrames } = engine.getLookaheadStatus();
+    expect(lengthMs).toBe(delayFrames * 20);
+    video.fps = 50;
+    play(1);
+    expect(internals.frameBuffer!.maxSlots).toBe(slotsForDelay(delayFrames));
+    play(100);
+    expect(engine.getLookaheadStatus()).toMatchObject({ lengthMs, delayFrames, overflowDrops: 0 });
+    engine.destroy();
+  });
+
+  it("before the frame rate is known, lets the pool hold the delay at 60 fps", () => {
+    const { engine, internals, play } = setUp();
+    play(1);
+    const { lengthMs } = engine.getLookaheadStatus();
+    expect(internals.frameBuffer!.maxSlots).toBe(slotsForDelay(Math.ceil(lengthMs / (1000 / 60))));
+    engine.destroy();
+  });
+
+  it("grows the pool when the same length becomes more frames", () => {
+    const { engine, internals, play } = setUp();
+    play(20);
+    const { lengthMs, delayFrames } = engine.getLookaheadStatus();
+    internals.rampLookaheadLength({ frames: delayFrames * 2, lengthMs });
+    expect(internals.frameBuffer!.maxSlots).toBe(slotsForDelay(delayFrames * 2));
+    expect(audio.rampOutputDelay).not.toHaveBeenCalled();
     engine.destroy();
   });
 

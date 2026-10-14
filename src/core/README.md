@@ -60,6 +60,7 @@ engine.destroy();
 | `getMetrics()` / `getState()` | Read the current snapshot without subscribing. |
 | `setLookaheadEnabled(enabled)` | Lookahead on or off (default) at runtime: see [Lookahead](#lookahead). |
 | `getLookaheadStatus()` | Whether lookahead runs, its length, why it is unavailable, buffer size and memory. |
+| `setFrameRateHint(fps)` | Optional: the source's frame rate when the host knows it (e.g. Shaka's active variant), so the lookahead length and buffer are right from the first frame. Measured intervals take over; `null` clears it. |
 | `getDisplayedMediaTime()` | Media time of the frame on screen (behind `video.currentTime` by the lookahead while playing). |
 | `setBenchmarkProbe(probe \| null)` | Benchmark mode only: report per-frame and per-detection timings to a `BenchmarkProbe` (e.g. a `BenchmarkRecorder`). `null` (the default) turns it off. See `docs/benchmark.md`. |
 
@@ -159,8 +160,15 @@ dissolve or a layout change lands on the frame it belongs to.
   (`lookahead/delaySchedule.ts`, at most a 5% speed change), with no flush.
 - **Frame copies**: the frames the delay needs plus 2, at the largest size
   (never above the source, never above 1.5× the output canvas height on
-  screen) at which they fit 96 MiB. The pool grows or shrinks with the
-  delay without dropping frames. Copies are drawn from the video
+  screen) at which they fit 96 MiB. The frame rate is the smallest
+  recurring step between frame callbacks (skipped callbacks only add
+  longer steps); until it is measured (or hinted with
+  `setFrameRateHint`) the pool may hold the delay at 60 fps. Slots are
+  created on demand, so a generous limit costs nothing. The pool grows or
+  shrinks with the delay or the frame rate without dropping frames; when
+  it needs a smaller copy size, new slots get it and old-size slots are
+  freed as their frames are shown (within one delay length, outside the
+  budget). Copies are drawn from the video
   synchronously, so no decoder frame is held.
 - **Cut trigger**: every buffered frame is scaled on the GPU to 160×120
   and transferred (no readback on the main thread) to

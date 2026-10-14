@@ -25,9 +25,12 @@ import { FrameRingBuffer, type BufferedFrame } from "./lookahead/frameRingBuffer
 import { TRIGGER_SOURCE_H, TRIGGER_SOURCE_W, locateCut, type ScoredFrame } from "./lookahead/cutTrigger";
 import { DetectionLatencyTracker } from "./lookahead/detectionLatency";
 import {
+  ASSUMED_MAX_FPS,
+  BYTES_PER_PIXEL,
   DEFAULT_DETECTION_P95_MS,
   DEFAULT_FRAME_INTERVAL_MS,
   DEFAULT_TRIGGER_P95_MS,
+  FRAME_BUFFER_BUDGET_BYTES,
   RollingP95,
   alignToFrames,
   chooseSlotSize,
@@ -642,6 +645,7 @@ export class VertixEngine {
   private nextDetectionFrameIndex = FACE_DETECT_INTERVAL;
   private lastCapturedMediaTime: number | null = null;
   private frameInterval = new FrameIntervalTracker();
+  private frameRateHintFps: number | null = null;
   private heldFrameTimeout: ReturnType<typeof setTimeout> | undefined = undefined;
   private displayFrameId: number | null = null;
   private lastDisplayCallbackAt: number | null = null;
@@ -830,6 +834,19 @@ export class VertixEngine {
 
   getLookaheadStatus(): LookaheadStatus {
     return this.lookaheadStatus();
+  }
+
+  /**
+   * The source's frame rate, when the host knows it (e.g. Shaka's active
+   * variant), so the lookahead length and the frame buffer are right from
+   * the first frame instead of after the first few. Measured frame
+   * intervals take over as soon as there are enough. Null clears it.
+   */
+  setFrameRateHint(fps: number | null): void {
+    const hint = fps !== null && Number.isFinite(fps) && fps > 0 ? fps : null;
+    if (hint === this.frameRateHintFps) return;
+    this.frameRateHintFps = hint;
+    if (this.lookaheadLengthMs > 0) this.refreshLookahead(this.frameBuffer?.length ? "ramp" : "flush");
   }
 
   /** Media time of the frame on screen, or null (see VertixMetrics.displayedMediaTimeSec). */
@@ -1074,23 +1091,53 @@ export class VertixEngine {
   /**
    * Moves to `delay` without a flush: the DelaySchedule ramps, the audio
    * DelayNode follows the same ramp, and the pool grows now (or shrinks
-   * once the ramp is over, when fewer frames wait).
+   * once the ramp is over, when fewer frames wait). The same length in
+   * another number of frames (a frame-rate change) needs no ramp, only
+   * another pool size.
    */
   private rampLookaheadLength(delay: FrameAlignedDelay): void {
-    if (delay.lengthMs === this.lookaheadLengthMs) return;
     const now = performance.now();
-    const durationMs = this.delaySchedule.rampTo(now, delay.lengthMs);
-    this.audioMonitor.rampOutputDelay(delay.lengthMs / 1000, durationMs / 1000);
-    this.lookaheadLengthMs = delay.lengthMs;
+    let shrinkAt = now;
+    if (delay.lengthMs !== this.lookaheadLengthMs) {
+      const durationMs = this.delaySchedule.rampTo(now, delay.lengthMs);
+      this.audioMonitor.rampOutputDelay(delay.lengthMs / 1000, durationMs / 1000);
+      this.lookaheadLengthMs = delay.lengthMs;
+      shrinkAt = now + durationMs;
+    }
     this.delayFrames = delay.frames;
+    this.sizePool(now, shrinkAt);
+  }
+
+  /** Media seconds per frame: measured, else the host's hint, else null. */
+  private knownIntervalSec(): number | null {
+    return this.frameInterval.intervalSec ?? (this.frameRateHintFps !== null ? 1 / this.frameRateHintFps : null);
+  }
+
+  /** Delay frames the pool must hold: at the known frame rate, or at ASSUMED_MAX_FPS before it is known. */
+  private poolDelayFrames(): number {
+    if (this.knownIntervalSec() !== null) return this.delayFrames;
+    return alignToFrames(this.lookaheadLengthMs, 1 / ASSUMED_MAX_FPS, this.video?.playbackRate || 1).frames;
+  }
+
+  /**
+   * Sizes the pool for the current delay: the largest copy size at which
+   * the frames it must hold fit the budget, and the slot limit. Growth
+   * applies now; a smaller limit from `shrinkAt` (the end of a shrinking
+   * ramp), when fewer frames wait.
+   */
+  private sizePool(now: number, shrinkAt: number): void {
     const buffer = this.frameBuffer;
-    if (!buffer || !this.slotSize) return;
-    const slots = maxSlotsFor(this.slotSize, slotsForDelay(delay.frames));
-    if (slots >= buffer.maxSlots) {
+    if (!buffer) return;
+    const { w, h } = this.srcDims;
+    const neededSlots = slotsForDelay(this.poolDelayFrames());
+    const size = chooseSlotSize(w, h, neededSlots, this.outputHeightOnScreenPx());
+    this.slotSize = size;
+    const slots = maxSlotsFor(size, neededSlots);
+    if (slots >= buffer.maxSlots || shrinkAt <= now) {
       buffer.setMaxSlots(slots);
       this.pendingMaxSlots = null;
     } else {
-      this.pendingMaxSlots = { slots, at: now + durationMs };
+      this.pendingMaxSlots = { slots, at: shrinkAt };
     }
   }
 
@@ -1104,7 +1151,7 @@ export class VertixEngine {
     const detectionP95 = measured ?? stored ?? DEFAULT_DETECTION_P95_MS[this.deviceClass][build];
     this.lookaheadDetectionP95Ms = detectionP95;
     const playbackRate = this.video?.playbackRate || 1;
-    this.lengthIntervalSec = this.frameInterval.intervalSec;
+    this.lengthIntervalSec = this.knownIntervalSec();
     const intervalSec = this.lengthIntervalSec ?? DEFAULT_FRAME_INTERVAL_MS / 1000;
     const lengthMs = lookaheadLengthMs(
       detectionP95,
@@ -1136,7 +1183,7 @@ export class VertixEngine {
       slotWidth: buffer ? (this.slotSize?.width ?? null) : null,
       slotHeight: buffer ? (this.slotSize?.height ?? null) : null,
       allocatedSlots,
-      bufferBytes: allocatedSlots * (this.slotSize?.bytesPerSlot ?? 0),
+      bufferBytes: buffer?.allocatedBytes ?? 0,
       bufferedFrames: buffer?.length ?? 0,
       droppedFrames: buffer ? buffer.overflowDrops + buffer.skippedOnDisplay : 0,
       overflowDrops: buffer?.overflowDrops ?? 0,
@@ -1716,7 +1763,7 @@ export class VertixEngine {
     this.stopDisplayLoop();
     const delayMs = this.delaySchedule.valueAt(presentedAtMs);
     const rate = video.playbackRate || 1;
-    const intervalSec = this.frameInterval.intervalSec ?? DEFAULT_FRAME_INTERVAL_MS / 1000;
+    const intervalSec = this.knownIntervalSec() ?? DEFAULT_FRAME_INTERVAL_MS / 1000;
     // A quarter frame of slack absorbs rounding in media timestamps.
     const dueUpToSec = metadata.mediaTime - (delayMs / 1000) * rate + intervalSec / 4;
     const due = this.frameBuffer!.takeLatest((f) => f.mediaTimeSec <= dueUpToSec);
@@ -1727,7 +1774,7 @@ export class VertixEngine {
 
   /** A frame-rate change (another rendition) or the first measured interval moves the length to whole frames of the new rate. */
   private followFrameRate(): void {
-    const interval = this.frameInterval.intervalSec;
+    const interval = this.knownIntervalSec();
     if (interval === null) return;
     const used = this.lengthIntervalSec;
     if (used === null || Math.abs(interval - used) / used > FRAME_RATE_CHANGE_FRACTION) this.refreshLookahead("ramp");
@@ -1891,17 +1938,23 @@ export class VertixEngine {
   /** The pool, sized for the current delay: copies no larger than the source or than the output canvas can show. */
   private ensureFrameBuffer(): FrameRingBuffer<FrameSlot> {
     if (this.frameBuffer) return this.frameBuffer;
-    const { w, h } = this.srcDims;
-    const neededSlots = slotsForDelay(this.delayFrames);
-    const size = chooseSlotSize(w, h, neededSlots, this.outputHeightOnScreenPx());
-    this.slotSize = size;
-    this.frameBuffer = new FrameRingBuffer(
-      () => {
-        const canvas = new OffscreenCanvas(size.width, size.height);
-        return { canvas, ctx: canvas.getContext("2d", { alpha: false })! };
+    const isCurrentSize = (slot: FrameSlot) =>
+      slot.canvas.width === this.slotSize?.width && slot.canvas.height === this.slotSize.height;
+    this.frameBuffer = new FrameRingBuffer<FrameSlot>(
+      {
+        create: () => {
+          const canvas = new OffscreenCanvas(this.slotSize!.width, this.slotSize!.height);
+          return { canvas, ctx: canvas.getContext("2d", { alpha: false })! };
+        },
+        bytesPerNewSlot: () => this.slotSize!.bytesPerSlot,
+        bytesOf: (slot) => slot.canvas.width * slot.canvas.height * BYTES_PER_PIXEL,
+        isCurrent: isCurrentSize,
       },
-      maxSlotsFor(size, neededSlots)
+      1,
+      FRAME_BUFFER_BUDGET_BYTES
     );
+    const now = performance.now();
+    this.sizePool(now, now);
     return this.frameBuffer;
   }
 
