@@ -107,10 +107,12 @@ turns lookahead off, so the delay never causes silence.
 ## Lookahead and the player's time display
 
 Lookahead is off by default; `engine.setLookaheadEnabled(true)` turns it
-on. With lookahead on, the canvas shows each frame a fixed
-delay after the video element decodes it (about 0.17 s on desktop, 0.3 s
-on a phone; `engine.getLookaheadStatus().lengthMs`), and the audio is
-delayed by the same amount. The engine still never controls playback, so
+on. With lookahead on, in 9:16, the canvas shows each frame a fixed
+delay after the video element decodes it (a whole number of frames, about
+0.2 s on desktop and 0.3 s on a phone; `engine.getLookaheadStatus().lengthMs`),
+and the audio is delayed by the same amount. In 16:9 it is bypassed: no
+delay. Switching 16:9 → 9:16 holds the picture and silences the audio for
+that delay once. The engine still never controls playback, so
 a player UI that reads `video.currentTime` (Shaka UI, Video.js controls,
 native controls) runs ahead of the picture by that delay while playing,
 and matches it again once paused (the buffer drains to the paused frame).

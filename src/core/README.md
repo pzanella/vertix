@@ -134,26 +134,38 @@ not the layout math itself.
 
 ## Lookahead
 
-With lookahead on (off by default), every decoded frame is copied into a ring
-of `OffscreenCanvas` slots (`lookahead/frameRingBuffer.ts`) and drawn by a
-`requestAnimationFrame` loop at its own display time plus the lookahead
-length. The audio goes through the same delay (`audioActivity.ts`: a
-`DelayNode` after the analyser). Detection results become decisions stamped
+With lookahead on (off by default) and in 9:16, every decoded frame is
+copied into a ring of `OffscreenCanvas` slots (`lookahead/frameRingBuffer.ts`).
+In the same frame callback, the buffered frame whose time has come is
+drawn: the newest one with mediaTime <= current mediaTime − the delay.
+The delay is a whole number of frames, so that frame appears exactly when
+the video element would show it, and picking by media time keeps the
+sync when a frame callback is skipped. `requestAnimationFrame` only
+drains the buffer when no callbacks come (paused, buffering, ended). The
+audio goes through the same delay (`audioActivity.ts`: a `DelayNode` after
+the analyser). Detection results become decisions stamped
 with their frame's media time (`lookahead/decisionTimeline.ts`) and are
 applied when that frame is drawn, so a snap after a cut, a speaker-switch
 dissolve or a layout change lands on the frame it belongs to.
 
 - **Length**: 2 × detection p95 + cut-trigger p95 + one frame, kept within
-  120–600 ms (`lookahead/lookaheadSizing.ts`). Per-device and per-build
-  defaults until this device has measured its own (stored in
-  `localStorage`). It only changes at a seek, a source change or the
-  switch, never mid-playback.
-- **Frame copies**: the largest size (source size first) at which the
-  frames needed fit 96 MiB. Copies are drawn from the video synchronously,
-  so no decoder frame is held.
-- **Cut trigger**: a 64×48 thumbnail of every frame goes to
-  `cutTriggerWorker.ts`; a likely cut starts a detection on that frame at
-  once instead of at the next 5-frame tick. The WASM detector still
+  120–600 ms and rounded up to whole frames (`lookahead/lookaheadSizing.ts`).
+  Per-device and per-build defaults until this device has measured its
+  own (stored in `localStorage`); detections from a detector's first 2 s
+  or first 5 results never count (`lookahead/detectionLatency.ts`). At a
+  seek, a source change, a mode change or the switch it applies at once;
+  during playback (the measured value replacing the default, a frame-rate
+  or speed change) video and audio ramp to it together
+  (`lookahead/delaySchedule.ts`, at most a 5% speed change), with no flush.
+- **Frame copies**: the frames the delay needs plus 2, at the largest size
+  (never above the source, never above 1.5× the output canvas height on
+  screen) at which they fit 96 MiB. The pool grows or shrinks with the
+  delay without dropping frames. Copies are drawn from the video
+  synchronously, so no decoder frame is held.
+- **Cut trigger**: every buffered frame is scaled on the GPU to 160×120
+  and transferred (no readback on the main thread) to
+  `cutTriggerWorker.ts`, which scores it at 64×48; a likely cut starts a
+  detection on that frame at once instead of at the next 5-frame tick. The WASM detector still
   decides. A cut found on a regular tick is moved back to the frame with
   the biggest frame-to-frame jump.
 - **Unavailable**: without a Web Audio graph (the element's own audio
@@ -165,6 +177,11 @@ dissolve or a layout change lands on the frame it belongs to.
   together, on the frame at `currentTime`); play and seek refill it (the
   last frame holds, audio is silent, for the lookahead length); a frame
   shown while paused waits for its own detection, and after a seek while
-  paused that detection commits the speaker count at once, like a cut; rate changes and
-  rendition switches need nothing special.
+  paused that detection commits the speaker count at once, like a cut;
+  rate changes and frame-rate changes (renditions) ramp the length.
+- **16:9**: bypassed (no detection, nothing to look ahead for). Switching
+  to 16:9 drops the delay behind a 15 ms fade. Switching to 9:16 shows the
+  current frame at once as a 9:16 frame, re-shows it cropped once its own
+  detection is in (the count commits at once), and holds it, with the
+  audio silent, until the delayed stream reaches it.
 

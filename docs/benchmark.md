@@ -76,7 +76,8 @@ with the numbers.
    from every summary.
 5. **Baseline** (optional): play `1-speaker.mp4` again in 16:9 mode. That mode
    runs no detection and draws the full frame unchanged, so it runs once,
-   with whichever build is loaded.
+   with whichever build is loaded. Lookahead is bypassed in 16:9
+   (`lookahead.bypassed` is true and `audioDelayMs` 0).
 
 When the suite ends (finished, stopped or failed), the app switches back to
 the build it picks on its own.
@@ -326,7 +327,21 @@ lookaheadComparison, precisionWarnings, results[] }`. Each result contains `summ
     - Per result, `lookahead`: `{ enabled, unavailableReason, lengthMs,
       slotWidth, slotHeight, allocatedSlots, bufferBytes, droppedFrames }`
       (frame-copy size, estimated buffer memory, frames dropped by the
-      buffer or superseded on display).
+      buffer or superseded on display), read at the end of the run. Added
+      later within v5:
+      - `bypassed`: on, but not running because the run is 16:9 (no
+        detection); the 16:9 baseline shows `true` with `audioDelayMs` 0.
+      - `audioDelayMs`: the audio delay actually applied.
+      - `delayFrames`: `lengthMs` in whole frames (the length is rounded up
+        to whole frames).
+      - `detectionP95Ms` and `lengthSource` (`measured`, `stored` or
+        `default`): the detection time behind `lengthMs` and where it came
+        from. Detections from a detector's first 2 s or first 5 results
+        never count.
+      - `overflowDrops` (the pool was full; should be 0) and
+        `skippedOnDisplay` (a buffered frame passed over because the frame
+        callback of its counterpart was skipped, or while the delay
+        shrinks); `droppedFrames` is their sum.
     - `summary.cutsShown[]`: every applied cut decision,
       `{ cutMediaTimeSec, shownMediaTimeSec, framesLate, source }`, where
       `framesLate` counts displayed frames from the cut frame up to the one
@@ -345,12 +360,14 @@ lookaheadComparison, precisionWarnings, results[] }`. Each result contains `summ
       so this is the audio/video offset as far as the page can measure it.
     - `summary.trigger`: `{ count, mainThreadMs, triggeredDetections }`,
       the main-thread cost per frame of the cut trigger and how many
-      detections it started.
+      detections it started. Added later within v5: `drawMs` (scaling the
+      frame into a small canvas and `transferToImageBitmap`) and `postMs`
+      (`postMessage`), the two parts of `mainThreadMs`.
     - `summary.detectionGaps`: `{ pairs, irregular, histogram }`, gaps
       between detections in frames (mouth motion is measured over the gap;
       regular is 5).
-    - Raw: `displays`, `cutsShown`, `triggers`, and per detection
-      `triggered`, `resolvedFaces`, `resolvedCx`.
+    - Raw: `displays`, `cutsShown`, `triggers` (with `drawMs` and `postMs`),
+      and per detection `triggered`, `resolvedFaces`, `resolvedCx`.
   - New in v4: `summary.sceneCutCount` and `summary.sceneCuts[]`
     (`{ mediaTimeSec, histScore, gridScore, warmup }`, the hard cuts the
     detector found, warm-up included), and per-detection columns in

@@ -262,8 +262,9 @@ Sourced from [Pexels](https://www.pexels.com/), free to use under the
 
 1. `VertixEngine.attach(video, canvas)` starts a frame loop driven by
    `requestVideoFrameCallback`. With lookahead on (off by default; the
-   dashboard has a switch) each decoded frame is copied into a short buffer and drawn a fixed delay later
-   (about 0.17 s on desktop, 0.3 s on a phone), with the audio delayed by
+   dashboard has a switch) each decoded frame in 9:16 is copied into a
+   short buffer and drawn a fixed delay later (a whole number of frames,
+   about 0.2 s on desktop, 0.3 s on a phone), with the audio delayed by
    the same amount through Web Audio, so every frame's detection result is
    known before it is shown and a crop change lands on the exact frame of
    a source cut. With lookahead off, frames are drawn as they are decoded.
