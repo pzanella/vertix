@@ -20,6 +20,7 @@
     "build:wasm": "node scripts/build-wasm.mjs",
     "build:worker": "node scripts/build-worker.mjs",
     "compare:wasm": "node scripts/compare-wasm-builds.mjs",
+    "make:bench-clips": "node scripts/make-cut-clips.mjs --bench",
     "lint": "eslint .",
     "lint:fix": "eslint . --fix",
     "format": "prettier --write .",

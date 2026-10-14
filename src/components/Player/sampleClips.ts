@@ -30,7 +30,7 @@ export interface BenchmarkClip {
 
 /**
  * Benchmark-only test clips with known hard cuts, made by
- * `scripts/make-cut-clips.mjs --bench` from the sample clips (1280x720,
+ * `npm run make:bench-clips` from the sample clips (1280x720,
  * 25 fps, no audio; not in the repository). Not offered in the sample picker.
  */
 export const CUT_TEST_CLIPS: BenchmarkClip[] = [

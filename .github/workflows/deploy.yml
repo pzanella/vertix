@@ -51,7 +51,7 @@ jobs:
       # instead of relying on whatever the runner image happens to ship.
       - name: Install ffmpeg
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg
-      - run: node scripts/make-cut-clips.mjs --bench
+      - run: npm run make:bench-clips
       # --base matches this repo's GitHub Pages project-site path
       # (https://<owner>.github.io/vertix/) — Vite needs it so every
       # bundled asset URL resolves under that subpath instead of the

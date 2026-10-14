@@ -8,7 +8,7 @@
 // .eval/lookahead-check.json (gitignored).
 //
 // Usage (after `npm run build:wasm && npm run build:worker` and
-// `node scripts/make-cut-clips.mjs --bench`):
+// `npm run make:bench-clips`):
 //   node scripts/check-lookahead.mjs [--only=<clip file>] [--chrome=/path/to/chrome] [--headed]
 //
 // Timings in headless Chrome are not representative of a real device; the

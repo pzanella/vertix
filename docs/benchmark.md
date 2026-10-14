@@ -60,8 +60,7 @@ with the numbers.
    odd-numbered clips, scalar then SIMD on the even-numbered ones. Without
    SIMD support, each clip runs once with lookahead off and once on, with
    the scalar build.
-   The test clips are not in the repository: `node scripts/make-cut-clips.mjs
-   --bench` makes them from the sample clips (needs ffmpeg). The deploy
+   The test clips are not in the repository: `npm run make:bench-clips` makes them from the sample clips (needs ffmpeg). The deploy
    workflow runs it, so they are on GitHub Pages; run it once locally before
    using the suite with `npm run dev` or `npm run preview`.
 3. **Build switch and WASM warm-up**: whenever the next run needs the other

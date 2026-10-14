@@ -5,9 +5,10 @@
 // Every part is scaled to 1280x720 at 25 fps without audio. Writes to
 // .eval/cut-clips/ (gitignored), with each clip's join times in a .json
 // next to it (the ground truth eval-cuts.mjs uses for these clips).
-// With --bench, writes only the clips the benchmark suite plays, to
-// public/bench/ (gitignored; the deploy workflow runs this so they are on
-// GitHub Pages). Their join times are also in src/components/Player/sampleClips.ts.
+// With --bench (`npm run make:bench-clips`), writes only the clips the
+// benchmark suite plays, to public/bench/ (gitignored; the deploy workflow
+// runs this so they are on GitHub Pages). Their join times are also in
+// src/components/Player/sampleClips.ts.
 //
 // Usage (needs ffmpeg on PATH): node scripts/make-cut-clips.mjs [--bench]
 import { spawnSync } from "node:child_process";
