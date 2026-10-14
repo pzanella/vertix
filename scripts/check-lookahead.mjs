@@ -47,6 +47,7 @@ const ALL_CLIPS = [
   { file: "cross-offset.mp4", url: "/bench/cross-offset.mp4", fps: 25, knownCutsSec: [4.08, 8.12, 12.16] },
   { file: "3-speakers.mp4", url: "/samples/3-speakers.mp4", fps: 25, knownCutsSec: [] },
   { file: "2-speakers-b.mp4", url: "/samples/2-speakers-b.mp4", fps: 50, knownCutsSec: [] },
+  { file: "cross-50fps.mp4", url: "/bench/cross-50fps.mp4", fps: 50, knownCutsSec: [4.06, 8.14, 12.18] },
 ];
 const CLIPS = ONLY ? ALL_CLIPS.filter((clip) => clip.file === ONLY) : ALL_CLIPS;
 

@@ -2,7 +2,8 @@
 // clips, for scripts/eval-cuts.mjs and for checking cut handling in the
 // browser. The sample clips themselves contain no cuts.
 //
-// Every part is scaled to 1280x720 at 25 fps without audio. Writes to
+// Every part is scaled to 1280x720 at 25 fps (50 fps for clips that say so)
+// without audio. Writes to
 // .eval/cut-clips/ (gitignored), with each clip's join times in a .json
 // next to it (the ground truth eval-cuts.mjs uses for these clips).
 // With --bench (`npm run make:bench-clips`), writes only the clips the
@@ -56,6 +57,19 @@ const CLIPS = [
     ],
   },
   {
+    name: "cross-50fps",
+    description:
+      "50 fps, cuts between detection frames on odd frames (203, 407, 609), some on frames the half-rate cut trigger skips",
+    benchmark: true,
+    fps: 50,
+    parts: [
+      ["2-speakers-b.mp4", 1, 5.06],
+      ["1-speaker.mp4", 2, 6.08],
+      ["3-speakers.mp4", 2, 6.04],
+      ["2-speakers-a.mp4", 3, 7],
+    ],
+  },
+  {
     name: "same-clip",
     description: "two parts of one clip far apart in time (same people, same room)",
     parts: [
@@ -71,7 +85,7 @@ for (const clip of CLIPS.filter((c) => !bench || c.benchmark)) {
   const inputs = clip.parts.flatMap(([file]) => ["-i", join(samplesDir, file)]);
   const filters = clip.parts.map(
     ([, start, end], i) =>
-      `[${i}:v]trim=start=${start}:end=${end},setpts=PTS-STARTPTS,scale=1280:720,fps=25,setsar=1[v${i}]`
+      `[${i}:v]trim=start=${start}:end=${end},setpts=PTS-STARTPTS,scale=1280:720,fps=${clip.fps ?? 25},setsar=1[v${i}]`
   );
   const concatInputs = clip.parts.map((_, i) => `[v${i}]`).join("");
   filters.push(`${concatInputs}concat=n=${clip.parts.length}:v=1:a=0[out]`);

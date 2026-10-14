@@ -50,10 +50,13 @@ with the numbers.
 1. Collect the environment info. This includes a few milliseconds of
    busy-waiting to measure the timer resolution, so it happens before any
    playback.
-2. For each of the six clips in `public/samples/` and the three test clips in
+2. For each of the six clips in `public/samples/` and the four test clips in
    `public/bench/` (`cross-count.mp4`, `cross-same-count.mp4`: hard cuts at
    4, 8 and 12 s, on detection frames; `cross-offset.mp4`: hard cuts at
-   4.08, 8.12 and 12.16 s, between detection frames), in order, run the
+   4.08, 8.12 and 12.16 s, between detection frames; `cross-50fps.mp4`:
+   50 fps, hard cuts at 4.06, 8.14 and 12.18 s, on odd frames between
+   detection frames, so some fall on frames the half-rate cut trigger
+   skips), in order, run the
    clip once with lookahead off, on the build already loaded, then once per
    WASM build with lookahead on (see
    [WASM builds](#wasm-builds-simd-and-scalar)): SIMD then scalar on the
