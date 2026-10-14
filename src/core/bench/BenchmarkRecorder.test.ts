@@ -122,4 +122,15 @@ describe("BenchmarkRecorder", () => {
     }
     expect(recorder.finish("9:16").summary.frames.duplicateCallbacks).toBe(10);
   });
+
+  it("summarizes the trigger's main-thread cost and its two parts", () => {
+    const recorder = new BenchmarkRecorder({ clipName: "a", video: fakeVideo(10), warmupSec: 0, nominalFps: 25 });
+    recorder.recordFrame(0, 1, 0, 0);
+    for (let i = 0; i < 20; i++) recorder.recordTriggerCost(0.3, 0.2, 0.1);
+    const { trigger } = recorder.finish("9:16").summary;
+    expect(trigger.count).toBe(20);
+    expect(trigger.mainThreadMs.p95).toBeCloseTo(0.3);
+    expect(trigger.drawMs.p50).toBeCloseTo(0.2);
+    expect(trigger.postMs.max).toBeCloseTo(0.1);
+  });
 });

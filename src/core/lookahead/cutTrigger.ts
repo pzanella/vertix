@@ -9,6 +9,15 @@
 
 export const TRIGGER_W = 64;
 export const TRIGGER_H = 48;
+/**
+ * Size the main thread draws each frame at before handing it to the
+ * trigger worker, which scales it down to TRIGGER_W x TRIGGER_H. Kept above
+ * the size below which Chrome may keep a 2D canvas on the CPU (drawing a
+ * GPU frame into such a canvas would read the whole frame back on the
+ * main thread).
+ */
+export const TRIGGER_SOURCE_W = 160;
+export const TRIGGER_SOURCE_H = 120;
 const PIXELS = TRIGGER_W * TRIGGER_H;
 const HIST_BINS = 64;
 const BLOCK = 8;

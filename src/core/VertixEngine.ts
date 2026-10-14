@@ -22,7 +22,7 @@ import {
   type Reframe,
 } from "./lookahead/decisionTimeline";
 import { FrameRingBuffer, type BufferedFrame } from "./lookahead/frameRingBuffer";
-import { TRIGGER_H, TRIGGER_W, locateCut, type ScoredFrame } from "./lookahead/cutTrigger";
+import { TRIGGER_SOURCE_H, TRIGGER_SOURCE_W, locateCut, type ScoredFrame } from "./lookahead/cutTrigger";
 import { DetectionLatencyTracker } from "./lookahead/detectionLatency";
 import {
   DEFAULT_DETECTION_P95_MS,
@@ -503,6 +503,14 @@ interface FrameSlot {
   ctx: OffscreenCanvasRenderingContext2D;
 }
 
+/** Scales `source` into `canvas` on the GPU and takes the result as a bitmap, leaving the canvas blank. */
+function scaledBitmap(canvas: OffscreenCanvas, source: CanvasImageSource): ImageBitmap {
+  const ctx = canvas.getContext("2d")!;
+  ctx.imageSmoothingQuality = "low";
+  ctx.drawImage(source, 0, 0, canvas.width, canvas.height);
+  return canvas.transferToImageBitmap();
+}
+
 type MetricsListener = (metrics: VertixMetrics) => void;
 type StateListener = (state: VertixState) => void;
 
@@ -641,6 +649,10 @@ export class VertixEngine {
   // Per-frame cut trigger (lookahead only): scores every buffered frame in
   // its own worker and asks for a detection right away on a likely cut.
   private cutTriggerWorker: Worker | null = null;
+  // Small GPU canvases the buffered frame is scaled into for the trigger and
+  // for detection; transferToImageBitmap hands their pixels over without a copy.
+  private triggerSourceCanvas: OffscreenCanvas | null = null;
+  private detectionSourceCanvas: OffscreenCanvas | null = null;
   private cutTriggerUnavailable = false;
   private cutTriggerGeneration = 0;
   private pendingTriggerFrames = new Map<number, { mediaTimeSec: number; capturedAt: number }>();
@@ -1231,11 +1243,10 @@ export class VertixEngine {
           this.pendingCutDetectionSec = null;
         },
       });
-      // Resizing via createImageBitmap instead of drawImage+getImageData
-      // here keeps the main thread from doing a synchronous GPU→CPU
-      // readback every detection tick — the worker does that part now
-      // (see faceDetectionWorker.ts).
-      createImageBitmap(source, { resizeWidth: FACE_W, resizeHeight: FACE_H, resizeQuality: "low" })
+      // No getImageData here: the main thread only scales the frame and
+      // hands it over; the GPU→CPU readback happens in the worker (see
+      // faceDetectionWorker.ts).
+      this.detectionInputBitmap(source)
         .then((bitmap) => {
           if (probe) bitmapReadyAt = performance.now();
           if (generation !== this.detectionRequestGeneration || !sharedWorker) {
@@ -1707,27 +1718,35 @@ export class VertixEngine {
     return this.cutTriggerWorker;
   }
 
-  /** Sends a thumbnail of a buffered frame to the cut trigger. Only the createImageBitmap/postMessage calls run here. */
+  /**
+   * Sends a small copy of a buffered frame to the cut trigger: a GPU scale
+   * (drawImage) and a transfer, both synchronous, no pixel readback here.
+   */
   private scoreFrameForCut(frame: BufferedFrame<FrameSlot>): void {
     const worker = this.ensureCutTriggerWorker();
     if (!worker) return;
     const start = performance.now();
-    const generation = this.cutTriggerGeneration;
-    const probe = this.benchmarkProbe;
     this.pendingTriggerFrames.set(frame.frameIndex, { mediaTimeSec: frame.mediaTimeSec, capturedAt: start });
-    let syncMs = 0;
-    createImageBitmap(frame.slot.canvas, { resizeWidth: TRIGGER_W, resizeHeight: TRIGGER_H, resizeQuality: "low" })
-      .then((bitmap) => {
-        const postStart = performance.now();
-        if (generation !== this.cutTriggerGeneration || worker !== this.cutTriggerWorker) {
-          bitmap.close();
-          return;
-        }
-        worker.postMessage({ type: "score", frameId: frame.frameIndex, bitmap }, [bitmap]);
-        probe?.recordTriggerCost(syncMs + performance.now() - postStart);
-      })
-      .catch(() => this.pendingTriggerFrames.delete(frame.frameIndex));
-    syncMs = performance.now() - start;
+    this.triggerSourceCanvas ??= new OffscreenCanvas(TRIGGER_SOURCE_W, TRIGGER_SOURCE_H);
+    const bitmap = scaledBitmap(this.triggerSourceCanvas, frame.slot.canvas);
+    const drawnAt = performance.now();
+    worker.postMessage({ type: "score", frameId: frame.frameIndex, bitmap }, [bitmap]);
+    const end = performance.now();
+    this.benchmarkProbe?.recordTriggerCost(end - start, drawnAt - start, end - drawnAt);
+  }
+
+  /**
+   * The detector's 320x240 input as a bitmap: from the video with
+   * createImageBitmap (no lookahead), or from a buffered frame with a GPU
+   * scale and a transfer, without the full-size bitmap and promise
+   * createImageBitmap makes for a canvas.
+   */
+  private detectionInputBitmap(source: HTMLVideoElement | OffscreenCanvas): Promise<ImageBitmap> {
+    if (!(source instanceof OffscreenCanvas)) {
+      return createImageBitmap(source, { resizeWidth: FACE_W, resizeHeight: FACE_H, resizeQuality: "low" });
+    }
+    this.detectionSourceCanvas ??= new OffscreenCanvas(FACE_W, FACE_H);
+    return Promise.resolve(scaledBitmap(this.detectionSourceCanvas, source));
   }
 
   private onCutTriggerScore(msg: { frameId: number; hist: number; grid: number; triggered: boolean }): void {

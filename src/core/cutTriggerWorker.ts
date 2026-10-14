@@ -1,7 +1,8 @@
-import { CutTrigger } from "./lookahead/cutTrigger";
+import { CutTrigger, TRIGGER_H, TRIGGER_W } from "./lookahead/cutTrigger";
 
 /**
- * Scores every frame's 64x48 thumbnail for the cut pre-screen, off the main
+ * Scores every frame's 64x48 thumbnail (scaled here from the 160x120
+ * bitmap the main thread sends) for the cut pre-screen, off the main
  * thread and apart from the detection worker (which is busy for 50-200 ms
  * per detection, so a message queued behind it would arrive too late).
  * Plain JS, no WASM. Bundled like faceDetectionWorker.ts, see
@@ -29,12 +30,13 @@ ctx.onmessage = (e: MessageEvent<ScoreMessage | ResetMessage>) => {
     return;
   }
   const { bitmap } = msg;
-  if (!canvas || canvas.width !== bitmap.width || canvas.height !== bitmap.height) {
-    canvas = new OffscreenCanvas(bitmap.width, bitmap.height);
+  if (!canvas) {
+    canvas = new OffscreenCanvas(TRIGGER_W, TRIGGER_H);
     canvasCtx = canvas.getContext("2d", { willReadFrequently: true });
   }
-  canvasCtx!.drawImage(bitmap, 0, 0);
+  // The pixel readback of the frame happens here, off the main thread.
+  canvasCtx!.drawImage(bitmap, 0, 0, TRIGGER_W, TRIGGER_H);
   bitmap.close();
-  const scores = trigger.observe(canvasCtx!.getImageData(0, 0, canvas.width, canvas.height).data);
+  const scores = trigger.observe(canvasCtx!.getImageData(0, 0, TRIGGER_W, TRIGGER_H).data);
   ctx.postMessage({ type: "score", frameId: msg.frameId, ...scores });
 };

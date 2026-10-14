@@ -43,8 +43,8 @@ export interface BenchmarkProbe {
   /** A detection was due on this frame but skipped because the previous one had not returned yet. */
   recordSkippedDetection(): void;
   recordLayoutChange(nowMs: number): void;
-  /** Main-thread time spent sending one frame to the cut trigger (lookahead only). */
-  recordTriggerCost(mainThreadMs: number): void;
+  /** Main-thread time spent sending one frame to the cut trigger (lookahead only): in total, scaling it (drawImage + transfer), and posting it. */
+  recordTriggerCost(mainThreadMs: number, drawMs?: number, postMs?: number): void;
   /**
    * A frame was drawn on the output canvas. `errorMs` (lookahead only) is
    * when it reaches the screen minus when it should (its own display time +
@@ -160,8 +160,11 @@ export interface DisplaySummary {
 
 export interface TriggerSummary {
   count: number;
-  /** Main-thread cost per frame (createImageBitmap call + postMessage). */
+  /** Main-thread cost per frame: scaling the buffered frame and posting it to the trigger worker. */
   mainThreadMs: SampleSummary;
+  /** The two parts of mainThreadMs: drawImage into the small canvas + transferToImageBitmap, and postMessage. Added within v5. */
+  drawMs: SampleSummary;
+  postMs: SampleSummary;
   /** Detections dispatched by the trigger instead of the regular tick. */
   triggeredDetections: number;
 }
@@ -242,7 +245,7 @@ export interface BenchmarkClipRaw {
   /** Schema v5. */
   displays: { nowMs: number[]; mediaTimeSec: number[]; workMs: number[]; errorMs: number[]; warmup: number[] };
   cutsShown: { nowMs: number[]; cutMediaTimeSec: number[]; shownMediaTimeSec: number[]; source: CutSource[] };
-  triggers: { mainThreadMs: number[]; warmup: number[] };
+  triggers: { mainThreadMs: number[]; drawMs: number[]; postMs: number[]; warmup: number[] };
   skippedDetections: { mediaTimeSec: number[]; warmup: number[] };
   layoutChanges: { nowMs: number[]; mediaTimeSec: number[]; warmup: number[] };
   longTasks: { startTimeMs: number[]; durationMs: number[]; warmup: number[] };
@@ -358,6 +361,8 @@ export class BenchmarkRecorder implements BenchmarkProbe {
   private cutShownCount = 0;
 
   private readonly triggerCost: Float64Array;
+  private readonly triggerDraw: Float64Array;
+  private readonly triggerPost: Float64Array;
   private readonly triggerWarmup: Uint8Array;
   private triggerCount = 0;
 
@@ -404,6 +409,8 @@ export class BenchmarkRecorder implements BenchmarkProbe {
     this.displayError = new Float64Array(frameCapacity);
     this.displayWarmup = new Uint8Array(frameCapacity);
     this.triggerCost = new Float64Array(frameCapacity);
+    this.triggerDraw = new Float64Array(frameCapacity);
+    this.triggerPost = new Float64Array(frameCapacity);
     this.triggerWarmup = new Uint8Array(frameCapacity);
 
     const detectionCapacity = Math.ceil(frameCapacity / 2);
@@ -552,7 +559,7 @@ export class BenchmarkRecorder implements BenchmarkProbe {
     this.cutShownCount = i + 1;
   }
 
-  recordTriggerCost(mainThreadMs: number): void {
+  recordTriggerCost(mainThreadMs: number, drawMs = NaN, postMs = NaN): void {
     if (this.finished) return;
     const i = this.triggerCount;
     if (i >= this.triggerCost.length) {
@@ -560,6 +567,8 @@ export class BenchmarkRecorder implements BenchmarkProbe {
       return;
     }
     this.triggerCost[i] = mainThreadMs;
+    this.triggerDraw[i] = drawMs;
+    this.triggerPost[i] = postMs;
     this.triggerWarmup[i] = this.inWarmup ? 1 : 0;
     this.triggerCount = i + 1;
   }
@@ -666,6 +675,7 @@ export class BenchmarkRecorder implements BenchmarkProbe {
     const frames = this.frameAccounting(mediaTime, presented);
 
     const measuredDisplay = (i: number) => this.displayWarmup[i] === 0;
+    const measuredTrigger = (i: number) => this.triggerWarmup[i] === 0;
     const displayCount = this.displayCount;
     let triggeredDetections = 0;
     for (let i = 0; i < detectionCount; i++) if (this.detectionTriggered[i] === 1) triggeredDetections += 1;
@@ -708,9 +718,9 @@ export class BenchmarkRecorder implements BenchmarkProbe {
       },
       trigger: {
         count: this.triggerCount,
-        mainThreadMs: summarize(
-          selectWhere(this.triggerCost.subarray(0, this.triggerCount), (i) => this.triggerWarmup[i] === 0)
-        ),
+        mainThreadMs: summarize(selectWhere(this.triggerCost.subarray(0, this.triggerCount), measuredTrigger)),
+        drawMs: summarize(selectWhere(this.triggerDraw.subarray(0, this.triggerCount), measuredTrigger)),
+        postMs: summarize(selectWhere(this.triggerPost.subarray(0, this.triggerCount), measuredTrigger)),
         triggeredDetections,
       },
       detectionGaps: this.detectionGaps(frames.fpsUsed),
@@ -892,6 +902,8 @@ export class BenchmarkRecorder implements BenchmarkProbe {
       },
       triggers: {
         mainThreadMs: toArray(this.triggerCost, this.triggerCount),
+        drawMs: toArray(this.triggerDraw, this.triggerCount),
+        postMs: toArray(this.triggerPost, this.triggerCount),
         warmup: toArray(this.triggerWarmup, this.triggerCount),
       },
       skippedDetections: {
