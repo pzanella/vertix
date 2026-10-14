@@ -29,12 +29,19 @@ export interface WasmBuildComparison {
   simdSkippedReason: "not-supported" | null;
 }
 
+/** How the run compared lookahead on and off. Schema v5. */
+export interface LookaheadComparison {
+  /** "off-first-per-clip": each clip ran once with lookahead off (on the build already loaded), then with it on for every build. */
+  order: "off-first-per-clip" | null;
+}
+
 export interface BenchmarkReport {
   tool: "vertix-benchmark";
-  schemaVersion: 4;
+  schemaVersion: 5;
   config: BenchmarkConfig;
   environment: BenchmarkEnvironment;
   wasmBuildComparison: WasmBuildComparison;
+  lookaheadComparison: LookaheadComparison;
   /** Timing metrics whose median is within PRECISION_WARNING_FACTOR × the measured timer resolution. */
   precisionWarnings: PrecisionWarning[];
   results: BenchmarkClipResult[];
@@ -51,6 +58,7 @@ const TIMED_METRICS: { name: string; get: (s: BenchmarkClipSummary) => SampleSum
   { name: "detection.postProcessMs", get: (s) => s.detection.postProcessMs },
   { name: "detection.overheadMs", get: (s) => s.detection.overheadMs },
   { name: "detection.totalMs", get: (s) => s.detection.totalMs },
+  { name: "trigger.mainThreadMs", get: (s) => s.trigger.mainThreadMs },
 ];
 
 export function findPrecisionWarnings(
@@ -74,14 +82,16 @@ export function buildBenchmarkReport(
   config: BenchmarkConfig,
   environment: BenchmarkEnvironment,
   wasmBuildComparison: WasmBuildComparison,
-  results: BenchmarkClipResult[]
+  results: BenchmarkClipResult[],
+  lookaheadComparison: LookaheadComparison = { order: null }
 ): BenchmarkReport {
   return {
     tool: "vertix-benchmark",
-    schemaVersion: 4,
+    schemaVersion: 5,
     config,
     environment,
     wasmBuildComparison,
+    lookaheadComparison,
     precisionWarnings: findPrecisionWarnings(results, environment.timerResolutionMs),
     results,
   };
@@ -114,6 +124,14 @@ const CSV_COLUMNS = [
   "scene_cut_hist",
   "scene_cut_grid",
   "scene_cut",
+  "lookahead_ms",
+  "triggered",
+  "resolved_faces",
+  "resolved_cx",
+  "error_ms",
+  "cut_media_time_s",
+  "shown_media_time_s",
+  "cut_source",
 ] as const;
 
 type CsvColumn = (typeof CSV_COLUMNS)[number];
@@ -130,9 +148,13 @@ export function benchmarkReportToCsv(report: BenchmarkReport): string {
   const lines = [CSV_COLUMNS.join(",")];
   const push = (row: CsvRow) => lines.push(CSV_COLUMNS.map((column) => csvCell(row[column])).join(","));
 
-  for (const { clip, mode, raw, wasmBuild } of report.results) {
-    const { frames, detections, skippedDetections, layoutChanges, longTasks } = raw;
-    const build = { wasm_build: wasmBuild.variant, wasm_build_position: wasmBuild.runOrder?.position };
+  for (const { clip, mode, raw, wasmBuild, lookahead } of report.results) {
+    const { frames, detections, skippedDetections, layoutChanges, longTasks, displays, cutsShown, triggers } = raw;
+    const build = {
+      wasm_build: wasmBuild.variant,
+      wasm_build_position: wasmBuild.runOrder?.position,
+      lookahead_ms: lookahead.lengthMs,
+    };
     frames.nowMs.forEach((_, i) =>
       push({
         kind: "frame",
@@ -171,6 +193,47 @@ export function benchmarkReportToCsv(report: BenchmarkReport): string {
         scene_cut_hist: detections.sceneCutHist[i],
         scene_cut_grid: detections.sceneCutGrid[i],
         scene_cut: detections.sceneCut[i],
+        triggered: detections.triggered[i],
+        resolved_faces: detections.resolvedFaces[i],
+        resolved_cx: detections.resolvedCx[i],
+      })
+    );
+    displays.nowMs.forEach((_, i) =>
+      push({
+        kind: "display",
+        clip,
+        mode,
+        ...build,
+        index: i,
+        warmup: displays.warmup[i],
+        time_ms: displays.nowMs[i],
+        media_time_s: displays.mediaTimeSec[i],
+        work_ms: displays.workMs[i],
+        error_ms: displays.errorMs[i],
+      })
+    );
+    cutsShown.nowMs.forEach((_, i) =>
+      push({
+        kind: "cut_shown",
+        clip,
+        mode,
+        ...build,
+        index: i,
+        time_ms: cutsShown.nowMs[i],
+        cut_media_time_s: cutsShown.cutMediaTimeSec[i],
+        shown_media_time_s: cutsShown.shownMediaTimeSec[i],
+        cut_source: cutsShown.source[i],
+      })
+    );
+    triggers.mainThreadMs.forEach((_, i) =>
+      push({
+        kind: "trigger",
+        clip,
+        mode,
+        ...build,
+        index: i,
+        warmup: triggers.warmup[i],
+        work_ms: triggers.mainThreadMs[i],
       })
     );
     skippedDetections.mediaTimeSec.forEach((_, i) =>
@@ -222,10 +285,14 @@ export type BenchmarkTableRow = Record<string, string | number | null>;
 
 /** One compact row per clip, for console.table and the on-page results table. */
 export function benchmarkSummaryRows(report: BenchmarkReport): BenchmarkTableRow[] {
-  return report.results.map(({ clip, mode, summary, pageHiddenDuringRun, wasmBuild }) => ({
+  return report.results.map(({ clip, mode, summary, pageHiddenDuringRun, wasmBuild, lookahead }) => ({
     clip,
     mode,
     build: mode === "16:9" ? "n/a" : wasmBuild.variant,
+    lookahead: !lookahead.enabled
+      ? "off"
+      : (lookahead.unavailableReason ?? (lookahead.bypassed ? "bypassed" : `${lookahead.lengthMs} ms`)),
+    "audio delay ms": lookahead.audioDelayMs,
     "build order": wasmBuild.runOrder ? `${wasmBuild.runOrder.position}/${wasmBuild.runOrder.sequence.length}` : null,
     "render fps": round(summary.effectiveFps, 1),
     "frame work p50 ms": round(summary.frameWorkMs.p50),
@@ -245,6 +312,15 @@ export function benchmarkSummaryRows(report: BenchmarkReport): BenchmarkTableRow
     "skin rejected (speaker-sized)": summary.detection.skinRejected.speakerSized,
     "layout changes": summary.layoutChanges,
     "scene cuts": summary.sceneCutCount,
+    "known cuts frames late": summary.knownCuts.length
+      ? summary.knownCuts.map((c) => (c.framesLate === null ? "missed" : `${c.framesLate} (${c.source})`)).join(" ")
+      : null,
+    "cut frames late (max)": summary.cutsShown.length ? Math.max(...summary.cutsShown.map((c) => c.framesLate)) : null,
+    "display error p95 ms": round(summary.display.errorMs.p95),
+    "trigger p95 ms": round(summary.trigger.mainThreadMs.p95, 3),
+    "irregular detection gaps": `${summary.detectionGaps.irregular}/${summary.detectionGaps.pairs}`,
+    "buffer drops": lookahead.overflowDrops,
+    "skipped on display": lookahead.skippedOnDisplay,
     "long tasks": summary.longTasks.supported ? summary.longTasks.count : "n/a",
     "page hidden": pageHiddenDuringRun ? "yes (invalid)" : "no",
     "duplicate callbacks": summary.frames.duplicateCallbacks,

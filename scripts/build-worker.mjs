@@ -1,6 +1,6 @@
-// Bundles the face-detection worker with esbuild into public/workers/,
-// served as a plain static file in both dev and prod. Vite's own worker
-// bundling hung indefinitely for this file for reasons that never
+// Bundles the face-detection and cut-trigger workers with esbuild into
+// public/workers/, served as plain static files in both dev and prod.
+// Vite's own worker bundling hung indefinitely for the detection worker for reasons that never
 // produced an error — see README.md's Known Limitations.
 //
 // Run after `npm run build:wasm` (needs src/core/wasm/ to already exist).
@@ -23,7 +23,10 @@ if (!WASM_BUILDS.every((build) => existsSync(join(wasmDir, build, "wasm_bg.wasm"
 mkdirSync(outDir, { recursive: true });
 
 await build({
-  entryPoints: [join(root, "src/core/faceDetectionWorker.ts")],
+  entryPoints: {
+    faceDetectionWorker: join(root, "src/core/faceDetectionWorker.ts"),
+    cutTriggerWorker: join(root, "src/core/cutTriggerWorker.ts"),
+  },
   bundle: true,
   // Classic script, not ESM — needs less from the browser than
   // `new Worker(url, {type: "module"})`. Because of that, the wasm-bindgen
@@ -34,7 +37,7 @@ await build({
   format: "iife",
   platform: "browser",
   target: "es2022",
-  outfile: join(outDir, "faceDetectionWorker.js"),
+  outdir: outDir,
   logLevel: "info",
   logOverride: { "empty-import-meta": "silent" },
 });
@@ -49,4 +52,4 @@ for (const build of WASM_BUILDS) {
   copyFileSync(join(wasmDir, build, "wasm_bg.wasm"), join(outDir, `wasm_${build}_bg.wasm`));
 }
 
-console.log("Worker bundle + both wasm binaries written to public/workers/");
+console.log("Worker bundles + both wasm binaries written to public/workers/");

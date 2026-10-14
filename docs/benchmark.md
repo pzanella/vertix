@@ -13,7 +13,8 @@ the right end of the header. The button only appears once a video is loaded.
 It opens a panel (a popover on desktop, a bottom sheet on phones) with:
 
 - **Run suite**: the reproducible run. Use this for published numbers. It
-  replaces the video currently loaded with the sample clips.
+  replaces the video currently loaded with the sample clips and two test
+  clips with hard cuts.
 - **Run current clip**: rewinds and replays whatever is loaded (for example
   your own file) and records it with the WASM build already loaded. There is
   no WASM warm-up before it, so run it after the engine has already processed
@@ -49,10 +50,19 @@ with the numbers.
 1. Collect the environment info. This includes a few milliseconds of
    busy-waiting to measure the timer resolution, so it happens before any
    playback.
-2. For each of the six clips in `public/samples/`, in order, run the clip once
-   per WASM build (see [WASM builds](#wasm-builds-simd-and-scalar)): SIMD then
-   scalar on the 1st, 3rd and 5th clip, scalar then SIMD on the 2nd, 4th and
-   6th. Without SIMD support, each clip runs once with the scalar build.
+2. For each of the six clips in `public/samples/` and the three test clips in
+   `public/bench/` (`cross-count.mp4`, `cross-same-count.mp4`: hard cuts at
+   4, 8 and 12 s, on detection frames; `cross-offset.mp4`: hard cuts at
+   4.08, 8.12 and 12.16 s, between detection frames), in order, run the
+   clip once with lookahead off, on the build already loaded, then once per
+   WASM build with lookahead on (see
+   [WASM builds](#wasm-builds-simd-and-scalar)): SIMD then scalar on the
+   odd-numbered clips, scalar then SIMD on the even-numbered ones. Without
+   SIMD support, each clip runs once with lookahead off and once on, with
+   the scalar build.
+   The test clips are not in the repository: `npm run make:bench-clips` makes them from the sample clips (needs ffmpeg). The deploy
+   workflow runs it, so they are on GitHub Pages; run it once locally before
+   using the suite with `npm run dev` or `npm run preview`.
 3. **Build switch and WASM warm-up**: whenever the next run needs the other
    build, the suite replaces the detection worker with a new one that loads
    that build, then plays the first *WASM warm-up* seconds of the next clip in
@@ -66,7 +76,8 @@ with the numbers.
    from every summary.
 5. **Baseline** (optional): play `1-speaker.mp4` again in 16:9 mode. That mode
    runs no detection and draws the full frame unchanged, so it runs once,
-   with whichever build is loaded.
+   with whichever build is loaded. Lookahead is bypassed in 16:9
+   (`lookahead.bypassed` is true and `audioDelayMs` 0).
 
 When the suite ends (finished, stopped or failed), the app switches back to
 the build it picks on its own.
@@ -306,11 +317,57 @@ Each clip result adds:
 ## Output files
 
 - **JSON**: `{ tool, schemaVersion, config, environment, wasmBuildComparison,
-precisionWarnings, results[] }`. Each result contains `summary` and `raw`,
+lookaheadComparison, precisionWarnings, results[] }`. Each result contains `summary` and `raw`,
   and `raw` holds column arrays of every sample.
-  - `schemaVersion` is 4. Every v3 field is still there with the same
-    meaning. Every v2 field is too, except `environment.wasmBuiltWithSimd`
-    (see [Environment info](#environment-info)).
+  - `schemaVersion` is 5. Every v4 and v3 field is still there with the
+    same meaning. Every v2 field is too, except
+    `environment.wasmBuiltWithSimd` (see [Environment info](#environment-info)).
+  - New in v5:
+    - `lookaheadComparison.order`: `off-first-per-clip` for the suite.
+    - Per result, `lookahead`: `{ enabled, unavailableReason, lengthMs,
+      slotWidth, slotHeight, allocatedSlots, bufferBytes, droppedFrames }`
+      (frame-copy size, estimated buffer memory, frames dropped by the
+      buffer or superseded on display), read at the end of the run. Added
+      later within v5:
+      - `bypassed`: on, but not running because the run is 16:9 (no
+        detection); the 16:9 baseline shows `true` with `audioDelayMs` 0.
+      - `audioDelayMs`: the audio delay actually applied.
+      - `delayFrames`: `lengthMs` in whole frames (the length is rounded up
+        to whole frames).
+      - `detectionP95Ms` and `lengthSource` (`measured`, `stored` or
+        `default`): the detection time behind `lengthMs` and where it came
+        from. Detections from a detector's first 2 s or first 5 results
+        never count.
+      - `overflowDrops` (the pool was full; should be 0) and
+        `skippedOnDisplay` (a buffered frame passed over because the frame
+        callback of its counterpart was skipped, or while the delay
+        shrinks); `droppedFrames` is their sum.
+    - `summary.cutsShown[]`: every applied cut decision,
+      `{ cutMediaTimeSec, shownMediaTimeSec, framesLate, source }`, where
+      `framesLate` counts displayed frames from the cut frame up to the one
+      the crop changed on (target 0), and `source` is how the cut was
+      found: `trigger` (a detection the per-frame cut trigger asked for),
+      `localised` (a regular detection, moved back to the frame with the
+      biggest jump) or `tick` (a regular detection on the cut frame, or
+      without lookahead). Without lookahead the cut frame is the detection
+      frame, so `framesLate` undercounts; use `knownCuts`.
+    - `summary.knownCuts[]`: for clips with known cuts,
+      `{ timeSec, framesLate, shownMediaTimeSec, source }` against the real cut
+      frame (`framesLate` null when the crop never changed for it).
+    - `summary.display`: `{ count, errorMs, workMs }`. `errorMs` (lookahead
+      only) is when a frame reaches the screen minus when it should
+      (its own display time + the lookahead). The audio delay is exact,
+      so this is the audio/video offset as far as the page can measure it.
+    - `summary.trigger`: `{ count, mainThreadMs, triggeredDetections }`,
+      the main-thread cost per frame of the cut trigger and how many
+      detections it started. Added later within v5: `drawMs` (scaling the
+      frame into a small canvas and `transferToImageBitmap`) and `postMs`
+      (`postMessage`), the two parts of `mainThreadMs`.
+    - `summary.detectionGaps`: `{ pairs, irregular, histogram }`, gaps
+      between detections in frames (mouth motion is measured over the gap;
+      regular is 5).
+    - Raw: `displays`, `cutsShown`, `triggers` (with `drawMs` and `postMs`),
+      and per detection `triggered`, `resolvedFaces`, `resolvedCx`.
   - New in v4: `summary.sceneCutCount` and `summary.sceneCuts[]`
     (`{ mediaTimeSec, histScore, gridScore, warmup }`, the hard cuts the
     detector found, warm-up included), and per-detection columns in
@@ -324,7 +381,11 @@ precisionWarnings, results[] }`. Each result contains `summary` and `raw`,
     run the SIMD build.
 - **CSV**: one row per raw sample in a single long-format table.
   - `kind` is one of `frame`, `detection`, `skipped_detection`,
-    `layout_change` or `long_task`.
+    `layout_change`, `long_task`, `display`, `cut_shown` or `trigger`
+    (the last three since v5, with the columns `lookahead_ms`,
+    `triggered`, `resolved_faces`, `resolved_cx`, `error_ms`,
+    `cut_media_time_s`, `shown_media_time_s` and `cut_source` added at
+    the end).
   - Every row also has `clip`, `mode`, `wasm_build`, `wasm_build_position`,
     `index` and `warmup`, plus the columns that apply to its kind.
   - The table loads directly into pandas or R:

@@ -15,9 +15,25 @@
  *   fine — the layout fallback this feeds treats "can't tell who's
  *   talking" the same way regardless of *why* it can't tell.
  */
+// Longest output delay the graph supports (lookahead never exceeds 600 ms).
+const MAX_OUTPUT_DELAY_SEC = 1;
+// Gain fade around an output-delay jump, so it is a short silence, not a
+// click: 15 ms is well above the few ms where a fade becomes audible as one.
+const MUTE_RAMP_SEC = 0.015;
+// Exact digital silence for this long, while the element is playing
+// unmuted and has decoded audio, reads as a tainted (cross-origin, no CORS)
+// source rather than a quiet passage.
+const SILENT_PATH_SUSPECT_MS = 3000;
+
 export class AudioActivityMonitor {
   private ctx: AudioContext | null = null;
   private analyser: AnalyserNode | null = null;
+  private delay: DelayNode | null = null;
+  private gain: GainNode | null = null;
+  private outputDelay = 0;
+  private exactSilenceSinceMs: number | null = null;
+  private _silentPathSuspected = false;
+  private heardSoundOnSource = false;
   private sourceVideo: HTMLVideoElement | null = null;
   private sourceNode: MediaElementAudioSourceNode | null = null;
   private data: Uint8Array | null = null;
@@ -27,17 +43,30 @@ export class AudioActivityMonitor {
     return this._available;
   }
 
+  /** Seconds the element's audio is delayed by on its way to the speakers. */
+  get outputDelaySec(): number {
+    return this.outputDelay;
+  }
+
+  /** True while the graph seems to carry only exact silence although the element is playing audio: see checkSilentPath. */
+  get silentPathSuspected(): boolean {
+    return this._silentPathSuspected;
+  }
+
   /**
    * Attaches to a video element. A no-op if already attached to this exact
    * element — the browser allows only one MediaElementAudioSourceNode per
    * element for its entire lifetime (a second attempt throws), so this
    * guards against that rather than re-creating anything.
    *
-   * Routes source -> analyser -> destination (not just source -> analyser):
-   * creating a MediaElementAudioSourceNode redirects the element's audio
-   * output into the Web Audio graph, so skipping the destination hop would
-   * silence normal playback — breaking this app's own mute toggle — even
-   * though nothing about that toggle changed.
+   * Routes source -> analyser -> delay -> gain -> destination (not just
+   * source -> analyser): creating a MediaElementAudioSourceNode redirects
+   * the element's audio output into the Web Audio graph, so skipping the
+   * destination hop would silence normal playback — breaking this app's
+   * own mute toggle — even though nothing about that toggle changed. The
+   * analyser sits before the delay, so energy() still reads the audio of
+   * the frame being decoded; the delay holds the audio back as long as the
+   * lookahead holds the video back.
    */
   attach(video: HTMLVideoElement): void {
     if (this.sourceVideo === video) return;
@@ -55,8 +84,14 @@ export class AudioActivityMonitor {
       this.analyser.fftSize = 512;
       // No smoothingTimeConstant: it only smooths frequency-domain data, and
       // energy() reads time-domain samples.
+      this.delay = this.ctx.createDelay(MAX_OUTPUT_DELAY_SEC);
+      this.delay.delayTime.value = this.outputDelay;
+      this.gain = this.ctx.createGain();
       this.sourceNode.connect(this.analyser);
-      this.analyser.connect(this.ctx.destination);
+      this.analyser.connect(this.delay);
+      this.delay.connect(this.gain);
+      this.gain.connect(this.ctx.destination);
+      this.ctx.addEventListener("statechange", this.onStateChange);
       this.data = new Uint8Array(this.analyser.fftSize);
       this._available = true;
       video.addEventListener("play", this.resumeIfSuspended);
@@ -78,14 +113,114 @@ export class AudioActivityMonitor {
     if (this.ctx?.state === "suspended") void this.ctx.resume().catch(() => {});
   };
 
+  /** A context resumed after a suspension may still hold old audio in the delay line: silence it out. */
+  private onStateChange = (): void => {
+    if (this.ctx?.state === "running" && this.outputDelay > 0) this.muteFor(this.outputDelay);
+  };
+
+  /**
+   * Jumps to a new output delay without replaying or clicking: the output
+   * fades out, the delay jumps (any ramp in progress ends), and the output
+   * stays silent until audio that entered after the jump comes out
+   * (`seconds` later). Also the way to silence the delay line after a seek.
+   */
+  setOutputDelay(seconds: number): void {
+    const delaySec = Math.min(MAX_OUTPUT_DELAY_SEC, Math.max(0, seconds));
+    if (delaySec === 0 && this.outputDelay === 0) return;
+    this.outputDelay = delaySec;
+    if (!this.ctx || !this.delay) return;
+    const delayTime = this.delay.delayTime;
+    this.muteFor(delaySec, () => {
+      const at = this.ctx!.currentTime + MUTE_RAMP_SEC;
+      delayTime.cancelScheduledValues(0);
+      delayTime.setValueAtTime(delaySec, at);
+    });
+  }
+
+  /**
+   * Moves the output delay to `seconds` over `durationSec` without a gap:
+   * the audio plays slightly slower (delay growing) or faster (shrinking)
+   * during the ramp, which the lookahead keeps within 5%.
+   */
+  rampOutputDelay(seconds: number, durationSec: number): void {
+    const delaySec = Math.min(MAX_OUTPUT_DELAY_SEC, Math.max(0, seconds));
+    this.outputDelay = delaySec;
+    if (!this.ctx || !this.delay) return;
+    const delayTime = this.delay.delayTime;
+    const t = this.ctx.currentTime;
+    delayTime.cancelScheduledValues(t);
+    delayTime.setValueAtTime(delayTime.value, t);
+    delayTime.linearRampToValueAtTime(delaySec, t + Math.max(durationSec, 0.001));
+  }
+
+  /** Silences the output for `seconds` (plus short ramps), e.g. while the delay line still holds audio from before a seek. */
+  muteFor(seconds: number, whileSilent?: () => void): void {
+    const ctx = this.ctx;
+    const gain = this.gain?.gain;
+    if (!ctx || !gain) return;
+    const t = ctx.currentTime;
+    gain.cancelScheduledValues(t);
+    gain.setValueAtTime(gain.value, t);
+    gain.linearRampToValueAtTime(0, t + MUTE_RAMP_SEC);
+    whileSilent?.();
+    gain.setValueAtTime(0, t + MUTE_RAMP_SEC + seconds);
+    gain.linearRampToValueAtTime(1, t + 2 * MUTE_RAMP_SEC + seconds);
+  }
+
+  /**
+   * Updates silentPathSuspected. A cross-origin source without CORS
+   * headers plays through the graph as exact zeros instead of failing, so
+   * delaying it is pointless and the caller should not rely on the graph.
+   * Only judged for a cross-origin http(s) source (a same-origin, blob or
+   * MediaSource one can't be tainted, and a silent audio track — every
+   * sample clip has one — must not count), while `video` plays unmuted and
+   * reports decoded audio. Once a non-zero sample was seen on the source,
+   * the path is known to work and silence is never judged again for it.
+   */
+  checkSilentPath(video: HTMLVideoElement, nowMs: number): boolean {
+    if (this.heardSoundOnSource) return false;
+    if (!this._available || !this.analyser || !this.data) return this._silentPathSuspected;
+    // A suspended context reads as zeros too, but that is a different (and
+    // temporary) state: nothing plays at all until it resumes.
+    const audible = !video.paused && !video.muted && video.volume > 0 && this.ctx?.state === "running";
+    if (!audible || !isCrossOriginSource(video) || !hasDecodedAudio(video)) {
+      this.exactSilenceSinceMs = null;
+      return this._silentPathSuspected;
+    }
+    this.analyser.getByteTimeDomainData(this.data);
+    const exactSilence = this.data.every((v) => v === 128);
+    if (!exactSilence) {
+      this.heardSoundOnSource = true;
+      this.exactSilenceSinceMs = null;
+      this._silentPathSuspected = false;
+    } else {
+      this.exactSilenceSinceMs ??= nowMs;
+      if (nowMs - this.exactSilenceSinceMs >= SILENT_PATH_SUSPECT_MS) this._silentPathSuspected = true;
+    }
+    return this._silentPathSuspected;
+  }
+
+  /** Forgets the silent-path verdict and whether sound was heard: a new source is judged on its own. */
+  resetSilentPath(): void {
+    this.exactSilenceSinceMs = null;
+    this._silentPathSuspected = false;
+    this.heardSoundOnSource = false;
+  }
+
   detach(): void {
     this.sourceVideo?.removeEventListener("play", this.resumeIfSuspended);
     this.sourceVideo?.removeEventListener("volumechange", this.resumeIfSuspended);
+    this.ctx?.removeEventListener("statechange", this.onStateChange);
     this.sourceNode?.disconnect();
     this.analyser?.disconnect();
+    this.delay?.disconnect();
+    this.gain?.disconnect();
     void this.ctx?.close().catch(() => {});
     this.ctx = null;
     this.analyser = null;
+    this.delay = null;
+    this.gain = null;
+    this.resetSilentPath();
     this.sourceNode = null;
     this.sourceVideo = null;
     this.data = null;
@@ -104,5 +239,26 @@ export class AudioActivityMonitor {
       sumSquares += v * v;
     }
     return Math.sqrt(sumSquares / this.data.length);
+  }
+}
+
+/** Whether the element has decoded any audio, from whichever non-standard counter this browser has. Unknown counts as no. */
+function hasDecodedAudio(video: HTMLVideoElement): boolean {
+  const v = video as HTMLVideoElement & {
+    webkitAudioDecodedByteCount?: number;
+    mozHasAudio?: boolean;
+    audioTracks?: { length: number };
+  };
+  if (typeof v.webkitAudioDecodedByteCount === "number") return v.webkitAudioDecodedByteCount > 0;
+  if (typeof v.mozHasAudio === "boolean") return v.mozHasAudio;
+  return (v.audioTracks?.length ?? 0) > 0;
+}
+
+function isCrossOriginSource(video: HTMLVideoElement): boolean {
+  try {
+    const url = new URL(video.currentSrc, location.href);
+    return (url.protocol === "http:" || url.protocol === "https:") && url.origin !== location.origin;
+  } catch {
+    return false;
   }
 }

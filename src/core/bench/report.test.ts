@@ -38,6 +38,23 @@ function sampleResult(): BenchmarkClipResult {
   return {
     ...recorder.finish("9:16"),
     wasmBuild: { variant: "simd", reason: "benchmark-suite", runOrder: { position: 1, sequence: ["simd", "scalar"] } },
+    lookahead: {
+      enabled: true,
+      unavailableReason: null,
+      bypassed: false,
+      audioDelayMs: 160,
+      lengthMs: 160,
+      delayFrames: 4,
+      detectionP95Ms: 60,
+      lengthSource: "default",
+      slotWidth: 1280,
+      slotHeight: 720,
+      allocatedSlots: 9,
+      bufferBytes: 9 * 1280 * 720 * 4,
+      droppedFrames: 0,
+      overflowDrops: 0,
+      skippedOnDisplay: 0,
+    },
   };
 }
 
@@ -64,14 +81,17 @@ describe("benchmarkReportToCsv", () => {
     expect(lines[0].startsWith("kind,clip,mode,wasm_build,wasm_build_position,index,warmup")).toBe(true);
     expect(lines).toHaveLength(1 + 10 + 1 + 1 + 1);
     expect(lines[1].startsWith('frame,"clip, one",9:16,simd,1,0,0,0,0,0.3,0')).toBe(true);
+    expect(lines[1].includes(",160,")).toBe(true);
     expect(lines.some((line) => line.startsWith("skipped_detection,"))).toBe(true);
     expect(lines.some((line) => line.startsWith("layout_change,"))).toBe(true);
     expect(
       lines[0].endsWith(
-        "kept_faces,skin_rejected,skin_rejected_speaker_sized,duration_ms,frame_media_time_s,scene_cut_hist,scene_cut_grid,scene_cut"
+        "scene_cut_hist,scene_cut_grid,scene_cut,lookahead_ms,triggered,resolved_faces,resolved_cx,error_ms,cut_media_time_s,shown_media_time_s,cut_source"
       )
     ).toBe(true);
-    expect(lines.find((line) => line.startsWith("detection,"))!.endsWith(",2,1,1,0,,1.2,0.4,0.3,1")).toBe(true);
+    expect(
+      lines.find((line) => line.startsWith("detection,"))!.endsWith(",2,1,1,0,,1.2,0.4,0.3,1,160,0,NaN,NaN,,,,")
+    ).toBe(true);
   });
 });
 
@@ -89,7 +109,8 @@ describe("benchmarkSummaryRows", () => {
     expect(row["skin rejected"]).toBe(1);
     expect(row["skin rejected (speaker-sized)"]).toBe(0);
     expect(row["scene cuts"]).toBe(1);
-    expect(report.schemaVersion).toBe(4);
+    expect(report.schemaVersion).toBe(5);
+    expect(row.lookahead).toBe("160 ms");
     expect(row["render fps"]).toBe(25);
     expect(report.precisionWarnings.length).toBeGreaterThan(0);
   });

@@ -15,6 +15,34 @@ import {
 } from "./layoutEngine";
 import type { BenchmarkProbe } from "./bench/BenchmarkRecorder";
 import {
+  DecisionTimeline,
+  mergeDecisions,
+  type CutSource,
+  type LayoutDecision,
+  type Reframe,
+} from "./lookahead/decisionTimeline";
+import { FrameRingBuffer, type BufferedFrame } from "./lookahead/frameRingBuffer";
+import { TRIGGER_SOURCE_H, TRIGGER_SOURCE_W, locateCut, type ScoredFrame } from "./lookahead/cutTrigger";
+import { DetectionLatencyTracker } from "./lookahead/detectionLatency";
+import {
+  DEFAULT_DETECTION_P95_MS,
+  DEFAULT_FRAME_INTERVAL_MS,
+  DEFAULT_TRIGGER_P95_MS,
+  RollingP95,
+  alignToFrames,
+  chooseSlotSize,
+  detectDeviceClass,
+  loadStoredDetectionP95,
+  lookaheadLengthMs,
+  maxSlotsFor,
+  slotsForDelay,
+  storeDetectionP95,
+  type FrameAlignedDelay,
+  type SlotSize,
+} from "./lookahead/lookaheadSizing";
+import { DelaySchedule } from "./lookahead/delaySchedule";
+import { FrameIntervalTracker } from "./lookahead/frameInterval";
+import {
   defaultWasmBuild,
   importWasmBindings,
   type WasmBindings,
@@ -90,6 +118,53 @@ export interface VertixMetrics {
   /** Total main-thread time (ms) spent in tasks over 50ms, in the last few seconds. */
   longTaskMs: number;
   longTaskHistory: number[];
+  /** Media time of the frame currently on screen (behind `video.currentTime` by the lookahead while playing). Null before the first frame, and right after a seek until a new frame is shown. */
+  displayedMediaTimeSec: number | null;
+  lookahead: LookaheadStatus;
+}
+
+/** Why lookahead is forced off although switched on. */
+export type LookaheadUnavailableReason =
+  /** The Web Audio graph could not be built: the element plays its own audio, which cannot be delayed. */
+  | "no-audio-graph"
+  /** Cross-origin source without CORS: frames can't be read and the graph only carries silence. */
+  | "cross-origin"
+  /** The graph carries exact silence while a cross-origin element plays unmuted audio (same cause, detected from the audio side). */
+  | "silent-audio-path";
+
+/** Where the detection p95 behind the lookahead length came from. */
+export type LookaheadLengthSource = "measured" | "stored" | "default";
+
+export interface LookaheadStatus {
+  /** The switch: lookahead wanted. */
+  enabled: boolean;
+  /** Set when lookahead is wanted but forced off. */
+  unavailableReason: LookaheadUnavailableReason | null;
+  /** Wanted and available, but not running because the mode is 16:9 (no detection, nothing to look ahead for). */
+  bypassed: boolean;
+  /** The audio delay actually applied, in ms (0 when off or bypassed). */
+  audioDelayMs: number;
+  /** How far behind the decoded frame the output (and audio) is shown, in ms: a whole number of frames. 0 when off. */
+  lengthMs: number;
+  /** lengthMs in frames. */
+  delayFrames: number;
+  /** Detection p95 the length was computed from, and where it came from: this device's warm detections, an earlier session, or the device default. */
+  detectionP95Ms: number | null;
+  lengthSource: LookaheadLengthSource;
+  /** Size of one buffered frame, null until the first frame is buffered. */
+  slotWidth: number | null;
+  slotHeight: number | null;
+  /** Frame copies allocated so far, and their memory (RGBA estimate). */
+  allocatedSlots: number;
+  bufferBytes: number;
+  /** Frames captured and waiting for display. */
+  bufferedFrames: number;
+  /** Frames never displayed since this source was loaded: overflowDrops + skippedOnDisplay. */
+  droppedFrames: number;
+  /** Dropped because the pool was full (should stay 0). */
+  overflowDrops: number;
+  /** Passed over on display: the frame callback for their counterpart was skipped, or the delay was shrinking. */
+  skippedOnDisplay: number;
 }
 
 export interface VertixState {
@@ -131,6 +206,25 @@ export const INITIAL_METRICS: VertixMetrics = {
   longTasksSupported: false,
   longTaskMs: 0,
   longTaskHistory: [],
+  displayedMediaTimeSec: null,
+  lookahead: {
+    enabled: false,
+    unavailableReason: null,
+    bypassed: false,
+    audioDelayMs: 0,
+    lengthMs: 0,
+    delayFrames: 0,
+    detectionP95Ms: null,
+    lengthSource: "default",
+    slotWidth: null,
+    slotHeight: null,
+    allocatedSlots: 0,
+    bufferBytes: 0,
+    bufferedFrames: 0,
+    droppedFrames: 0,
+    overflowDrops: 0,
+    skippedOnDisplay: 0,
+  },
 };
 
 // Cap on trend-chart history length — at this round's sampling rates (a
@@ -162,6 +256,18 @@ const FACE_H = 240;
 // Detection doesn't run on every frame, only every Nth one — rendering and
 // pane smoothing still do.
 const FACE_DETECT_INTERVAL = 5;
+// Per-frame cut-trigger scores kept for cut localisation: a few seconds,
+// well over the gap between two detections.
+const SCORED_FRAME_HISTORY = 120;
+// A frame shown while paused waits for its own detection this long at most.
+const HELD_FRAME_TIMEOUT_MS = 500;
+// With lookahead, frames are shown from the frame callback while playing.
+// If no callback comes for this many frame intervals (paused, buffering,
+// ended), the requestAnimationFrame loop drains the buffer instead.
+const STALL_FRAMES = 3;
+// A frame-interval change beyond this fraction (another rendition's frame
+// rate) recomputes the lookahead length.
+const FRAME_RATE_CHANGE_FRACTION = 0.1;
 // How long to wait for the detection worker to report ready before giving
 // up and falling back to running WASM on the main thread instead.
 const WORKER_READY_TIMEOUT_MS = 4000;
@@ -174,6 +280,10 @@ const WORKER_READY_TIMEOUT_MS = 4000;
 // constructed (React StrictMode always creates at least two in dev).
 let sharedWorker: Worker | null = null;
 let sharedWorkerReady = false;
+// When the current shared worker reported ready, and how many results it has
+// returned since: its first detections are warm-up (see detectionLatency.ts).
+let sharedWorkerReadyAt = 0;
+let sharedWorkerResults = 0;
 // True while a worker is starting up. Detection ticks are skipped then
 // instead of falling back to the main thread, which would download the
 // other copy of the .wasm binary for nothing.
@@ -294,6 +404,8 @@ function getSharedDetectionWorker(): Promise<boolean> {
           return;
         }
         sharedWorkerReady = true;
+        sharedWorkerReadyAt = performance.now();
+        sharedWorkerResults = 0;
         settle(true);
         return;
       }
@@ -361,13 +473,6 @@ const SKIN_REJECTED_DASH = [10, 6];
 const LAYOUT_TRANSITION_MS = 250;
 
 /**
- * A framing change that must not glide: "snap" after a hard cut in the
- * source (the viewer already saw a cut), "dissolve" when the active
- * speaker switches to someone else within the same shot.
- */
-type Reframe = "snap" | "dissolve";
-
-/**
  * Full, un-cropped frame centered in the output canvas with a softly
  * blurred cover-scaled backdrop filling the rest — no tracking, no crop
  * math, just "show everything". Used for the no-faces (B-roll) fallback.
@@ -378,7 +483,7 @@ type Reframe = "snap" | "dissolve";
 function drawFitFrame(
   ctx: CanvasRenderingContext2D,
   blurCanvas: OffscreenCanvas,
-  video: HTMLVideoElement,
+  video: CanvasImageSource,
   srcW: number,
   srcH: number,
   outW: number,
@@ -403,6 +508,19 @@ function drawFitFrame(
   const fitScale = outW / srcW;
   const fgH = Math.round(srcH * fitScale);
   ctx.drawImage(video, 0, Math.round((outH - fgH) / 2), outW, fgH);
+}
+
+interface FrameSlot {
+  canvas: OffscreenCanvas;
+  ctx: OffscreenCanvasRenderingContext2D;
+}
+
+/** Scales `source` into `canvas` on the GPU and takes the result as a bitmap, leaving the canvas blank. */
+function scaledBitmap(canvas: OffscreenCanvas, source: CanvasImageSource): ImageBitmap {
+  const ctx = canvas.getContext("2d")!;
+  ctx.imageSmoothingQuality = "low";
+  ctx.drawImage(source, 0, 0, canvas.width, canvas.height);
+  return canvas.transferToImageBitmap();
 }
 
 type MetricsListener = (metrics: VertixMetrics) => void;
@@ -466,8 +584,7 @@ export class VertixEngine {
   private srcDimsInitialized = false;
 
   private lastFaces: FaceBox[] = [];
-  // Per-detection counts for the benchmark probe, and the boxes for the
-  // skin-rejection overlay.
+  // Per-detection counts for the benchmark probe.
   private lastDetectedFaceCount = 0;
   private lastSkinRejectedFaces: FaceBox[] = [];
   private lastSkinRejectedSpeakerSizedCount = 0;
@@ -480,14 +597,80 @@ export class VertixEngine {
   private audioMonitor = new AudioActivityMonitor();
   private activeSpeaker = new ActiveSpeakerResolver();
 
+  // Decision side: what the latest detection decided, before it is shown.
+  private decidedTargetPanes: PaneTarget[] = [];
+  private decidedSpeakerCount = 0;
+  // True once a frame was rendered (or buffered) since the last reset: the
+  // no-crop layout counts as committed from then on.
+  private hasFrameSinceReset = false;
+  // Set by a seek while paused: like a cut, the first detection after it
+  // commits the speaker count at once, so the frame shown there is cropped.
+  private commitCountAtNextDetection = false;
+  private decisions = new DecisionTimeline();
+
+  // Display side: what the frame on screen uses.
+  private displayedSpeakerCount = 0;
+  private displayedSkinRejectedFaces: FaceBox[] = [];
   private targetPanes: PaneTarget[] = [];
   private smoothedPanes: PaneRect[] = [];
 
   private layoutSignature = "";
-  // Set by a detection, applied (and cleared) by the next rendered frame.
+  // Set by an applied decision, consumed by the frame it was applied on.
   private pendingReframe: Reframe | null = null;
   private transitionSnapshotCanvas: OffscreenCanvas | null = null;
   private transitionStart: number | null = null;
+
+  // Lookahead: the output is shown lookaheadLengthMs behind the decoded
+  // frame, so each frame's detection result is in before it is displayed.
+  // Off by default until it has been checked on phones; the dashboard switch turns it on.
+  private lookaheadEnabled = false;
+  private lookaheadUnavailable: LookaheadUnavailableReason | null = null;
+  // Current (target) length, whole frames, and the frame interval it was computed with.
+  private lookaheadLengthMs = 0;
+  private delayFrames = 0;
+  private lengthIntervalSec: number | null = null;
+  // What audio and video actually follow: lookaheadLengthMs, or a ramp towards it.
+  private delaySchedule = new DelaySchedule();
+  // A smaller pool, applied once a shrinking ramp has ended.
+  private pendingMaxSlots: { slots: number; at: number } | null = null;
+  private stallWatchdog: ReturnType<typeof setTimeout> | undefined = undefined;
+  private sourceTainted = false;
+  private readonly deviceClass = detectDeviceClass();
+  private frameBuffer: FrameRingBuffer<FrameSlot> | null = null;
+  private slotSize: SlotSize | null = null;
+  private captureIndex = 0;
+  private nextDetectionFrameIndex = FACE_DETECT_INTERVAL;
+  private lastCapturedMediaTime: number | null = null;
+  private frameInterval = new FrameIntervalTracker();
+  private heldFrameTimeout: ReturnType<typeof setTimeout> | undefined = undefined;
+  private displayFrameId: number | null = null;
+  private lastDisplayCallbackAt: number | null = null;
+  private lastDisplayedAt: number | null = null;
+  private refreshIntervalMs = 1000 / 60;
+  private displayedMediaTimeSec: number | null = null;
+  // Detection round trips (dispatch → result) of the current WASM build, for the lookahead length.
+  private detectionLatency = new DetectionLatencyTracker();
+  private lookaheadLengthSource: LookaheadLengthSource = "default";
+  private lookaheadDetectionP95Ms: number | null = null;
+  // Main-thread fallback detector: when it became ready, and its results since.
+  private mainThreadReadyAt = 0;
+  private mainThreadResults = 0;
+  private triggerLatency = new RollingP95();
+  private taintProbeCtx: OffscreenCanvasRenderingContext2D | null = null;
+
+  // Per-frame cut trigger (lookahead only): scores every buffered frame in
+  // its own worker and asks for a detection right away on a likely cut.
+  private cutTriggerWorker: Worker | null = null;
+  // Small GPU canvases the buffered frame is scaled into for the trigger and
+  // for detection; transferToImageBitmap hands their pixels over without a copy.
+  private triggerSourceCanvas: OffscreenCanvas | null = null;
+  private detectionSourceCanvas: OffscreenCanvas | null = null;
+  private cutTriggerUnavailable = false;
+  private cutTriggerGeneration = 0;
+  private pendingTriggerFrames = new Map<number, { mediaTimeSec: number; capturedAt: number }>();
+  private scoredFrames: ScoredFrame[] = [];
+  private pendingCutDetectionSec: number | null = null;
+  private lastDispatchedDetectionSec: number | null = null;
 
   // Benchmark mode only (see src/core/bench). Null in normal playback, where
   // every instrumentation point below reduces to a single null check.
@@ -495,7 +678,13 @@ export class VertixEngine {
 
   private boundOnVideoFrame = this.onVideoFrame.bind(this);
   private boundOnPlay = () => this.startLoop();
-  private boundOnSeeking = () => this.resetTrackingState();
+  private boundOnSeeking = () => this.onSeeking();
+  private boundOnPlayForHeldFrames = () => this.releaseHeldFrames();
+  private boundOnPlaybackHalt = () => {
+    if (this.lookaheadLengthMs > 0) this.ensureDisplayLoop();
+  };
+  private boundOnRateChange = () => this.refreshLookahead("ramp");
+  private boundOnDisplayFrame = this.onDisplayFrame.bind(this);
   private boundOnLoadedMetadata = () => this.resetForNewSource();
 
   constructor() {
@@ -541,6 +730,9 @@ export class VertixEngine {
     this.resetForNewSource();
 
     video.addEventListener("play", this.boundOnPlay);
+    video.addEventListener("play", this.boundOnPlayForHeldFrames);
+    for (const type of ["pause", "waiting", "ended"]) video.addEventListener(type, this.boundOnPlaybackHalt);
+    video.addEventListener("ratechange", this.boundOnRateChange);
     video.addEventListener("seeking", this.boundOnSeeking);
     video.addEventListener("loadedmetadata", this.boundOnLoadedMetadata);
 
@@ -551,11 +743,18 @@ export class VertixEngine {
   detach(): void {
     if (!this.video) return;
     this.video.removeEventListener("play", this.boundOnPlay);
+    this.video.removeEventListener("play", this.boundOnPlayForHeldFrames);
+    for (const type of ["pause", "waiting", "ended"]) this.video.removeEventListener(type, this.boundOnPlaybackHalt);
+    this.video.removeEventListener("ratechange", this.boundOnRateChange);
     this.video.removeEventListener("seeking", this.boundOnSeeking);
     this.video.removeEventListener("loadedmetadata", this.boundOnLoadedMetadata);
     if (this.frameCallbackId !== null) this.video.cancelVideoFrameCallback(this.frameCallbackId);
     this.frameCallbackId = null;
     this.running = false;
+    this.stopDisplayLoop();
+    clearTimeout(this.heldFrameTimeout);
+    clearTimeout(this.stallWatchdog);
+    this.frameBuffer = null;
     this.video = null;
     this.canvas = null;
     this.outputCtx = null;
@@ -569,6 +768,9 @@ export class VertixEngine {
   destroy(): void {
     this.detach();
     this.audioMonitor.detach();
+    this.taintProbeCtx = null;
+    this.cutTriggerWorker?.terminate();
+    this.cutTriggerWorker = null;
     this.longTaskObserver?.disconnect();
     this.engine?.free();
     this.engine = null;
@@ -576,11 +778,26 @@ export class VertixEngine {
     this.stateListeners.clear();
   }
 
+  /**
+   * Switches between the untouched 16:9 picture and the 9:16 reframe.
+   * Lookahead only runs in 9:16 (16:9 has nothing to look ahead for), so a
+   * switch to 16:9 drops the delay (a 15 ms fade, then live), and a switch
+   * to 9:16 brings it back: the current frame is shown at once as a 9:16
+   * frame, re-shown cropped as soon as its own detection is in, and held
+   * until the delayed stream reaches it, with the audio silent as long.
+   */
   setMode(mode: VertixMode): void {
+    const changed = mode !== this.mode;
     this.mode = mode;
     if (this.outputCtx) this.outputCtx = this.canvas?.getContext("2d") ?? null;
     this.engine?.reset();
     this.resetTrackingState();
+    if (changed) {
+      // Like a cut: the first detection in 9:16 commits the speaker count at once.
+      this.commitCountAtNextDetection = mode === "9:16";
+      this.refreshLookahead("flush");
+      this.showCurrentFrameAfterModeSwitch();
+    }
     this.emitState();
   }
 
@@ -600,6 +817,26 @@ export class VertixEngine {
     this.benchmarkProbe = probe;
   }
 
+  /**
+   * Turns lookahead on or off at runtime. Either way the change is one
+   * short gap: the buffered frames are dropped, and the audio is silent
+   * until audio delayed by the new amount comes out.
+   */
+  setLookaheadEnabled(enabled: boolean): void {
+    if (enabled === this.lookaheadEnabled) return;
+    this.lookaheadEnabled = enabled;
+    this.refreshLookahead("flush");
+  }
+
+  getLookaheadStatus(): LookaheadStatus {
+    return this.lookaheadStatus();
+  }
+
+  /** Media time of the frame on screen, or null (see VertixMetrics.displayedMediaTimeSec). */
+  getDisplayedMediaTime(): number | null {
+    return this.displayedMediaTimeSec;
+  }
+
   getMode(): VertixMode {
     return this.mode;
   }
@@ -613,7 +850,7 @@ export class VertixEngine {
       wasmReady: sharedWorkerReady || this.wasmReady,
       mode: this.mode,
       meta: this.meta,
-      speakerCount: this.personCount.stableCount,
+      speakerCount: this.displayedSpeakerCount,
       isTransitioning: this.transitionStart !== null,
     };
   }
@@ -662,6 +899,8 @@ export class VertixEngine {
       if (this.engineBuild !== build) return;
       this.engine = new bindings.ReframeEngine();
       this.wasmReady = true;
+      this.mainThreadReadyAt = performance.now();
+      this.mainThreadResults = 0;
       this.emitState();
     });
   }
@@ -669,6 +908,14 @@ export class VertixEngine {
   private resetForNewSource(): void {
     this.srcDimsInitialized = false;
     this.frameCounter = 0;
+    this.sourceTainted = false;
+    this.audioMonitor.resetSilentPath();
+    this.flushLookahead();
+    this.frameBuffer = null;
+    this.captureIndex = 0;
+    this.nextDetectionFrameIndex = FACE_DETECT_INTERVAL;
+    this.frameInterval.reset();
+    this.displayedMediaTimeSec = null;
     this.meta = null;
     this.lastFrameTime = null;
     this.fpsEma = 0;
@@ -679,6 +926,7 @@ export class VertixEngine {
     // Browser capability, not a per-source reading — INITIAL_METRICS always
     // has this false, so it'd get wiped out on every source load otherwise.
     this.metrics = { ...INITIAL_METRICS, longTasksSupported: this.longTaskObserver !== null };
+    this.refreshLookahead("flush");
     this.resetTrackingState();
     this.emitState();
     this.emitMetrics();
@@ -700,9 +948,19 @@ export class VertixEngine {
     this.lastSkinRejectedFaces = [];
     this.lastResolvedFaces = [];
     this.lastDetectionMediaTime = null;
+    this.lastDispatchedDetectionSec = null;
+    this.pendingCutDetectionSec = null;
+    this.resetCutTrigger();
     this.detectionIntervalEma = 0;
     this.personCount.reset();
     this.activeSpeaker.reset();
+    this.decidedTargetPanes = [];
+    this.decidedSpeakerCount = 0;
+    this.hasFrameSinceReset = false;
+    this.commitCountAtNextDetection = false;
+    this.decisions.clear();
+    this.displayedSpeakerCount = 0;
+    this.displayedSkinRejectedFaces = [];
     this.smoothedPanes = [];
     this.targetPanes = [];
     this.layoutSignature = "";
@@ -720,6 +978,182 @@ export class VertixEngine {
     };
     this.emitState();
     this.emitMetrics();
+  }
+
+  /** Draws the current video frame for the new mode right away, so the switch never shows a stale or black frame. */
+  private showCurrentFrameAfterModeSwitch(): void {
+    const video = this.video;
+    if (!video || !this.canvas || !this.srcDimsInitialized) return;
+    const now = performance.now();
+    const mediaTimeSec = video.currentTime;
+    const { w, h } = this.srcDims;
+    if (this.lookaheadLengthMs === 0) {
+      this.renderFrame(video, w, h, null, mediaTimeSec, now, 0);
+      this.displayedMediaTimeSec = mediaTimeSec;
+      return;
+    }
+    const anchor = this.bufferFrame(video, mediaTimeSec, now, true);
+    const { canvas } = anchor.slot;
+    this.renderFrame(canvas, canvas.width, canvas.height, mediaTimeSec, mediaTimeSec, now, 0);
+    this.displayedMediaTimeSec = mediaTimeSec;
+    this.hasFrameSinceReset = true;
+    if (!this.detectionInFlight) this.dispatchDetection(canvas, mediaTimeSec, ...this.cropArgs());
+    clearTimeout(this.heldFrameTimeout);
+    this.heldFrameTimeout = setTimeout(() => this.releaseHeldFrames(), HELD_FRAME_TIMEOUT_MS);
+  }
+
+  private onSeeking(): void {
+    this.resetTrackingState();
+    this.commitCountAtNextDetection = this.video?.paused ?? false;
+    this.displayedMediaTimeSec = null;
+    this.metrics = { ...this.metrics, displayedMediaTimeSec: null };
+    this.nextDetectionFrameIndex = this.captureIndex + FACE_DETECT_INTERVAL;
+    this.frameInterval.restart();
+    this.refreshLookahead("flush");
+  }
+
+  /**
+   * Drops buffered frames, and silences the audio still in the delay line
+   * (it belongs to frames that will never be shown). A running ramp jumps
+   * to its end. The last frame shown stays on the canvas until new frames
+   * are due.
+   */
+  private flushLookahead({ silenceDelayLine = true } = {}): void {
+    this.frameBuffer?.flush();
+    this.stopDisplayLoop();
+    clearTimeout(this.heldFrameTimeout);
+    clearTimeout(this.stallWatchdog);
+    this.delaySchedule.set(this.lookaheadLengthMs);
+    if (silenceDelayLine && this.lookaheadLengthMs > 0) this.audioMonitor.setOutputDelay(this.lookaheadLengthMs / 1000);
+  }
+
+  /**
+   * Re-evaluates whether lookahead can run and how long it is.
+   * - "flush" (seek, source change, the switch): buffered frames are dropped
+   *   and the new length applies at once, behind a short silence.
+   * - "ramp" (a measured detection time, a frame-rate or speed change during
+   *   playback): audio and video move to the new length together over a
+   *   ramp, with no flush and no gap.
+   * - "keep": only availability is re-checked.
+   */
+  private refreshLookahead(how: "flush" | "ramp" | "keep"): void {
+    this.lookaheadUnavailable = !this.audioMonitor.available
+      ? "no-audio-graph"
+      : this.sourceTainted
+        ? "cross-origin"
+        : this.audioMonitor.silentPathSuspected
+          ? "silent-audio-path"
+          : null;
+    const active = this.lookaheadEnabled && this.lookaheadUnavailable === null && this.mode === "9:16";
+    if (!active) {
+      if (this.lookaheadLengthMs > 0) this.applyLookaheadLength({ frames: 0, lengthMs: 0 });
+    } else if (this.lookaheadLengthMs === 0 || how === "flush") {
+      this.applyLookaheadLength(this.computeLookaheadLength());
+    } else if (how === "ramp") {
+      this.rampLookaheadLength(this.computeLookaheadLength());
+    }
+    this.metrics = { ...this.metrics, lookahead: this.lookaheadStatus() };
+    this.emitMetrics();
+  }
+
+  /** Switches to `delay` at once, behind a flush. */
+  private applyLookaheadLength(delay: FrameAlignedDelay): void {
+    // The delay change below silences the output itself.
+    this.flushLookahead({ silenceDelayLine: false });
+    const wasOff = this.lookaheadLengthMs === 0;
+    this.lookaheadLengthMs = delay.lengthMs;
+    this.delayFrames = delay.frames;
+    this.delaySchedule.set(delay.lengthMs);
+    this.pendingMaxSlots = null;
+    this.audioMonitor.setOutputDelay(delay.lengthMs / 1000);
+    // Sized (and copies sized for the screen) on the next captured frame.
+    this.frameBuffer = null;
+    if (wasOff) this.nextDetectionFrameIndex = this.captureIndex + 1;
+  }
+
+  /**
+   * Moves to `delay` without a flush: the DelaySchedule ramps, the audio
+   * DelayNode follows the same ramp, and the pool grows now (or shrinks
+   * once the ramp is over, when fewer frames wait).
+   */
+  private rampLookaheadLength(delay: FrameAlignedDelay): void {
+    if (delay.lengthMs === this.lookaheadLengthMs) return;
+    const now = performance.now();
+    const durationMs = this.delaySchedule.rampTo(now, delay.lengthMs);
+    this.audioMonitor.rampOutputDelay(delay.lengthMs / 1000, durationMs / 1000);
+    this.lookaheadLengthMs = delay.lengthMs;
+    this.delayFrames = delay.frames;
+    const buffer = this.frameBuffer;
+    if (!buffer || !this.slotSize) return;
+    const slots = maxSlotsFor(this.slotSize, slotsForDelay(delay.frames));
+    if (slots >= buffer.maxSlots) {
+      buffer.setMaxSlots(slots);
+      this.pendingMaxSlots = null;
+    } else {
+      this.pendingMaxSlots = { slots, at: now + durationMs };
+    }
+  }
+
+  /** From this build's warm detections, else the value stored by an earlier session, else the device default. Only a measured value is stored. Rounded up to whole frames. */
+  private computeLookaheadLength(): FrameAlignedDelay {
+    const build = getActiveWasmBuild().variant;
+    const measured = this.detectionLatency.p95(build);
+    const stored = measured === null ? loadStoredDetectionP95(build) : null;
+    if (measured !== null) storeDetectionP95(build, measured);
+    this.lookaheadLengthSource = measured !== null ? "measured" : stored !== null ? "stored" : "default";
+    const detectionP95 = measured ?? stored ?? DEFAULT_DETECTION_P95_MS[this.deviceClass][build];
+    this.lookaheadDetectionP95Ms = detectionP95;
+    const playbackRate = this.video?.playbackRate || 1;
+    this.lengthIntervalSec = this.frameInterval.intervalSec;
+    const intervalSec = this.lengthIntervalSec ?? DEFAULT_FRAME_INTERVAL_MS / 1000;
+    const lengthMs = lookaheadLengthMs(
+      detectionP95,
+      this.triggerLatency.p95() ?? DEFAULT_TRIGGER_P95_MS,
+      (intervalSec * 1000) / playbackRate
+    );
+    return alignToFrames(lengthMs, intervalSec, playbackRate);
+  }
+
+  /** Once this build has enough warm detections, the measured length replaces the stored or default one, by a ramp. */
+  private adoptMeasuredLength(build: WasmBuildVariant): void {
+    if (this.lookaheadLengthMs === 0 || this.lookaheadLengthSource === "measured") return;
+    if (build !== getActiveWasmBuild().variant || this.detectionLatency.p95(build) === null) return;
+    this.refreshLookahead("ramp");
+  }
+
+  private lookaheadStatus(): LookaheadStatus {
+    const buffer = this.frameBuffer;
+    const allocatedSlots = buffer?.allocatedSlots ?? 0;
+    return {
+      enabled: this.lookaheadEnabled,
+      unavailableReason: this.lookaheadEnabled ? this.lookaheadUnavailable : null,
+      bypassed: this.lookaheadEnabled && this.lookaheadUnavailable === null && this.mode === "16:9",
+      audioDelayMs: Math.round(this.audioMonitor.outputDelaySec * 1000),
+      lengthMs: Math.round(this.lookaheadLengthMs),
+      delayFrames: this.delayFrames,
+      detectionP95Ms: this.lookaheadLengthMs > 0 ? this.lookaheadDetectionP95Ms : null,
+      lengthSource: this.lookaheadLengthSource,
+      slotWidth: buffer ? (this.slotSize?.width ?? null) : null,
+      slotHeight: buffer ? (this.slotSize?.height ?? null) : null,
+      allocatedSlots,
+      bufferBytes: allocatedSlots * (this.slotSize?.bytesPerSlot ?? 0),
+      bufferedFrames: buffer?.length ?? 0,
+      droppedFrames: buffer ? buffer.overflowDrops + buffer.skippedOnDisplay : 0,
+      overflowDrops: buffer?.overflowDrops ?? 0,
+      skippedOnDisplay: buffer?.skippedOnDisplay ?? 0,
+    };
+  }
+
+  /** False when the video taints a canvas (cross-origin without CORS). */
+  private isFrameReadable(video: HTMLVideoElement): boolean {
+    try {
+      this.taintProbeCtx ??= new OffscreenCanvas(1, 1).getContext("2d", { willReadFrequently: true });
+      this.taintProbeCtx!.drawImage(video, 0, 0, 1, 1);
+      this.taintProbeCtx!.getImageData(0, 0, 1, 1);
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   private startLoop(): void {
@@ -743,13 +1177,13 @@ export class VertixEngine {
     const ctx = this.skinRejectionOverlayCtx;
     if (!ctx) return;
     ctx.clearRect(0, 0, outW, outH);
-    const faces = this.lastSkinRejectedFaces;
+    const faces = this.displayedSkinRejectedFaces;
     if (faces.length === 0 || this.mode === "16:9") return;
 
     const { w: srcW, h: srcH } = this.srcDims;
     const fittedHeight = Math.round(srcH * (outW / srcW));
     const views: { source: PaneRect; dest: PaneRect }[] =
-      this.personCount.stableCount === 0
+      this.displayedSpeakerCount === 0
         ? [
             {
               source: { x: 0, y: 0, w: srcW, h: srcH },
@@ -781,19 +1215,23 @@ export class VertixEngine {
   }
 
   private dispatchDetection(
-    video: HTMLVideoElement,
+    source: HTMLVideoElement | OffscreenCanvas,
     mediaTimeSec: number,
     srcW: number,
     srcH: number,
     cropW: number,
-    cropH: number
+    cropH: number,
+    triggeredByCut = false
   ): void {
     const probe = this.benchmarkProbe;
-    const dispatchedAt = probe ? performance.now() : 0;
+    const dispatchedAt = performance.now();
+    const build = getActiveWasmBuild().variant;
+    const previousDetectionSec = this.lastDispatchedDetectionSec;
     const audioEnergy = this.audioMonitor.energy();
 
     if (sharedWorkerReady && sharedWorker) {
       this.detectionInFlight = true;
+      this.lastDispatchedDetectionSec = mediaTimeSec;
       const generation = this.detectionRequestGeneration;
       const requestId = nextDetectionRequestId++;
       let bitmapReadyAt = 0;
@@ -802,7 +1240,18 @@ export class VertixEngine {
         // Belongs to a frame from before a reset (seek, mode change) —
         // discard it instead of feeding stale positions into the layout.
         if (generation !== this.detectionRequestGeneration) return;
-        const postStart = probe ? performance.now() : 0;
+        const postStart = performance.now();
+        sharedWorkerResults += 1;
+        if (
+          this.detectionLatency.record(
+            build,
+            postStart - dispatchedAt,
+            dispatchedAt - sharedWorkerReadyAt,
+            sharedWorkerResults
+          )
+        ) {
+          this.adoptMeasuredLength(build);
+        }
         this.processDetectionResult(
           facesFlat,
           unpackSceneCutScores(cutScoresFlat),
@@ -813,7 +1262,9 @@ export class VertixEngine {
           cropW,
           cropH,
           "worker",
-          tookMs
+          tookMs,
+          previousDetectionSec,
+          triggeredByCut
         );
         if (probe) {
           const end = performance.now();
@@ -831,16 +1282,25 @@ export class VertixEngine {
             mediaTimeSec,
             this.lastSceneCut.hist,
             this.lastSceneCut.grid,
-            this.lastSceneCut.isCut
+            this.lastSceneCut.isCut,
+            triggeredByCut,
+            this.lastResolvedFaces.length,
+            this.lastResolvedFaces[0]?.cx ?? NaN
           );
         }
+        this.dispatchPendingCutDetection();
       };
-      pendingDetections.set(requestId, { onResult, onCancel: () => (this.detectionInFlight = false) });
-      // Resizing via createImageBitmap instead of drawImage+getImageData
-      // here keeps the main thread from doing a synchronous GPU→CPU
-      // readback every detection tick — the worker does that part now
-      // (see faceDetectionWorker.ts).
-      createImageBitmap(video, { resizeWidth: FACE_W, resizeHeight: FACE_H, resizeQuality: "low" })
+      pendingDetections.set(requestId, {
+        onResult,
+        onCancel: () => {
+          this.detectionInFlight = false;
+          this.pendingCutDetectionSec = null;
+        },
+      });
+      // No getImageData here: the main thread only scales the frame and
+      // hands it over; the GPU→CPU readback happens in the worker (see
+      // faceDetectionWorker.ts).
+      this.detectionInputBitmap(source)
         .then((bitmap) => {
           if (probe) bitmapReadyAt = performance.now();
           if (generation !== this.detectionRequestGeneration || !sharedWorker) {
@@ -854,6 +1314,7 @@ export class VertixEngine {
         })
         .catch(() => {
           this.detectionInFlight = false;
+          this.pendingCutDetectionSec = null;
           pendingDetections.delete(requestId);
         });
     } else if (sharedWorkerLoading) {
@@ -866,12 +1327,24 @@ export class VertixEngine {
       // already loading or ready, so it's safe to call on every tick here.
       this.ensureWasm();
       if (!this.engine) return;
-      this.faceCtx.drawImage(video, 0, 0, FACE_W, FACE_H);
+      this.lastDispatchedDetectionSec = mediaTimeSec;
+      this.faceCtx.drawImage(source, 0, 0, FACE_W, FACE_H);
       const drawnAt = probe ? performance.now() : 0;
       const faceImageData = this.faceCtx.getImageData(0, 0, FACE_W, FACE_H);
       const start = performance.now();
       const facesFlat = this.engine.update_faces(new Uint8Array(faceImageData.data.buffer), mediaTimeSec);
       const tookMs = performance.now() - start;
+      this.mainThreadResults += 1;
+      if (
+        this.detectionLatency.record(
+          build,
+          performance.now() - dispatchedAt,
+          dispatchedAt - this.mainThreadReadyAt,
+          this.mainThreadResults
+        )
+      ) {
+        this.adoptMeasuredLength(build);
+      }
       this.processDetectionResult(
         facesFlat,
         unpackSceneCutScores(this.engine.last_cut_scores()),
@@ -882,7 +1355,9 @@ export class VertixEngine {
         cropW,
         cropH,
         "main-thread",
-        tookMs
+        tookMs,
+        previousDetectionSec,
+        triggeredByCut
       );
       if (probe) {
         const end = performance.now();
@@ -900,7 +1375,10 @@ export class VertixEngine {
           mediaTimeSec,
           this.lastSceneCut.hist,
           this.lastSceneCut.grid,
-          this.lastSceneCut.isCut
+          this.lastSceneCut.isCut,
+          triggeredByCut,
+          this.lastResolvedFaces.length,
+          this.lastResolvedFaces[0]?.cx ?? NaN
         );
       }
     }
@@ -916,7 +1394,9 @@ export class VertixEngine {
     cropW: number,
     cropH: number,
     detectionMode: "worker" | "main-thread",
-    inferenceMs: number
+    inferenceMs: number,
+    previousDetectionSec: number | null = null,
+    triggeredByCut = false
   ): void {
     const detections = unpackDetections(facesFlat);
     this.lastSceneCut = sceneCut;
@@ -933,11 +1413,28 @@ export class VertixEngine {
     }
     this.lastResolvedFaces = this.activeSpeaker.resolve(this.lastFaces, audioEnergy, mediaTimeSec);
     const count = this.lastResolvedFaces.length;
-    const stablePersonCount = sceneCut.isCut
+    const commitAtOnce = sceneCut.isCut || this.commitCountAtNextDetection;
+    // A count committed at once after a seek or a mode switch replaces whatever was on screen: no dissolve from it.
+    const snapWithoutCut = commitAtOnce && !sceneCut.isCut;
+    this.commitCountAtNextDetection = false;
+    const stablePersonCount = commitAtOnce
       ? this.personCount.commitNow(count, mediaTimeSec)
-      : this.personCount.observe(count, this.layoutSignature !== "", mediaTimeSec);
-    if (sceneCut.isCut) this.pendingReframe = "snap";
-    this.emitState();
+      : this.personCount.observe(count, this.hasFrameSinceReset, mediaTimeSec);
+    // With lookahead, a cut found here is shown from the frame where it
+    // happened (the biggest per-frame jump since the previous detection),
+    // not from this detection frame.
+    const decisionSec =
+      sceneCut.isCut && this.lookaheadLengthMs > 0
+        ? locateCut(this.scoredFrames, previousDetectionSec, mediaTimeSec)
+        : mediaTimeSec;
+    const cutSource: CutSource | null = !sceneCut.isCut
+      ? null
+      : triggeredByCut
+        ? "trigger"
+        : decisionSec < mediaTimeSec
+          ? "localised"
+          : "tick";
+    this.decideLayout(decisionSec, count, stablePersonCount, cutSource, snapWithoutCut, srcW, srcH, cropW, cropH);
 
     if (this.lastDetectionMediaTime !== null && mediaTimeSec > this.lastDetectionMediaTime) {
       const interval = mediaTimeSec - this.lastDetectionMediaTime;
@@ -977,19 +1474,71 @@ export class VertixEngine {
           : this.metrics.confidenceHistory,
     };
     this.emitMetrics();
+  }
 
-    // Only refresh the LERP target once the raw count matches the
-    // *committed* layout — otherwise, mid-debounce, this could compute a
-    // different pane count than what's actually on screen. The deadzone
-    // itself lives inside computeSpeakerLayout. A pending reframe aims
-    // straight at the new faces, without the deadzone.
-    if (stablePersonCount > 0 && count === stablePersonCount) {
-      if (this.activeSpeaker.switchedSpeaker) this.pendingReframe ??= "dissolve";
-      this.targetPanes =
-        this.pendingReframe !== null
+  /** Turns one detection into a LayoutDecision for the frame at `mediaTimeSec`, and queues it for display. */
+  private decideLayout(
+    mediaTimeSec: number,
+    count: number,
+    stablePersonCount: number,
+    cutSource: CutSource | null,
+    snap: boolean,
+    srcW: number,
+    srcH: number,
+    cropW: number,
+    cropH: number
+  ): void {
+    const isCut = cutSource !== null;
+    const countChanged = stablePersonCount !== this.decidedSpeakerCount;
+    let reframe: Reframe | null = isCut || snap ? "snap" : null;
+    if (stablePersonCount === 0) {
+      this.decidedTargetPanes = [];
+    } else if (count === stablePersonCount) {
+      // Only refresh the target once the raw count matches the *committed*
+      // layout — otherwise, mid-debounce, this could compute a different
+      // pane count than what's actually on screen. The deadzone itself
+      // lives inside computeSpeakerLayout. A reframe or a new layout aims
+      // straight at the new faces, without the deadzone.
+      if (this.activeSpeaker.switchedSpeaker) reframe ??= "dissolve";
+      this.decidedTargetPanes =
+        reframe !== null || countChanged
           ? computeSpeakerLayout(this.lastResolvedFaces, srcW, srcH, cropW, cropH)
-          : computeSpeakerLayout(this.lastResolvedFaces, srcW, srcH, cropW, cropH, this.targetPanes, DEADZONE_FRACTION);
+          : computeSpeakerLayout(
+              this.lastResolvedFaces,
+              srcW,
+              srcH,
+              cropW,
+              cropH,
+              this.decidedTargetPanes,
+              DEADZONE_FRACTION
+            );
     }
+    this.decidedSpeakerCount = stablePersonCount;
+    this.decisions.push({
+      mediaTimeSec,
+      speakerCount: stablePersonCount,
+      targetPanes: this.decidedTargetPanes,
+      reframe,
+      isCut,
+      cutSource,
+      skinRejectedFaces: this.lastSkinRejectedFaces,
+    });
+    if (this.frameBuffer?.hasHeld) this.releaseHeldFrames();
+  }
+
+  /** Applies the decisions due for the frame about to be drawn; with `onlyUpToSec` null, every queued one (no lookahead: they are already late). */
+  private applyDueDecisions(onlyUpToSec: number | null): LayoutDecision | null {
+    const decision = mergeDecisions(
+      onlyUpToSec === null ? this.decisions.takeAll() : this.decisions.takeDue(onlyUpToSec)
+    );
+    if (!decision) return null;
+    const countChanged = decision.speakerCount !== this.displayedSpeakerCount;
+    this.displayedSpeakerCount = decision.speakerCount;
+    this.displayedSkinRejectedFaces = decision.skinRejectedFaces;
+    this.targetPanes = decision.targetPanes;
+    this.pendingReframe = decision.reframe;
+    if (countChanged) this.emitState();
+    return decision;
   }
 
   /**
@@ -1016,9 +1565,11 @@ export class VertixEngine {
     this.transitionStart = now;
   }
 
-  // Runs on every decoded frame. Rendering happens synchronously here (not
-  // through any framework state) so playback stays perfectly in sync with
-  // audio.
+  // Runs on every decoded frame. Without lookahead the frame is rendered
+  // right here, synchronously (not through any framework state), so it
+  // stays in sync with audio. With lookahead it is copied into the frame
+  // buffer and rendered by the display loop LOOKAHEAD later, with the
+  // audio delayed by the same amount.
   private onVideoFrame(now: DOMHighResTimeStamp, metadata: VideoFrameCallbackMetadata): void {
     this.frameCallbackId = null;
     const video = this.video;
@@ -1035,6 +1586,9 @@ export class VertixEngine {
       // synchronous with the "play" event) — treating that as a final
       // stop used to leave this loop off for good while the video kept
       // playing fine, a canvas freeze that looked like a real hang.
+      if (video.paused && !video.ended && this.lookaheadLengthMs > 0 && this.srcDimsInitialized) {
+        this.capturePausedFrame(video, metadata);
+      }
       this.scheduleNextFrame(video);
       return;
     }
@@ -1056,8 +1610,12 @@ export class VertixEngine {
       }
     }
     this.lastFrameTime = now;
+    this.frameInterval.push(metadata.mediaTime);
     if (now - this.lastMetricsPush > 300) {
       this.lastMetricsPush = now;
+      if (this.audioMonitor.silentPathSuspected !== this.audioMonitor.checkSilentPath(video, now)) {
+        this.refreshLookahead("keep");
+      }
       // Drop long-task entries that have aged out of the window, then sum
       // what's left.
       this.recentLongTasks = this.recentLongTasks.filter((t) => now - t.time <= LONG_TASK_WINDOW_MS);
@@ -1070,6 +1628,8 @@ export class VertixEngine {
         frameTimeHistory: appendCapped(this.metrics.frameTimeHistory, this.frameTimeEma),
         longTaskMs,
         longTaskHistory: appendCapped(this.metrics.longTaskHistory, longTaskMs),
+        displayedMediaTimeSec: this.displayedMediaTimeSec,
+        lookahead: this.lookaheadStatus(),
       };
       this.emitMetrics();
     }
@@ -1085,10 +1645,340 @@ export class VertixEngine {
 
       this.meta = { width: w, height: h, cropWidth: cropW, cropHeight: cropH };
       this.emitState();
+
+      const tainted = !this.isFrameReadable(video);
+      if (tainted !== this.sourceTainted) {
+        this.sourceTainted = tainted;
+        this.refreshLookahead("flush");
+      }
     }
 
+    if (this.lookaheadLengthMs > 0) {
+      this.captureFrame(video, metadata, now);
+    } else {
+      this.renderLiveFrame(video, metadata, now, frameDtSec);
+    }
+
+    if (probe) probe.recordFrame(now, performance.now() - workStart, metadata.mediaTime, metadata.presentedFrames);
+    this.scheduleNextFrame(video);
+  }
+
+  /** No lookahead: detection on this frame if due, then draw it straight from the video. */
+  private renderLiveFrame(
+    video: HTMLVideoElement,
+    metadata: VideoFrameCallbackMetadata,
+    now: number,
+    frameDtSec: number
+  ): void {
+    const { w: srcW, h: srcH, cropW, cropH } = this.srcDims;
+    if (this.mode === "9:16") {
+      this.hasFrameSinceReset = true;
+      this.frameCounter += 1;
+      if (this.frameCounter % FACE_DETECT_INTERVAL === 0) {
+        if (!this.detectionInFlight) {
+          this.dispatchDetection(video, metadata.mediaTime, srcW, srcH, cropW, cropH);
+        } else {
+          this.benchmarkProbe?.recordSkippedDetection();
+        }
+      }
+    }
+    const renderStart = this.benchmarkProbe ? performance.now() : 0;
+    this.renderFrame(video, srcW, srcH, null, metadata.mediaTime, now, frameDtSec);
+    this.displayedMediaTimeSec = metadata.mediaTime;
+    this.benchmarkProbe?.recordDisplay(now, metadata.mediaTime, performance.now() - renderStart, NaN);
+  }
+
+  /**
+   * Lookahead, while playing: copies the frame into the buffer, runs
+   * detection on it if due, then shows the buffered frame whose time has
+   * come — the newest with mediaTime <= this frame's mediaTime minus the
+   * delay. Picking by media time keeps audio and video in sync when a
+   * callback is skipped. The delay is a whole number of frames, so that
+   * frame appears exactly when the video element would show it.
+   */
+  private captureFrame(video: HTMLVideoElement, metadata: VideoFrameCallbackMetadata, now: number): void {
+    this.followFrameRate();
+    const presentedAtMs = metadata.expectedDisplayTime ?? now;
+    const frame = this.bufferFrame(video, metadata.mediaTime, presentedAtMs, false);
+    if (this.mode === "9:16") {
+      this.hasFrameSinceReset = true;
+      if (frame.frameIndex >= this.nextDetectionFrameIndex) {
+        this.nextDetectionFrameIndex = frame.frameIndex + FACE_DETECT_INTERVAL;
+        if (!this.detectionInFlight) {
+          this.dispatchDetection(frame.slot.canvas, frame.mediaTimeSec, ...this.cropArgs());
+        } else {
+          this.benchmarkProbe?.recordSkippedDetection();
+        }
+      }
+      this.scoreFrameForCut(frame);
+    }
+
+    this.stopDisplayLoop();
+    const delayMs = this.delaySchedule.valueAt(presentedAtMs);
+    const rate = video.playbackRate || 1;
+    const intervalSec = this.frameInterval.intervalSec ?? DEFAULT_FRAME_INTERVAL_MS / 1000;
+    // A quarter frame of slack absorbs rounding in media timestamps.
+    const dueUpToSec = metadata.mediaTime - (delayMs / 1000) * rate + intervalSec / 4;
+    const due = this.frameBuffer!.takeLatest((f) => f.mediaTimeSec <= dueUpToSec);
+    if (due) this.showBufferedFrame(due, now, presentedAtMs - (due.presentedAtMs + delayMs));
+    this.applyPendingMaxSlots(now);
+    this.armStallWatchdog(intervalSec / rate);
+  }
+
+  /** A frame-rate change (another rendition) or the first measured interval moves the length to whole frames of the new rate. */
+  private followFrameRate(): void {
+    const interval = this.frameInterval.intervalSec;
+    if (interval === null) return;
+    const used = this.lengthIntervalSec;
+    if (used === null || Math.abs(interval - used) / used > FRAME_RATE_CHANGE_FRACTION) this.refreshLookahead("ramp");
+  }
+
+  private applyPendingMaxSlots(now: number): void {
+    const pending = this.pendingMaxSlots;
+    if (!pending || now < pending.at || !this.frameBuffer) return;
+    this.frameBuffer.setMaxSlots(pending.slots);
+    this.pendingMaxSlots = null;
+  }
+
+  /** Starts the drain loop if no frame callback comes for STALL_FRAMES frame intervals. */
+  private armStallWatchdog(frameWallSec: number): void {
+    clearTimeout(this.stallWatchdog);
+    this.stallWatchdog = setTimeout(() => this.ensureDisplayLoop(), frameWallSec * 1000 * STALL_FRAMES);
+  }
+
+  private showBufferedFrame(frame: BufferedFrame<FrameSlot>, now: number, errorMs: number): void {
+    const frameDtSec = this.lastDisplayedAt !== null ? (now - this.lastDisplayedAt) / 1000 : 0;
+    this.lastDisplayedAt = now;
+    const renderStart = performance.now();
+    const { canvas } = frame.slot;
+    this.renderFrame(canvas, canvas.width, canvas.height, frame.mediaTimeSec, frame.mediaTimeSec, now, frameDtSec);
+    this.frameBuffer?.release(frame);
+    this.displayedMediaTimeSec = frame.mediaTimeSec;
+    this.benchmarkProbe?.recordDisplay(now, frame.mediaTimeSec, performance.now() - renderStart, errorMs);
+  }
+
+  private ensureCutTriggerWorker(): Worker | null {
+    if (this.cutTriggerWorker || this.cutTriggerUnavailable) return this.cutTriggerWorker;
+    try {
+      const worker = new Worker(`${import.meta.env.BASE_URL}workers/cutTriggerWorker.js`);
+      worker.onmessage = (e: MessageEvent) => this.onCutTriggerScore(e.data);
+      worker.onerror = () => {
+        console.error("[Vertix] Cut-trigger worker failed; cuts are applied at detection rate.");
+        worker.terminate();
+        this.cutTriggerWorker = null;
+        this.cutTriggerUnavailable = true;
+      };
+      this.cutTriggerWorker = worker;
+    } catch {
+      this.cutTriggerUnavailable = true;
+    }
+    return this.cutTriggerWorker;
+  }
+
+  /**
+   * Sends a small copy of a buffered frame to the cut trigger: a GPU scale
+   * (drawImage) and a transfer, both synchronous, no pixel readback here.
+   */
+  private scoreFrameForCut(frame: BufferedFrame<FrameSlot>): void {
+    const worker = this.ensureCutTriggerWorker();
+    if (!worker) return;
+    const start = performance.now();
+    this.pendingTriggerFrames.set(frame.frameIndex, { mediaTimeSec: frame.mediaTimeSec, capturedAt: start });
+    this.triggerSourceCanvas ??= new OffscreenCanvas(TRIGGER_SOURCE_W, TRIGGER_SOURCE_H);
+    const bitmap = scaledBitmap(this.triggerSourceCanvas, frame.slot.canvas);
+    const drawnAt = performance.now();
+    worker.postMessage({ type: "score", frameId: frame.frameIndex, bitmap }, [bitmap]);
+    const end = performance.now();
+    this.benchmarkProbe?.recordTriggerCost(end - start, drawnAt - start, end - drawnAt);
+  }
+
+  /**
+   * The detector's 320x240 input as a bitmap: from the video with
+   * createImageBitmap (no lookahead), or from a buffered frame with a GPU
+   * scale and a transfer, without the full-size bitmap and promise
+   * createImageBitmap makes for a canvas.
+   */
+  private detectionInputBitmap(source: HTMLVideoElement | OffscreenCanvas): Promise<ImageBitmap> {
+    if (!(source instanceof OffscreenCanvas)) {
+      return createImageBitmap(source, { resizeWidth: FACE_W, resizeHeight: FACE_H, resizeQuality: "low" });
+    }
+    this.detectionSourceCanvas ??= new OffscreenCanvas(FACE_W, FACE_H);
+    return Promise.resolve(scaledBitmap(this.detectionSourceCanvas, source));
+  }
+
+  private onCutTriggerScore(msg: { frameId: number; hist: number; grid: number; triggered: boolean }): void {
+    const pending = this.pendingTriggerFrames.get(msg.frameId);
+    if (!pending) return;
+    this.pendingTriggerFrames.delete(msg.frameId);
+    this.triggerLatency.push(performance.now() - pending.capturedAt);
+    if (this.scoredFrames.length === SCORED_FRAME_HISTORY) this.scoredFrames.shift();
+    this.scoredFrames.push({ mediaTimeSec: pending.mediaTimeSec, score: Math.max(msg.hist, msg.grid) });
+    if (msg.triggered && this.mode === "9:16") this.requestCutDetection(pending.mediaTimeSec);
+  }
+
+  /** A detection on the likely cut frame now, instead of at the next regular tick (after the one in flight, if any). */
+  private requestCutDetection(mediaTimeSec: number): void {
+    // A detection on this frame or a later one already covers the cut; if
+    // it finds it, cut localisation moves the change back to this frame.
+    if (this.lastDispatchedDetectionSec !== null && this.lastDispatchedDetectionSec >= mediaTimeSec) return;
+    if (this.detectionInFlight) {
+      this.pendingCutDetectionSec = mediaTimeSec;
+      return;
+    }
+    const frame = this.frameBuffer?.find(mediaTimeSec);
+    if (!frame) return;
+    this.nextDetectionFrameIndex = frame.frameIndex + FACE_DETECT_INTERVAL;
+    this.dispatchDetection(frame.slot.canvas, mediaTimeSec, ...this.cropArgs(), true);
+  }
+
+  private dispatchPendingCutDetection(): void {
+    const pending = this.pendingCutDetectionSec;
+    if (pending === null) return;
+    this.pendingCutDetectionSec = null;
+    this.requestCutDetection(pending);
+  }
+
+  private resetCutTrigger(): void {
+    this.cutTriggerGeneration += 1;
+    this.pendingTriggerFrames.clear();
+    this.scoredFrames = [];
+    this.cutTriggerWorker?.postMessage({ type: "reset" });
+  }
+
+  /**
+   * A new frame while paused (a seek, or a source's first frame): held
+   * until its own detection result is in, so it is shown with the right
+   * crop, or HELD_FRAME_TIMEOUT_MS at most.
+   */
+  private capturePausedFrame(video: HTMLVideoElement, metadata: VideoFrameCallbackMetadata): void {
+    if (metadata.mediaTime === this.lastCapturedMediaTime) return;
+    const frame = this.bufferFrame(video, metadata.mediaTime, metadata.expectedDisplayTime ?? performance.now(), true);
+    if (this.mode === "9:16" && !this.detectionInFlight) {
+      this.dispatchDetection(frame.slot.canvas, frame.mediaTimeSec, ...this.cropArgs());
+    }
+    clearTimeout(this.heldFrameTimeout);
+    this.heldFrameTimeout = setTimeout(() => this.releaseHeldFrames(), HELD_FRAME_TIMEOUT_MS);
+  }
+
+  private releaseHeldFrames(): void {
+    clearTimeout(this.heldFrameTimeout);
+    if (!this.frameBuffer) return;
+    this.frameBuffer.releaseHeld();
+    this.ensureDisplayLoop();
+  }
+
+  private cropArgs(): [number, number, number, number] {
+    const { w, h, cropW, cropH } = this.srcDims;
+    return [w, h, cropW, cropH];
+  }
+
+  private bufferFrame(
+    video: HTMLVideoElement,
+    mediaTimeSec: number,
+    presentedAtMs: number,
+    held: boolean
+  ): BufferedFrame<FrameSlot> {
+    const buffer = this.ensureFrameBuffer();
+    const slot = buffer.acquire();
+    slot.ctx.drawImage(video, 0, 0, slot.canvas.width, slot.canvas.height);
+    this.captureIndex += 1;
+    this.lastCapturedMediaTime = mediaTimeSec;
+    const frame = { slot, mediaTimeSec, presentedAtMs, frameIndex: this.captureIndex, held, forced: false };
+    buffer.enqueue(frame);
+    return frame;
+  }
+
+  /** The pool, sized for the current delay: copies no larger than the source or than the output canvas can show. */
+  private ensureFrameBuffer(): FrameRingBuffer<FrameSlot> {
+    if (this.frameBuffer) return this.frameBuffer;
+    const { w, h } = this.srcDims;
+    const neededSlots = slotsForDelay(this.delayFrames);
+    const size = chooseSlotSize(w, h, neededSlots, this.outputHeightOnScreenPx());
+    this.slotSize = size;
+    this.frameBuffer = new FrameRingBuffer(
+      () => {
+        const canvas = new OffscreenCanvas(size.width, size.height);
+        return { canvas, ctx: canvas.getContext("2d", { alpha: false })! };
+      },
+      maxSlotsFor(size, neededSlots)
+    );
+    return this.frameBuffer;
+  }
+
+  /** Height of the output canvas on screen in device pixels, or null when not laid out. */
+  private outputHeightOnScreenPx(): number | null {
+    const cssHeight = this.canvas?.clientHeight ?? 0;
+    if (!cssHeight || typeof devicePixelRatio !== "number") return null;
+    return cssHeight * devicePixelRatio;
+  }
+
+  private ensureDisplayLoop(): void {
+    if (this.displayFrameId === null) this.displayFrameId = requestAnimationFrame(this.boundOnDisplayFrame);
+  }
+
+  private stopDisplayLoop(): void {
+    if (this.displayFrameId !== null) cancelAnimationFrame(this.displayFrameId);
+    this.displayFrameId = null;
+    this.lastDisplayCallbackAt = null;
+  }
+
+  /**
+   * Lookahead drain loop, once per screen refresh, only while no frame
+   * callbacks come (paused, buffering, ended) or a held frame was released.
+   * Draws the latest frame whose due time (display time + delay) falls on
+   * the next refresh: what is drawn now reaches the screen about one
+   * refresh later.
+   */
+  private onDisplayFrame(now: DOMHighResTimeStamp): void {
+    this.displayFrameId = null;
+    const buffer = this.frameBuffer;
+    if (!buffer || !this.canvas) return;
+
+    if (this.lastDisplayCallbackAt !== null) {
+      const dt = now - this.lastDisplayCallbackAt;
+      if (dt > 4 && dt < 50) this.refreshIntervalMs += (dt - this.refreshIntervalMs) * 0.1;
+    }
+    this.lastDisplayCallbackAt = now;
+
+    const onScreenAt = now + this.refreshIntervalMs;
+    const delayMs = this.delaySchedule.valueAt(onScreenAt);
+    const frame = buffer.takeLatest((f) => f.presentedAtMs + delayMs <= onScreenAt + this.refreshIntervalMs / 2);
+    if (frame) this.showBufferedFrame(frame, now, onScreenAt - (frame.presentedAtMs + delayMs));
+
+    if (buffer.length > 0) {
+      this.ensureDisplayLoop();
+    } else if (this.video?.paused) {
+      this.lastDisplayCallbackAt = null;
+      this.metrics = {
+        ...this.metrics,
+        displayedMediaTimeSec: this.displayedMediaTimeSec,
+        lookahead: this.lookaheadStatus(),
+      };
+      this.emitMetrics();
+    }
+  }
+
+  /**
+   * Draws one output frame from `source` (the video, or a buffered copy of
+   * size sourceW × sourceH), after applying the layout decisions due for
+   * it: those up to `decisionsUpToSec`, or all of them when null.
+   */
+  private renderFrame(
+    source: CanvasImageSource,
+    sourceW: number,
+    sourceH: number,
+    decisionsUpToSec: number | null,
+    frameMediaTimeSec: number,
+    now: number,
+    frameDtSec: number
+  ): void {
+    const canvas = this.canvas!;
+    const probe = this.benchmarkProbe;
     const { w: srcW, h: srcH, cropW, cropH } = this.srcDims;
     const currentMode = this.mode;
+    // Crop rects are in source-video pixels; a buffered copy may be smaller.
+    const scaleX = sourceW / srcW;
+    const scaleY = sourceH / srcH;
 
     const targetW = currentMode === "16:9" ? srcW : cropW;
     const targetH = currentMode === "16:9" ? srcH : cropH;
@@ -1100,19 +1990,17 @@ export class VertixEngine {
     const ctx = this.outputCtx!;
 
     if (currentMode === "16:9") {
-      ctx.drawImage(video, 0, 0, srcW, srcH);
+      ctx.drawImage(source, 0, 0, srcW, srcH);
     } else {
       // "9:16" mode: 0 faces -> full frame, no crop; N>=1 -> N panes, each a
       // cover-crop following its face. The layout (pane count/positions) is
       // committed once per debounced face-count change and held fixed;
       // within it, each pane's crop only drifts smoothly toward its target.
-      this.frameCounter += 1;
-      if (this.frameCounter % FACE_DETECT_INTERVAL === 0) {
-        if (!this.detectionInFlight) this.dispatchDetection(video, metadata.mediaTime, srcW, srcH, cropW, cropH);
-        else probe?.recordSkippedDetection();
+      const applied = this.applyDueDecisions(decisionsUpToSec);
+      if (applied?.isCut) {
+        probe?.recordCutShown(now, applied.mediaTimeSec, frameMediaTimeSec, applied.cutSource ?? "tick");
       }
-
-      const speakerCount = this.personCount.stableCount;
+      const speakerCount = this.displayedSpeakerCount;
       const targetSignature = speakerCount === 0 ? "broll" : `speakers:${speakerCount}`;
 
       const reframe = this.pendingReframe;
@@ -1132,8 +2020,6 @@ export class VertixEngine {
 
         // A new layout snaps straight to its target instead of gliding in
         // from the old positions.
-        this.targetPanes =
-          speakerCount === 0 ? [] : computeSpeakerLayout(this.lastResolvedFaces, srcW, srcH, cropW, cropH);
         this.smoothedPanes = this.targetPanes.map((p) => ({ ...p.pane.source }));
 
         const cropScaleFactor =
@@ -1156,22 +2042,22 @@ export class VertixEngine {
       }
 
       if (speakerCount === 0) {
-        drawFitFrame(ctx, this.blurCanvas, video, srcW, srcH, cropW, cropH);
+        drawFitFrame(ctx, this.blurCanvas, source, srcW, srcH, cropW, cropH);
       } else {
         // Mutate the already-allocated smoothed rects toward the cached
         // target and draw with integer coordinates (avoids sub-pixel blit
         // interpolation). No new objects, no layout math — that only runs
-        // at detection ticks, above.
+        // at detection ticks.
         const smoothingAlpha = paneSmoothingAlpha(frameDtSec);
         for (let i = 0; i < this.targetPanes.length; i++) {
           const target = this.targetPanes[i].pane;
           const smoothed = lerpPaneRectInto(this.smoothedPanes[i], target.source, smoothingAlpha);
           ctx.drawImage(
-            video,
-            Math.round(smoothed.x),
-            Math.round(smoothed.y),
-            Math.round(smoothed.w),
-            Math.round(smoothed.h),
+            source,
+            Math.round(smoothed.x * scaleX),
+            Math.round(smoothed.y * scaleY),
+            Math.round(smoothed.w * scaleX),
+            Math.round(smoothed.h * scaleY),
             Math.round(target.dest.x),
             Math.round(target.dest.y),
             Math.round(target.dest.w),
@@ -1196,8 +2082,5 @@ export class VertixEngine {
     }
 
     if (this.skinRejectionOverlay) this.drawSkinRejectionOverlay(this.skinRejectionOverlay, targetW, targetH);
-
-    if (probe) probe.recordFrame(now, performance.now() - workStart, metadata.mediaTime, metadata.presentedFrames);
-    this.scheduleNextFrame(video);
   }
 }

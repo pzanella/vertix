@@ -14,11 +14,12 @@ import {
   type BenchmarkClipResult,
   type BenchmarkConfig,
   type BenchmarkReport,
+  type LookaheadComparison,
   type SuiteStep,
   type VertixEngine,
   type WasmBuildComparison,
 } from "../core";
-import { SAMPLE_CLIPS, sampleClipUrl } from "../components/Player/sampleClips";
+import { BENCHMARK_CLIPS } from "../components/Player/sampleClips";
 import { SETTLE_BETWEEN_CLIPS_MS } from "../components/Benchmark/benchmarkConfig";
 
 export type BenchmarkStatus = "idle" | "running" | "done" | "cancelled" | "error";
@@ -124,6 +125,7 @@ export function useBenchmark({ config, getEngine, videoRef, load }: UseBenchmark
   const run = useCallback(
     async (
       comparison: WasmBuildComparison,
+      lookaheadComparison: LookaheadComparison,
       plan: (
         engine: VertixEngine,
         video: HTMLVideoElement,
@@ -144,9 +146,10 @@ export function useBenchmark({ config, getEngine, videoRef, load }: UseBenchmark
       // Collected before any playback: the timer-resolution probe busy-waits for a few ms.
       const environment = collectBenchmarkEnvironment();
       const results: BenchmarkClipResult[] = [];
+      const lookaheadWanted = engine.getLookaheadStatus().enabled;
       try {
         await plan(engine, video, controller.signal, results);
-        const finished = buildBenchmarkReport(config, environment, comparison, results);
+        const finished = buildBenchmarkReport(config, environment, comparison, results, lookaheadComparison);
         setReport(finished);
         setStatus("done");
         publishReport(finished);
@@ -154,9 +157,12 @@ export function useBenchmark({ config, getEngine, videoRef, load }: UseBenchmark
         const cancelled = err instanceof DOMException && err.name === "AbortError";
         setStatus(cancelled ? "cancelled" : "error");
         if (!cancelled) setError(err instanceof Error ? err.message : String(err));
-        if (results.length > 0) setReport(buildBenchmarkReport(config, environment, comparison, results));
+        if (results.length > 0) {
+          setReport(buildBenchmarkReport(config, environment, comparison, results, lookaheadComparison));
+        }
       } finally {
         engine.setMode("9:16");
+        engine.setLookaheadEnabled(lookaheadWanted);
         restoreDefaultWasmBuild();
         abortRef.current = null;
         setStage(null);
@@ -167,16 +173,16 @@ export function useBenchmark({ config, getEngine, videoRef, load }: UseBenchmark
 
   const runSuite = useCallback(() => {
     const simdSupported = isWasmSimdSupported();
-    const steps = buildSuitePlan(SAMPLE_CLIPS.length, config.baseline, simdSupported);
+    const steps = buildSuitePlan(BENCHMARK_CLIPS.length, config.baseline, simdSupported);
     const kinds = steps.map((step) => step.kind);
     const comparison: WasmBuildComparison = simdSupported
       ? { builds: ["simd", "scalar"], order: "alternating-per-clip", simdSkippedReason: null }
       : { builds: ["scalar"], order: null, simdSkippedReason: "not-supported" };
 
-    void run(comparison, async (engine, video, signal, results) => {
+    void run(comparison, { order: "off-first-per-clip" }, async (engine, video, signal, results) => {
       for (const [index, step] of steps.entries()) {
-        const clip = SAMPLE_CLIPS[step.clipIndex];
-        const loadSource = () => load(sampleClipUrl(clip.file));
+        const clip = BENCHMARK_CLIPS[step.clipIndex];
+        const loadSource = () => load(clip.url);
 
         if (step.kind === "warmup") {
           setStage({
@@ -187,18 +193,25 @@ export function useBenchmark({ config, getEngine, videoRef, load }: UseBenchmark
             stopAtSec: config.wasmWarmupSec,
           });
           await switchWasmBuild(step.build);
-          await runUnrecordedWarmup(engine, video, { mode: "9:16", loadSource, seconds: config.wasmWarmupSec, signal });
+          await runUnrecordedWarmup(engine, video, {
+            mode: "9:16",
+            lookahead: true,
+            loadSource,
+            seconds: config.wasmWarmupSec,
+            signal,
+          });
           continue;
         }
 
         await delay(SETTLE_BETWEEN_CLIPS_MS, signal);
         const reframed = step.kind === "clip";
         const runOrder = reframed ? step.build.runOrder : null;
+        const lookahead = reframed ? step.lookahead : true;
         setStage({
           label: reframed
-            ? `Clip ${step.clipIndex + 1}/${SAMPLE_CLIPS.length}: ${clip.file} (9:16, ${step.build.variant} build${
-                runOrder ? `, run ${runOrder.position}/${runOrder.sequence.length}` : ""
-              })`
+            ? `Clip ${step.clipIndex + 1}/${BENCHMARK_CLIPS.length}: ${clip.file} (9:16, ${step.build.variant} build, lookahead ${
+                lookahead ? "on" : "off"
+              }${runOrder ? `, run ${runOrder.position}/${runOrder.sequence.length}` : ""})`
             : `Baseline: ${clip.file} (16:9, no detection)`,
           index,
           total: steps.length,
@@ -210,7 +223,9 @@ export function useBenchmark({ config, getEngine, videoRef, load }: UseBenchmark
             clipName: clip.file,
             mode: reframed ? "9:16" : "16:9",
             nominalFps: clip.nominalFps,
+            knownCutsSec: clip.knownCutsSec,
             warmupSec: config.clipWarmupSec,
+            lookahead,
             loadSource,
             wasmBuild: reframed ? step.build : { ...getActiveWasmBuild(), runOrder: null },
             signal,
@@ -223,9 +238,9 @@ export function useBenchmark({ config, getEngine, videoRef, load }: UseBenchmark
   const runCurrentClip = useCallback(() => {
     const build = getActiveWasmBuild();
     const comparison: WasmBuildComparison = { builds: [build.variant], order: null, simdSkippedReason: null };
-    void run(comparison, async (engine, video, signal, results) => {
+    void run(comparison, { order: null }, async (engine, video, signal, results) => {
       const clipName = currentClipName(video);
-      const sample = SAMPLE_CLIPS.find((clip) => clip.file === clipName);
+      const sample = BENCHMARK_CLIPS.find((clip) => clip.file === clipName);
       setStage({
         label: `${clipName} (9:16, ${build.variant} build, rewound and replayed)`,
         index: 0,
@@ -238,6 +253,7 @@ export function useBenchmark({ config, getEngine, videoRef, load }: UseBenchmark
           clipName,
           mode: "9:16",
           nominalFps: sample?.nominalFps ?? null,
+          knownCutsSec: sample?.knownCutsSec,
           warmupSec: config.clipWarmupSec,
           wasmBuild: { ...build, runOrder: null },
           signal,

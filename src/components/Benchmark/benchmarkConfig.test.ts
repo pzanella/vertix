@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { SAMPLE_CLIPS } from "../Player/sampleClips";
+import { BENCHMARK_CLIPS } from "../Player/sampleClips";
 import {
   CLIP_WARMUP_RANGE,
   DEFAULT_BENCHMARK_CONFIG,
@@ -30,7 +30,7 @@ describe("estimateSuiteSeconds", () => {
   it("adds the baseline clip only when enabled", () => {
     const withBaseline = estimateSuiteSeconds(DEFAULT_BENCHMARK_CONFIG, false);
     const withoutBaseline = estimateSuiteSeconds({ ...DEFAULT_BENCHMARK_CONFIG, baseline: false }, false);
-    expect(withBaseline - withoutBaseline).toBeCloseTo(SAMPLE_CLIPS[0].durationSec + 1);
+    expect(withBaseline - withoutBaseline).toBeCloseTo(BENCHMARK_CLIPS[0].durationSec + 1);
   });
 
   it("grows with the WASM warm-up", () => {

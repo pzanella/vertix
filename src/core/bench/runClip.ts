@@ -1,9 +1,11 @@
 import type { VertixEngine, VertixMode } from "../VertixEngine";
-import { BenchmarkRecorder, type BenchmarkClipResult } from "./BenchmarkRecorder";
+import { BenchmarkRecorder, type BenchmarkClipResult, type BenchmarkLookahead } from "./BenchmarkRecorder";
 import type { BenchmarkWasmBuild } from "./suitePlan";
 
 export interface ClipPlaybackOptions {
   mode: VertixMode;
+  /** Switches lookahead on or off before the clip starts; left as it is when omitted. */
+  lookahead?: boolean;
   /**
    * Loads a new source into the video and starts playback (the host's own
    * loader, e.g. a Shaka-based one). When omitted, the source already in the
@@ -18,6 +20,8 @@ export interface BenchmarkClipOptions extends ClipPlaybackOptions {
   nominalFps: number | null;
   warmupSec: number;
   wasmBuild: BenchmarkWasmBuild;
+  /** Real hard cuts of the clip, when known (test clips), for frames-late per cut. */
+  knownCutsSec?: readonly number[];
 }
 
 // A clip that has not ended after duration × this (+ grace) is treated as stuck.
@@ -99,6 +103,7 @@ function playClip(
     const onAbort = () => fail(abortError());
 
     engine.setMode(options.mode);
+    if (options.lookahead !== undefined) engine.setLookaheadEnabled(options.lookahead);
     video.addEventListener("timeupdate", onTimeUpdate);
     video.addEventListener("ended", onEnded);
     video.addEventListener("error", onError);
@@ -140,6 +145,7 @@ export async function runBenchmarkClip(
   options: BenchmarkClipOptions
 ): Promise<BenchmarkClipResult> {
   let recorder: BenchmarkRecorder | null = null;
+  let lookahead: BenchmarkLookahead | undefined;
   let pageHidden = document.visibilityState !== "visible";
   const onVisibilityChange = () => {
     if (document.visibilityState !== "visible") pageHidden = true;
@@ -153,10 +159,13 @@ export async function runBenchmarkClip(
           video,
           warmupSec: options.warmupSec,
           nominalFps: options.nominalFps,
+          knownCutsSec: options.knownCutsSec,
         });
         engine.setBenchmarkProbe(recorder);
       },
     });
+    // Read before the next clip loads: buffer counters reset per source.
+    lookahead = lookaheadSnapshot(engine);
   } catch (error) {
     (recorder as BenchmarkRecorder | null)?.finish(options.mode);
     throw error;
@@ -166,5 +175,16 @@ export async function runBenchmarkClip(
   }
   const finished = recorder as BenchmarkRecorder | null;
   if (!finished) throw new Error("Benchmark clip ended before it started");
-  return { ...finished.finish(options.mode), pageHiddenDuringRun: pageHidden, wasmBuild: options.wasmBuild };
+  return {
+    ...finished.finish(options.mode),
+    pageHiddenDuringRun: pageHidden,
+    wasmBuild: options.wasmBuild,
+    lookahead: lookahead ?? lookaheadSnapshot(engine),
+  };
+}
+
+function lookaheadSnapshot(engine: VertixEngine): BenchmarkLookahead {
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  const { bufferedFrames, ...lookahead } = engine.getLookaheadStatus();
+  return lookahead;
 }

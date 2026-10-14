@@ -1,6 +1,6 @@
 import { useId } from "react";
 import { isWasmSimdSupported, type BenchmarkConfig } from "../../core";
-import { SAMPLE_CLIPS } from "../Player/sampleClips";
+import { CUT_TEST_CLIPS, SAMPLE_CLIPS } from "../Player/sampleClips";
 import {
   CLIP_WARMUP_RANGE,
   WASM_WARMUP_RANGE,
@@ -146,9 +146,10 @@ export function BenchmarkReadyView({
 
       <div className="min-h-0 overflow-y-auto overscroll-contain flex flex-col gap-3 px-4 pb-4">
         <p className="leading-relaxed text-neutral-400">
-          Plays the {SAMPLE_CLIPS.length} sample clips back to back in 9:16
+          Plays the {SAMPLE_CLIPS.length} sample clips and {CUT_TEST_CLIPS.length} test clips with hard cuts back to
+          back in 9:16, each once with lookahead off, then with lookahead on
           {simdSupported
-            ? ", each once with the SIMD and once with the scalar WASM build (alternating which goes first)"
+            ? " once with the SIMD and once with the scalar WASM build (alternating which goes first)"
             : " with the scalar WASM build (this browser has no WebAssembly SIMD)"}
           {config.baseline ? ", then one 16:9 baseline without detection" : ""}, at normal speed. The panel closes so
           you can watch the player; progress shows on the gauge.

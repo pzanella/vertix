@@ -212,6 +212,8 @@ interface UseWasmReframeReturn {
   isTransitioning: boolean;
   /** Live telemetry for the analytics dashboard. */
   metrics: VertixMetrics;
+  /** Turns the engine's lookahead (delayed output, crop changes on the exact frame) on or off. */
+  setLookaheadEnabled: (enabled: boolean) => void;
   /** User-facing message for the current load failure, if `state === "error"`. */
   errorMessage: string | null;
   /** Whether Shaka is currently stalled waiting for more data (rebuffering) — layered on top of `state`, not a state of its own. */
@@ -239,6 +241,7 @@ export function useWasmReframe(): UseWasmReframeReturn {
   const shakaAttachedRef = useRef(false);
   const currentSrcRef = useRef<string | null>(null);
   const loadGenerationRef = useRef(0);
+  const endedTimeoutRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
 
   const engineRef = useRef<VertixEngine | null>(null);
 
@@ -454,6 +457,7 @@ export function useWasmReframe(): UseWasmReframeReturn {
   const replay = useCallback(() => {
     const video = videoRef.current;
     if (!video) return;
+    clearTimeout(endedTimeoutRef.current);
     video.currentTime = 0;
     setProgress(0);
     video
@@ -465,19 +469,36 @@ export function useWasmReframe(): UseWasmReframeReturn {
   const seek = useCallback((fraction: number) => {
     const video = videoRef.current;
     if (!video || !video.duration) return;
+    clearTimeout(endedTimeoutRef.current);
     video.currentTime = fraction * video.duration;
     // The engine hears the video's own "seeking" event and resets its
     // tracking state on its own.
     setProgress(fraction);
   }, []);
 
+  // The scrub bar follows the frame on screen, which trails
+  // video.currentTime by the engine's lookahead while playing.
+  const syncProgress = useCallback(() => {
+    const video = videoRef.current;
+    if (!video || !video.duration) return;
+    const shownSec = engineRef.current?.getDisplayedMediaTime() ?? null;
+    setProgress((shownSec ?? video.currentTime) / video.duration);
+  }, []);
+
+  useEffect(() => {
+    syncProgress();
+  }, [metrics.displayedMediaTimeSec, syncProgress]);
+
   useEffect(() => {
     const video = videoRef.current;
     if (!video) return;
-    const onTimeUpdate = () => {
-      if (video.duration) setProgress(video.currentTime / video.duration);
+    const onTimeUpdate = syncProgress;
+    // The last frames are still on their way to the screen for the lookahead's length.
+    const onEnded = () => {
+      clearTimeout(endedTimeoutRef.current);
+      const lagMs = engineRef.current?.getLookaheadStatus().lengthMs ?? 0;
+      endedTimeoutRef.current = setTimeout(() => setState("ended"), lagMs);
     };
-    const onEnded = () => setState("ended");
     // The element itself is the source of truth — load() and the autoplay
     // fallback change `muted` directly, and the icon must follow.
     const onVolumeChange = () => setMuted(video.muted);
@@ -488,8 +509,9 @@ export function useWasmReframe(): UseWasmReframeReturn {
       video.removeEventListener("timeupdate", onTimeUpdate);
       video.removeEventListener("ended", onEnded);
       video.removeEventListener("volumechange", onVolumeChange);
+      clearTimeout(endedTimeoutRef.current);
     };
-  }, []);
+  }, [syncProgress]);
 
   // Stream-health telemetry — only meaningful, and only polled, while
   // something is actually playing back (by which point Shaka is guaranteed
@@ -508,6 +530,10 @@ export function useWasmReframe(): UseWasmReframeReturn {
 
   const setMode = useCallback((m: VertixMode) => {
     engineRef.current!.setMode(m);
+  }, []);
+
+  const setLookaheadEnabled = useCallback((enabled: boolean) => {
+    engineRef.current?.setLookaheadEnabled(enabled);
   }, []);
 
   const toggleMute = useCallback(() => {
@@ -535,6 +561,7 @@ export function useWasmReframe(): UseWasmReframeReturn {
     // sniffing failure mimeTypeForExtension works around. pause() is
     // enough to stop playback while the idle screen is shown.
     video.pause();
+    clearTimeout(endedTimeoutRef.current);
 
     setState("idle");
     setErrorMessage(null);
@@ -572,6 +599,7 @@ export function useWasmReframe(): UseWasmReframeReturn {
     speakerCount,
     isTransitioning,
     metrics,
+    setLookaheadEnabled,
     errorMessage,
     isBuffering,
     streamHealth,

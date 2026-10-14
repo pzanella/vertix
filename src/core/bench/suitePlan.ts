@@ -1,6 +1,6 @@
 import type { WasmBuildSelection, WasmBuildVariant } from "../wasmBuild";
 
-/** Where a run sits in its clip's SIMD/scalar pair. */
+/** Where a lookahead-on run sits in its clip's SIMD/scalar pair. */
 export interface WasmBuildRunOrder {
   /** 1 for the first run of this clip, 2 for the second. */
   position: 1 | 2;
@@ -16,7 +16,7 @@ export interface BenchmarkWasmBuild extends WasmBuildSelection {
 export type SuiteStep =
   /** Switch to `build` (a fresh worker), then play the clip's start unrecorded. */
   | { kind: "warmup"; clipIndex: number; build: WasmBuildSelection }
-  | { kind: "clip"; clipIndex: number; build: BenchmarkWasmBuild }
+  | { kind: "clip"; clipIndex: number; build: BenchmarkWasmBuild; lookahead: boolean }
   /** 16:9 without detection, so the build does not matter. */
   | { kind: "baseline"; clipIndex: number };
 
@@ -29,30 +29,41 @@ export function wasmBuildSequenceForClip(clipIndex: number): WasmBuildVariant[] 
 }
 
 /**
- * The full suite: every clip once per build when SIMD is supported (A/B),
- * else once with the scalar build. A warm-up precedes every build switch,
- * which recreates the worker cold.
+ * The full suite: every clip once with lookahead off, on the build already
+ * loaded (so builds alternate across clips and no extra warm-up is
+ * needed), then with lookahead on once per build when SIMD is supported
+ * (A/B), else once with the scalar build. A warm-up precedes every build
+ * switch, which recreates the worker cold.
  */
 export function buildSuitePlan(clipCount: number, baseline: boolean, simdSupported: boolean): SuiteStep[] {
   const steps: SuiteStep[] = [];
-  let loaded: WasmBuildVariant | null = null;
+  let loaded: WasmBuildSelection | null = null;
 
-  const runClip = (clipIndex: number, build: WasmBuildSelection, runOrder: WasmBuildRunOrder | null) => {
-    if (build.variant !== loaded) {
+  const runClip = (
+    clipIndex: number,
+    build: WasmBuildSelection,
+    runOrder: WasmBuildRunOrder | null,
+    lookahead: boolean
+  ) => {
+    if (build.variant !== loaded?.variant) {
       steps.push({ kind: "warmup", clipIndex, build });
-      loaded = build.variant;
+      loaded = build;
     }
-    steps.push({ kind: "clip", clipIndex, build: { ...build, runOrder } });
+    steps.push({ kind: "clip", clipIndex, build: { ...build, runOrder }, lookahead });
   };
 
   for (let clipIndex = 0; clipIndex < clipCount; clipIndex++) {
     if (!simdSupported) {
-      runClip(clipIndex, { variant: "scalar", reason: "not-supported" }, null);
+      const scalar: WasmBuildSelection = { variant: "scalar", reason: "not-supported" };
+      runClip(clipIndex, scalar, null, false);
+      runClip(clipIndex, scalar, null, true);
       continue;
     }
     const sequence = wasmBuildSequenceForClip(clipIndex);
+    const onLoaded: WasmBuildSelection = loaded ?? { variant: sequence[0], reason: "benchmark-suite" };
+    runClip(clipIndex, onLoaded, null, false);
     sequence.forEach((variant, index) =>
-      runClip(clipIndex, { variant, reason: "benchmark-suite" }, { position: index === 0 ? 1 : 2, sequence })
+      runClip(clipIndex, { variant, reason: "benchmark-suite" }, { position: index === 0 ? 1 : 2, sequence }, true)
     );
   }
 

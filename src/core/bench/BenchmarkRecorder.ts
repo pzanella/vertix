@@ -9,6 +9,7 @@ import {
   type SampleSummary,
 } from "./stats";
 import type { BenchmarkWasmBuild } from "./suitePlan";
+import type { CutSource } from "../lookahead/decisionTimeline";
 
 export type DetectionPath = "worker" | "main-thread";
 
@@ -32,11 +33,27 @@ export interface BenchmarkProbe {
     frameMediaTimeSec: number,
     sceneCutHist: number,
     sceneCutGrid: number,
-    sceneCut: boolean
+    sceneCut: boolean,
+    /** Schema v5: dispatched by the per-frame cut trigger instead of the regular tick. */
+    triggeredByCut?: boolean,
+    /** Schema v5: faces the layout tracks after active-speaker resolution, and the first one's centre x (NaN without one). */
+    resolvedFaceCount?: number,
+    resolvedCx?: number
   ): void;
   /** A detection was due on this frame but skipped because the previous one had not returned yet. */
   recordSkippedDetection(): void;
   recordLayoutChange(nowMs: number): void;
+  /** Main-thread time spent sending one frame to the cut trigger (lookahead only): in total, scaling it (drawImage + transfer), and posting it. */
+  recordTriggerCost(mainThreadMs: number, drawMs?: number, postMs?: number): void;
+  /**
+   * A frame was drawn on the output canvas. `errorMs` (lookahead only) is
+   * when it reaches the screen minus when it should (its own display time +
+   * the lookahead): the video side of the audio/video offset, since the
+   * audio delay is sample-exact. NaN without lookahead.
+   */
+  recordDisplay(nowMs: number, mediaTimeSec: number, workMs: number, errorMs: number): void;
+  /** A hard-cut decision for the frame at `cutMediaTimeSec` was applied on the displayed frame at `shownMediaTimeSec`. */
+  recordCutShown(nowMs: number, cutMediaTimeSec: number, shownMediaTimeSec: number, source: CutSource): void;
 }
 
 export interface BenchmarkRecorderOptions {
@@ -46,7 +63,16 @@ export interface BenchmarkRecorderOptions {
   warmupSec: number;
   /** The clip's real frame rate, when known. Otherwise it is estimated from mediaTime steps. */
   nominalFps: number | null;
+  /** Media times of the clip's real hard cuts, when known (test clips). */
+  knownCutsSec?: readonly number[];
 }
+
+// Matches FACE_DETECT_INTERVAL in VertixEngine.ts.
+const REGULAR_DETECTION_GAP_FRAMES = 5;
+// A crop change more than this long after a known cut is not counted as its change.
+const KNOWN_CUT_MATCH_WINDOW_SEC = 1.5;
+const CUT_SHOWN_CAPACITY = 1024;
+const CUT_SOURCES: CutSource[] = ["tick", "trigger", "localised"];
 
 export interface FrameAccounting {
   /** requestVideoFrameCallback calls after warm-up. */
@@ -101,6 +127,58 @@ export interface SceneCutEvent {
   warmup: boolean;
 }
 
+/** A hard-cut decision as the viewer saw it (schema v5). */
+export interface CutShownEvent {
+  /** Frame the decision belongs to: the detection frame, or with lookahead the located cut frame. */
+  cutMediaTimeSec: number;
+  /** Displayed frame the crop changed on. */
+  shownMediaTimeSec: number;
+  /** Displayed frames from cutMediaTimeSec up to (not including) the one the crop changed on. Target 0. */
+  framesLate: number;
+  /** How the cut was found: the per-frame trigger, localised from a regular detection, or a regular detection ("tick"). */
+  source: CutSource;
+}
+
+/** A cut whose real time is known (test clips with joins), as the viewer saw it (schema v5). */
+export interface KnownCutResult {
+  timeSec: number;
+  /** Displayed frames from the real cut frame up to the one the crop changed on; null if the crop never changed for it. */
+  framesLate: number | null;
+  shownMediaTimeSec: number | null;
+  /** How the matched cut was found; null if the crop never changed for it. */
+  source: CutSource | null;
+}
+
+export interface DisplaySummary {
+  /** Frames drawn on the output canvas, after warm-up. */
+  count: number;
+  /** Lookahead only: screen time minus due time per displayed frame (the video side of the A/V offset). */
+  errorMs: SampleSummary;
+  /** Render cost of one displayed frame (with lookahead: in the display loop, apart from frameWorkMs). */
+  workMs: SampleSummary;
+}
+
+export interface TriggerSummary {
+  count: number;
+  /** Main-thread cost per frame: scaling the buffered frame and posting it to the trigger worker. */
+  mainThreadMs: SampleSummary;
+  /** The two parts of mainThreadMs: drawImage into the small canvas + transferToImageBitmap, and postMessage. Added within v5. */
+  drawMs: SampleSummary;
+  postMs: SampleSummary;
+  /** Detections dispatched by the trigger instead of the regular tick. */
+  triggeredDetections: number;
+}
+
+/** Gaps between consecutive detections, in frames (schema v5). Mouth motion is measured over this gap. */
+export interface DetectionGapSummary {
+  /** Pairs of consecutive detections measured. */
+  pairs: number;
+  /** Pairs whose gap is not FACE_DETECT_INTERVAL (5) frames. */
+  irregular: number;
+  /** Count per gap length in frames, e.g. { "5": 120, "2": 3 }. */
+  histogram: Record<string, number>;
+}
+
 export interface LongTaskSummary {
   supported: boolean;
   count: number;
@@ -120,6 +198,12 @@ export interface BenchmarkClipSummary {
   /** Every detected cut, warm-up included (schema v4). */
   sceneCutCount: number;
   sceneCuts: SceneCutEvent[];
+  /** Schema v5. */
+  cutsShown: CutShownEvent[];
+  knownCuts: KnownCutResult[];
+  display: DisplaySummary;
+  trigger: TriggerSummary;
+  detectionGaps: DetectionGapSummary;
   longTasks: LongTaskSummary;
   /** Samples that did not fit in the preallocated buffers (should always be 0). */
   overflow: { frames: number; detections: number; layoutChanges: number; longTasks: number };
@@ -153,10 +237,45 @@ export interface BenchmarkClipRaw {
     sceneCutHist: number[];
     sceneCutGrid: number[];
     sceneCut: number[];
+    /** Schema v5: 1 for a detection dispatched by the cut trigger. */
+    triggered: number[];
+    resolvedFaces: number[];
+    resolvedCx: number[];
   };
+  /** Schema v5. */
+  displays: { nowMs: number[]; mediaTimeSec: number[]; workMs: number[]; errorMs: number[]; warmup: number[] };
+  cutsShown: { nowMs: number[]; cutMediaTimeSec: number[]; shownMediaTimeSec: number[]; source: CutSource[] };
+  triggers: { mainThreadMs: number[]; drawMs: number[]; postMs: number[]; warmup: number[] };
   skippedDetections: { mediaTimeSec: number[]; warmup: number[] };
   layoutChanges: { nowMs: number[]; mediaTimeSec: number[]; warmup: number[] };
   longTasks: { startTimeMs: number[]; durationMs: number[]; warmup: number[] };
+}
+
+/** Lookahead state of one run (schema v5). */
+export interface BenchmarkLookahead {
+  enabled: boolean;
+  unavailableReason: string | null;
+  /** Added within v5: on but not running because the mode is 16:9. */
+  bypassed: boolean;
+  /** Added within v5: the audio delay actually applied (0 when off or bypassed). */
+  audioDelayMs: number;
+  lengthMs: number;
+  /** Added within v5: lengthMs in whole frames. */
+  delayFrames: number;
+  /** Detection p95 behind lengthMs, and where it came from (measured / stored / default). Added within v5. */
+  detectionP95Ms: number | null;
+  lengthSource: string;
+  slotWidth: number | null;
+  slotHeight: number | null;
+  allocatedSlots: number;
+  /** Estimated frame-buffer memory (RGBA). */
+  bufferBytes: number;
+  /** Frames dropped by the buffer (full) or superseded on display: overflowDrops + skippedOnDisplay. */
+  droppedFrames: number;
+  /** Added within v5: frames dropped because the pool was full (should be 0). */
+  overflowDrops: number;
+  /** Added within v5: frames passed over on display, following a skipped frame callback or a shrinking delay. */
+  skippedOnDisplay: number;
 }
 
 export interface BenchmarkClipResult {
@@ -171,12 +290,14 @@ export interface BenchmarkClipResult {
   pageHiddenDuringRun: boolean;
   /** The WASM build this run used (schema v3). */
   wasmBuild: BenchmarkWasmBuild;
+  /** Schema v5. */
+  lookahead: BenchmarkLookahead;
   summary: BenchmarkClipSummary;
   raw: BenchmarkClipRaw;
 }
 
-/** What the recorder itself knows; the runner adds the build. */
-export type BenchmarkClipRecording = Omit<BenchmarkClipResult, "wasmBuild">;
+/** What the recorder itself knows; the runner adds the build and the lookahead state. */
+export type BenchmarkClipRecording = Omit<BenchmarkClipResult, "wasmBuild" | "lookahead">;
 
 // requestVideoFrameCallback fires at most once per new video frame, so this
 // bounds the frame buffer for any source up to 120 fps with headroom.
@@ -202,6 +323,7 @@ export class BenchmarkRecorder implements BenchmarkProbe {
   private readonly video: HTMLVideoElement;
   private readonly warmupSec: number;
   private readonly nominalFps: number | null;
+  private readonly knownCutsSec: readonly number[];
   private readonly startedAt = new Date().toISOString();
 
   private readonly frameNow: Float64Array;
@@ -229,8 +351,30 @@ export class BenchmarkRecorder implements BenchmarkProbe {
   private readonly detectionCutHist: Float64Array;
   private readonly detectionCutGrid: Float64Array;
   private readonly detectionCut: Uint8Array;
+  private readonly detectionTriggered: Uint8Array;
+  private readonly detectionResolvedFaces: Float64Array;
+  private readonly detectionResolvedCx: Float64Array;
   private detectionCount = 0;
   private detectionOverflow = 0;
+
+  private readonly displayNow: Float64Array;
+  private readonly displayMediaTime: Float64Array;
+  private readonly displayWork: Float64Array;
+  private readonly displayError: Float64Array;
+  private readonly displayWarmup: Uint8Array;
+  private displayCount = 0;
+
+  private readonly cutShownNow = new Float64Array(CUT_SHOWN_CAPACITY);
+  private readonly cutShownCut = new Float64Array(CUT_SHOWN_CAPACITY);
+  private readonly cutShownAt = new Float64Array(CUT_SHOWN_CAPACITY);
+  private readonly cutShownSource = new Uint8Array(CUT_SHOWN_CAPACITY);
+  private cutShownCount = 0;
+
+  private readonly triggerCost: Float64Array;
+  private readonly triggerDraw: Float64Array;
+  private readonly triggerPost: Float64Array;
+  private readonly triggerWarmup: Uint8Array;
+  private triggerCount = 0;
 
   private readonly skippedMediaTime: Float64Array;
   private readonly skippedWarmup: Uint8Array;
@@ -260,6 +404,7 @@ export class BenchmarkRecorder implements BenchmarkProbe {
     this.video = options.video;
     this.warmupSec = Math.max(0, options.warmupSec);
     this.nominalFps = options.nominalFps;
+    this.knownCutsSec = options.knownCutsSec ?? [];
 
     const durationSec = Number.isFinite(options.video.duration) ? options.video.duration : FALLBACK_DURATION_SEC;
     const frameCapacity = Math.ceil(durationSec * MAX_FRAME_RATE_HZ) + BUFFER_HEADROOM;
@@ -268,6 +413,15 @@ export class BenchmarkRecorder implements BenchmarkProbe {
     this.frameMediaTime = new Float64Array(frameCapacity);
     this.framePresented = new Float64Array(frameCapacity);
     this.frameWarmup = new Uint8Array(frameCapacity);
+    this.displayNow = new Float64Array(frameCapacity);
+    this.displayMediaTime = new Float64Array(frameCapacity);
+    this.displayWork = new Float64Array(frameCapacity);
+    this.displayError = new Float64Array(frameCapacity);
+    this.displayWarmup = new Uint8Array(frameCapacity);
+    this.triggerCost = new Float64Array(frameCapacity);
+    this.triggerDraw = new Float64Array(frameCapacity);
+    this.triggerPost = new Float64Array(frameCapacity);
+    this.triggerWarmup = new Uint8Array(frameCapacity);
 
     const detectionCapacity = Math.ceil(frameCapacity / 2);
     this.detectionEndedAt = new Float64Array(detectionCapacity);
@@ -287,6 +441,9 @@ export class BenchmarkRecorder implements BenchmarkProbe {
     this.detectionCutHist = new Float64Array(detectionCapacity);
     this.detectionCutGrid = new Float64Array(detectionCapacity);
     this.detectionCut = new Uint8Array(detectionCapacity);
+    this.detectionTriggered = new Uint8Array(detectionCapacity);
+    this.detectionResolvedFaces = new Float64Array(detectionCapacity);
+    this.detectionResolvedCx = new Float64Array(detectionCapacity);
     this.skippedMediaTime = new Float64Array(detectionCapacity);
     this.skippedWarmup = new Uint8Array(detectionCapacity);
 
@@ -337,7 +494,10 @@ export class BenchmarkRecorder implements BenchmarkProbe {
     frameMediaTimeSec: number,
     sceneCutHist: number,
     sceneCutGrid: number,
-    sceneCut: boolean
+    sceneCut: boolean,
+    triggeredByCut = false,
+    resolvedFaceCount = NaN,
+    resolvedCx = NaN
   ): void {
     if (this.finished) return;
     const i = this.detectionCount;
@@ -362,6 +522,9 @@ export class BenchmarkRecorder implements BenchmarkProbe {
     this.detectionCutHist[i] = sceneCutHist;
     this.detectionCutGrid[i] = sceneCutGrid;
     this.detectionCut[i] = sceneCut ? 1 : 0;
+    this.detectionTriggered[i] = triggeredByCut ? 1 : 0;
+    this.detectionResolvedFaces[i] = resolvedFaceCount;
+    this.detectionResolvedCx[i] = resolvedCx;
     this.detectionCount = i + 1;
   }
 
@@ -375,6 +538,49 @@ export class BenchmarkRecorder implements BenchmarkProbe {
     this.skippedMediaTime[i] = this.lastMediaTime;
     this.skippedWarmup[i] = this.inWarmup ? 1 : 0;
     this.skippedCount = i + 1;
+  }
+
+  recordDisplay(nowMs: number, mediaTimeSec: number, workMs: number, errorMs: number): void {
+    if (this.finished) return;
+    const i = this.displayCount;
+    if (i >= this.displayNow.length) {
+      this.frameOverflow += 1;
+      return;
+    }
+    this.displayNow[i] = nowMs;
+    this.displayMediaTime[i] = mediaTimeSec;
+    this.displayWork[i] = workMs;
+    this.displayError[i] = errorMs;
+    this.displayWarmup[i] = this.warmupEndMediaTime !== null && mediaTimeSec < this.warmupEndMediaTime ? 1 : 0;
+    this.displayCount = i + 1;
+  }
+
+  recordCutShown(nowMs: number, cutMediaTimeSec: number, shownMediaTimeSec: number, source: CutSource): void {
+    if (this.finished) return;
+    const i = this.cutShownCount;
+    if (i >= CUT_SHOWN_CAPACITY) {
+      this.layoutOverflow += 1;
+      return;
+    }
+    this.cutShownNow[i] = nowMs;
+    this.cutShownCut[i] = cutMediaTimeSec;
+    this.cutShownAt[i] = shownMediaTimeSec;
+    this.cutShownSource[i] = CUT_SOURCES.indexOf(source);
+    this.cutShownCount = i + 1;
+  }
+
+  recordTriggerCost(mainThreadMs: number, drawMs = NaN, postMs = NaN): void {
+    if (this.finished) return;
+    const i = this.triggerCount;
+    if (i >= this.triggerCost.length) {
+      this.frameOverflow += 1;
+      return;
+    }
+    this.triggerCost[i] = mainThreadMs;
+    this.triggerDraw[i] = drawMs;
+    this.triggerPost[i] = postMs;
+    this.triggerWarmup[i] = this.inWarmup ? 1 : 0;
+    this.triggerCount = i + 1;
   }
 
   recordLayoutChange(nowMs: number): void {
@@ -476,13 +682,20 @@ export class BenchmarkRecorder implements BenchmarkProbe {
     }
 
     const measuredSeconds = now.length >= 2 ? (now[now.length - 1] - now[0]) / 1000 : 0;
+    const frames = this.frameAccounting(mediaTime, presented);
+
+    const measuredDisplay = (i: number) => this.displayWarmup[i] === 0;
+    const measuredTrigger = (i: number) => this.triggerWarmup[i] === 0;
+    const displayCount = this.displayCount;
+    let triggeredDetections = 0;
+    for (let i = 0; i < detectionCount; i++) if (this.detectionTriggered[i] === 1) triggeredDetections += 1;
 
     return {
       measuredSeconds,
       frameWorkMs: summarize(work),
       frameIntervalMs: now.length >= 2 ? summarize(deltas(now)) : EMPTY_SUMMARY,
       effectiveFps: ratePerSecond(now),
-      frames: this.frameAccounting(mediaTime, presented),
+      frames,
       detection: {
         count: total.length,
         rateHz: measuredSeconds > 0 ? total.length / measuredSeconds : null,
@@ -506,6 +719,21 @@ export class BenchmarkRecorder implements BenchmarkProbe {
       layoutChanges,
       sceneCutCount: sceneCuts.length,
       sceneCuts,
+      cutsShown: this.cutsShown(),
+      knownCuts: this.knownCutResults(),
+      display: {
+        count: selectWhere(this.displayMediaTime.subarray(0, displayCount), measuredDisplay).length,
+        errorMs: summarize(selectWhere(this.displayError.subarray(0, displayCount), measuredDisplay)),
+        workMs: summarize(selectWhere(this.displayWork.subarray(0, displayCount), measuredDisplay)),
+      },
+      trigger: {
+        count: this.triggerCount,
+        mainThreadMs: summarize(selectWhere(this.triggerCost.subarray(0, this.triggerCount), measuredTrigger)),
+        drawMs: summarize(selectWhere(this.triggerDraw.subarray(0, this.triggerCount), measuredTrigger)),
+        postMs: summarize(selectWhere(this.triggerPost.subarray(0, this.triggerCount), measuredTrigger)),
+        triggeredDetections,
+      },
+      detectionGaps: this.detectionGaps(frames.fpsUsed),
       longTasks: {
         supported: this.longTaskObserver !== null,
         count: longTaskCount,
@@ -519,6 +747,70 @@ export class BenchmarkRecorder implements BenchmarkProbe {
         longTasks: this.longTaskOverflow,
       },
     };
+  }
+
+  /** Displayed frames with media time in [fromSec, toSec). */
+  private displayedFramesBetween(fromSec: number, toSec: number): number {
+    const eps = 1e-4;
+    let count = 0;
+    for (let i = 0; i < this.displayCount; i++) {
+      const t = this.displayMediaTime[i];
+      if (t >= fromSec - eps && t < toSec - eps) count += 1;
+    }
+    return count;
+  }
+
+  private cutsShown(): CutShownEvent[] {
+    const events: CutShownEvent[] = [];
+    for (let i = 0; i < this.cutShownCount; i++) {
+      const cutMediaTimeSec = this.cutShownCut[i];
+      const shownMediaTimeSec = this.cutShownAt[i];
+      events.push({
+        cutMediaTimeSec,
+        shownMediaTimeSec,
+        framesLate: this.displayedFramesBetween(cutMediaTimeSec, shownMediaTimeSec),
+        source: CUT_SOURCES[this.cutShownSource[i]],
+      });
+    }
+    return events;
+  }
+
+  private knownCutResults(): KnownCutResult[] {
+    return this.knownCutsSec.map((timeSec) => {
+      let shownMediaTimeSec: number | null = null;
+      let source: CutSource | null = null;
+      for (let i = 0; i < this.cutShownCount; i++) {
+        const shown = this.cutShownAt[i];
+        if (shown >= timeSec - 1e-4 && shown < timeSec + KNOWN_CUT_MATCH_WINDOW_SEC) {
+          shownMediaTimeSec = shown;
+          source = CUT_SOURCES[this.cutShownSource[i]];
+          break;
+        }
+      }
+      return {
+        timeSec,
+        shownMediaTimeSec,
+        source,
+        framesLate: shownMediaTimeSec === null ? null : this.displayedFramesBetween(timeSec, shownMediaTimeSec),
+      };
+    });
+  }
+
+  private detectionGaps(fps: number | null): DetectionGapSummary {
+    const histogram: Record<string, number> = {};
+    let pairs = 0;
+    let irregular = 0;
+    if (fps !== null) {
+      for (let i = 1; i < this.detectionCount; i++) {
+        const step = this.detectionFrameMediaTime[i] - this.detectionFrameMediaTime[i - 1];
+        if (step <= 0) continue;
+        const gap = Math.round(step * fps);
+        histogram[gap] = (histogram[gap] ?? 0) + 1;
+        pairs += 1;
+        if (gap !== REGULAR_DETECTION_GAP_FRAMES) irregular += 1;
+      }
+    }
+    return { pairs, irregular, histogram };
   }
 
   private frameAccounting(mediaTime: Float64Array, presented: Float64Array): FrameAccounting {
@@ -601,6 +893,28 @@ export class BenchmarkRecorder implements BenchmarkProbe {
         sceneCutHist: toArray(this.detectionCutHist, d),
         sceneCutGrid: toArray(this.detectionCutGrid, d),
         sceneCut: toArray(this.detectionCut, d),
+        triggered: toArray(this.detectionTriggered, d),
+        resolvedFaces: toArray(this.detectionResolvedFaces, d),
+        resolvedCx: toArray(this.detectionResolvedCx, d),
+      },
+      displays: {
+        nowMs: toArray(this.displayNow, this.displayCount),
+        mediaTimeSec: toArray(this.displayMediaTime, this.displayCount),
+        workMs: toArray(this.displayWork, this.displayCount),
+        errorMs: toArray(this.displayError, this.displayCount),
+        warmup: toArray(this.displayWarmup, this.displayCount),
+      },
+      cutsShown: {
+        nowMs: toArray(this.cutShownNow, this.cutShownCount),
+        cutMediaTimeSec: toArray(this.cutShownCut, this.cutShownCount),
+        shownMediaTimeSec: toArray(this.cutShownAt, this.cutShownCount),
+        source: toArray(this.cutShownSource, this.cutShownCount).map((s) => CUT_SOURCES[s]),
+      },
+      triggers: {
+        mainThreadMs: toArray(this.triggerCost, this.triggerCount),
+        drawMs: toArray(this.triggerDraw, this.triggerCount),
+        postMs: toArray(this.triggerPost, this.triggerCount),
+        warmup: toArray(this.triggerWarmup, this.triggerCount),
       },
       skippedDetections: {
         mediaTimeSec: toArray(this.skippedMediaTime, s),

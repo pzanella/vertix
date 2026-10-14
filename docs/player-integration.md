@@ -95,11 +95,30 @@ Shaka's own segment fetches for a stream that plays at all already prove
 that (they use the Fetch API in normal `cors` mode). For a plain
 progressive URL loaded via native `src=` playback, setting this
 unconditionally risks breaking loading entirely if that particular
-server doesn't grant CORS. This is entirely a concern for whichever media
-framework is loading the content — Vertix itself has no CORS
-configuration of its own and doesn't read audio at all; this only matters
-if your own app does, the way `useWasmReframe.ts`'s `AudioActivityMonitor`
-does for its voice-activity signal.
+server doesn't grant CORS. Vertix has no CORS configuration of its own, but
+it does read the audio: `VertixEngine` routes the element's audio through
+its own Web Audio graph (`src/core/audioActivity.ts`), for the
+voice-activity signal and to delay the audio as much as the lookahead
+delays the picture. When it detects a cross-origin source without CORS
+(a tainted canvas, or exact silence for 3 s from a cross-origin element
+that plays audio and has never produced sound) it
+turns lookahead off, so the delay never causes silence.
+
+## Lookahead and the player's time display
+
+Lookahead is off by default; `engine.setLookaheadEnabled(true)` turns it
+on. With lookahead on, in 9:16, the canvas shows each frame a fixed
+delay after the video element decodes it (a whole number of frames, about
+0.2 s on desktop and 0.3 s on a phone; `engine.getLookaheadStatus().lengthMs`),
+and the audio is delayed by the same amount. In 16:9 it is bypassed: no
+delay. Switching 16:9 → 9:16 holds the picture and silences the audio for
+that delay once. The engine still never controls playback, so
+a player UI that reads `video.currentTime` (Shaka UI, Video.js controls,
+native controls) runs ahead of the picture by that delay while playing,
+and matches it again once paused (the buffer drains to the paused frame).
+A host that draws its own controls can show
+`engine.getDisplayedMediaTime()` instead, as this app's scrub bar does.
+With it off, frames are drawn as they are decoded.
 
 ## hls.js / Video.js / a plain `<video src>`
 
