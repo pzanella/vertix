@@ -1,7 +1,10 @@
-// Browser check for lookahead: plays the cut test clips (and 3-speakers.mp4,
-// for the active-speaker comparison) through the real engine in headless
-// Chrome, once with lookahead off and once on, and reports for every known
-// cut how many displayed frames the crop changed after the source cut.
+// Browser check for lookahead: plays the cut test clips, 3-speakers.mp4
+// (active-speaker comparison) and 2-speakers-b.mp4 (50 fps) through the
+// real engine in headless Chrome, once with lookahead off and once on, and
+// reports for every known cut how many displayed frames the crop changed
+// after the source cut, plus the lookahead length of every run. Without
+// --only it also checks the length after build switches, the 16:9 bypass
+// and the 16:9 -> 9:16 switch.
 //
 // Starts its own Vite dev server and drives the engine directly (imported
 // from /src/core), not the app UI. Results go to stdout and
@@ -31,15 +34,23 @@ const CLIP_TIMEOUT_MS = 10 * 60 * 1000;
 
 const ONLY = args.find((arg) => arg.startsWith("--only="))?.slice("--only=".length);
 const ALL_CLIPS = [
-  { file: "cross-count.mp4", url: "/bench/cross-count.mp4", knownCutsSec: [4, 8, 12] },
-  { file: "cross-same-count.mp4", url: "/bench/cross-same-count.mp4", knownCutsSec: [4, 8, 12] },
-  { file: "cross-offset.mp4", url: "/bench/cross-offset.mp4", knownCutsSec: [4.08, 8.12, 12.16] },
-  { file: "3-speakers.mp4", url: "/samples/3-speakers.mp4", knownCutsSec: [] },
+  { file: "cross-count.mp4", url: "/bench/cross-count.mp4", fps: 25, knownCutsSec: [4, 8, 12] },
+  { file: "cross-same-count.mp4", url: "/bench/cross-same-count.mp4", fps: 25, knownCutsSec: [4, 8, 12] },
+  { file: "cross-offset.mp4", url: "/bench/cross-offset.mp4", fps: 25, knownCutsSec: [4.08, 8.12, 12.16] },
+  { file: "3-speakers.mp4", url: "/samples/3-speakers.mp4", fps: 25, knownCutsSec: [] },
+  { file: "2-speakers-b.mp4", url: "/samples/2-speakers-b.mp4", fps: 50, knownCutsSec: [] },
 ];
 const CLIPS = ONLY ? ALL_CLIPS.filter((clip) => clip.file === ONLY) : ALL_CLIPS;
 
-// Runs in the page: plays every clip with lookahead off, then on.
-async function runInPage(clips) {
+/**
+ * Runs in the page:
+ * - every clip with lookahead off, then on (the build the page picks);
+ * - the suite's build switches on cross-offset.mp4 (a fresh worker each
+ *   time), to check the lookahead length is not inflated by warm-up;
+ * - one 16:9 run (lookahead must be bypassed);
+ * - a 16:9 -> 9:16 switch per build, timed.
+ */
+async function runInPage(clips, extras) {
   const core = await import("/src/core/index.ts");
   const video = document.createElement("video");
   video.muted = false;
@@ -58,47 +69,106 @@ async function runInPage(clips) {
     video.src = url;
     void video.play();
   };
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   console.log("[check] wasm ready, warming up");
   await core.runUnrecordedWarmup(engine, video, { mode: "9:16", loadSource: load(clips[0].url), seconds: 3 });
 
   const runs = [];
+  const run = async (clip, lookahead, label, mode = "9:16") => {
+    console.log(`[check] ${label}: ${clip.file}, ${mode}, lookahead ${lookahead ? "on" : "off"}`);
+    const result = await core.runBenchmarkClip(engine, video, {
+      clipName: clip.file,
+      mode,
+      nominalFps: clip.fps,
+      warmupSec: 1,
+      knownCutsSec: clip.knownCutsSec,
+      lookahead,
+      loadSource: load(clip.url),
+      wasmBuild: { ...core.getActiveWasmBuild(), runOrder: null },
+    });
+    const { summary, raw } = result;
+    runs.push({
+      label,
+      clip: clip.file,
+      mode,
+      build: core.getActiveWasmBuild().variant,
+      lookahead: result.lookahead,
+      knownCuts: summary.knownCuts,
+      cutsShown: summary.cutsShown,
+      sceneCuts: summary.sceneCuts,
+      displayErrorMs: summary.display.errorMs,
+      displayed: summary.display.count,
+      effectiveFps: summary.effectiveFps,
+      frames: summary.frames,
+      trigger: summary.trigger,
+      detectionGaps: summary.detectionGaps,
+      detectionTotalMs: summary.detection.totalMs,
+      detections: {
+        frameMediaTimeSec: raw.detections.frameMediaTimeSec,
+        resolvedFaces: raw.detections.resolvedFaces,
+        resolvedCx: raw.detections.resolvedCx,
+        triggered: raw.detections.triggered,
+      },
+    });
+  };
+
   for (const clip of clips) {
-    for (const lookahead of [false, true]) {
-      console.log(`[check] ${clip.file}, lookahead ${lookahead ? "on" : "off"}`);
-      const result = await core.runBenchmarkClip(engine, video, {
-        clipName: clip.file,
+    await run(clip, false, "clips");
+    await run(clip, true, "clips");
+  }
+
+  const modeSwitches = [];
+  if (extras) {
+    const offset = clips.find((c) => c.file === "cross-offset.mp4") ?? clips[0];
+    for (const variant of ["scalar", "simd"]) {
+      await core.switchWasmBuild({ variant, reason: "benchmark-suite" });
+      await core.runUnrecordedWarmup(engine, video, {
         mode: "9:16",
-        nominalFps: 25,
-        warmupSec: 1,
-        knownCutsSec: clip.knownCutsSec,
-        lookahead,
-        loadSource: load(clip.url),
-        wasmBuild: { ...core.getActiveWasmBuild(), runOrder: null },
+        lookahead: true,
+        loadSource: load(offset.url),
+        seconds: 3,
       });
-      const { summary, raw } = result;
-      runs.push({
-        clip: clip.file,
-        lookahead: result.lookahead,
-        knownCuts: summary.knownCuts,
-        cutsShown: summary.cutsShown,
-        sceneCuts: summary.sceneCuts,
-        displayErrorMs: summary.display.errorMs,
-        displayed: summary.display.count,
-        frames: summary.frames,
-        trigger: summary.trigger,
-        detectionGaps: summary.detectionGaps,
-        detectionTotalMs: summary.detection.totalMs,
-        detections: {
-          frameMediaTimeSec: raw.detections.frameMediaTimeSec,
-          resolvedFaces: raw.detections.resolvedFaces,
-          resolvedCx: raw.detections.resolvedCx,
-          triggered: raw.detections.triggered,
-        },
+      await run(offset, true, `after switch to ${variant}`);
+    }
+    await run(clips[0], true, "16:9", "16:9");
+
+    for (const variant of ["simd", "scalar"]) {
+      await core.switchWasmBuild({ variant, reason: "benchmark-suite" });
+      engine.setMode("9:16");
+      engine.setLookaheadEnabled(true);
+      video.src = "/samples/1-speaker.mp4";
+      await video.play();
+      await sleep(8000);
+      engine.setMode("16:9");
+      await sleep(1500);
+      const { lengthMs, delayFrames, lengthSource } = engine.getLookaheadStatus();
+      const switchedAt = performance.now();
+      engine.setMode("9:16");
+      const anchorSec = engine.getDisplayedMediaTime();
+      const status = engine.getLookaheadStatus();
+      let croppedMs = null;
+      let resumedMs = null;
+      while (performance.now() - switchedAt < 2000 && (croppedMs === null || resumedMs === null)) {
+        await new Promise((r) => requestAnimationFrame(r));
+        const elapsed = performance.now() - switchedAt;
+        if (croppedMs === null && engine.getState().speakerCount > 0) croppedMs = elapsed;
+        if (resumedMs === null && engine.getDisplayedMediaTime() > anchorSec) resumedMs = elapsed;
+      }
+      video.pause();
+      modeSwitches.push({
+        build: variant,
+        lengthMs: status.lengthMs,
+        delayFrames: status.delayFrames,
+        lengthSource: status.lengthSource,
+        lengthIn16x9: { lengthMs, delayFrames, lengthSource },
+        firstFrameMs: 0,
+        croppedMs,
+        resumedMs,
       });
     }
   }
   engine.destroy();
-  return runs;
+  return { runs, modeSwitches };
 }
 
 /** Share of 0.2 s steps where both runs show the same speaker count and (for one face) the same person. */
@@ -209,21 +279,23 @@ try {
   await loaded;
 
   const evaluation = cdp.send("Runtime.evaluate", {
-    expression: `(${runInPage.toString()})(${JSON.stringify(CLIPS)})`,
+    expression: `(${runInPage.toString()})(${JSON.stringify(CLIPS)}, ${JSON.stringify(!ONLY)})`,
     awaitPromise: true,
     returnByValue: true,
   });
   const timeout = new Promise((_, reject) => setTimeout(() => reject(new Error("check timed out")), CLIP_TIMEOUT_MS));
   const result = await Promise.race([evaluation, timeout]);
   if (result.exceptionDetails) throw new Error(result.exceptionDetails.exception?.description ?? "page error");
-  const runs = result.result.value;
+  const { runs, modeSwitches } = result.result.value;
+  const lookaheadLabel = (l) =>
+    !l.enabled ? "off" : (l.unavailableReason ?? (l.bypassed ? "bypassed" : `${l.lengthMs} ms (${l.delayFrames} f)`));
 
   const rows = [];
-  for (const run of runs) {
+  for (const run of runs.filter((r) => r.label === "clips")) {
     for (const cut of run.knownCuts) {
       rows.push({
         clip: run.clip,
-        lookahead: run.lookahead.enabled ? `${run.lookahead.lengthMs} ms` : "off",
+        lookahead: lookaheadLabel(run.lookahead),
         "cut s": cut.timeSec,
         "frames late": cut.framesLate ?? "missed",
         "crop changed at s": cut.shownMediaTimeSec,
@@ -234,12 +306,18 @@ try {
   console.table(rows);
   console.table(
     runs.map((run) => ({
+      run: run.label,
       clip: run.clip,
-      lookahead: !run.lookahead.enabled ? "off" : (run.lookahead.unavailableReason ?? `${run.lookahead.lengthMs} ms`),
+      mode: run.mode,
+      build: run.build,
+      lookahead: lookaheadLabel(run.lookahead),
+      "L source": run.lookahead.lengthSource,
+      "audio delay ms": run.lookahead.audioDelayMs,
       slot: run.lookahead.slotWidth ? `${run.lookahead.slotWidth}x${run.lookahead.slotHeight}` : "-",
-      "buffer MB": Math.round((run.lookahead.bufferBytes / 1048576) * 10) / 10,
-      "buffer drops": run.lookahead.droppedFrames,
-      "dropped (est.)": run.frames.droppedFramesEstimate,
+      "slots / MB": `${run.lookahead.allocatedSlots} / ${Math.round((run.lookahead.bufferBytes / 1048576) * 10) / 10}`,
+      "overflow / skipped": `${run.lookahead.overflowDrops} / ${run.lookahead.skippedOnDisplay}`,
+      fps: run.effectiveFps?.toFixed(1) ?? "-",
+      "dropped (playback quality)": `${run.frames.playbackQualityDroppedFrames}/${run.frames.playbackQualityTotalFrames}`,
       "display err p50/p95 ms":
         run.displayErrorMs.count > 0
           ? `${run.displayErrorMs.p50.toFixed(1)}/${run.displayErrorMs.p95.toFixed(1)}`
@@ -250,7 +328,20 @@ try {
       "detect p95 ms": run.detectionTotalMs.p95?.toFixed(1) ?? "-",
     }))
   );
-  const speakers = runs.filter((run) => run.clip === "3-speakers.mp4");
+  if (modeSwitches.length > 0) {
+    console.log("16:9 -> 9:16 switch (ms after the switch):");
+    console.table(
+      modeSwitches.map((m) => ({
+        build: m.build,
+        L: `${m.lengthMs} ms (${m.delayFrames} f, ${m.lengthSource})`,
+        "9:16 frame shown": m.firstFrameMs,
+        "shown cropped": m.croppedMs === null ? "no" : Math.round(m.croppedMs),
+        "picture moves again": m.resumedMs === null ? "no" : Math.round(m.resumedMs),
+        "audio silent": m.lengthMs + 30,
+      }))
+    );
+  }
+  const speakers = runs.filter((run) => run.clip === "3-speakers.mp4" && run.label === "clips");
   const agreement = speakers.length === 2 ? activeSpeakerAgreement(speakers[0], speakers[1]) : null;
   if (agreement) {
     console.log(
@@ -261,7 +352,11 @@ try {
   mkdirSync(join(root, ".eval"), { recursive: true });
   writeFileSync(
     join(root, ".eval/lookahead-check.json"),
-    JSON.stringify({ checkedAt: new Date().toISOString(), runs, activeSpeakerAgreement: agreement }, null, 2)
+    JSON.stringify(
+      { checkedAt: new Date().toISOString(), runs, modeSwitches, activeSpeakerAgreement: agreement },
+      null,
+      2
+    )
   );
 } catch (error) {
   console.error(error);
