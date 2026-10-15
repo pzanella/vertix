@@ -151,8 +151,8 @@ export function BenchmarkReadyView({
           {simdSupported
             ? " once with the SIMD and once with the scalar WASM build (alternating which goes first)"
             : " with the scalar WASM build (this browser has no WebAssembly SIMD)"}
-          {config.baseline ? ", then one 16:9 baseline without detection" : ""}, at normal speed. The panel closes so
-          you can watch the player; progress shows on the gauge.
+          {config.baseline ? ", then 16:9 baselines without detection (one at 25 fps, one at 50 fps)" : ""}, at normal
+          speed. The panel closes so you can watch the player; progress shows on the gauge.
         </p>
 
         <BenchmarkStageRail kinds={suiteStageKinds(config, simdSupported)} />

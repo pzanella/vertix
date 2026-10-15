@@ -40,7 +40,7 @@ normal playback is unaffected by the button being there.
 | ------------- | ------- | ---------- | ---------------------------------------------------------------------------------------- |
 | WASM warm-up  | 3 s     | 0–10 s     | Seconds played **without recording** after every WASM build switch. 0 disables it.        |
 | Clip warm-up  | 1 s     | 0–3 s      | Media-time seconds at the start of each clip that are recorded but excluded from stats. |
-| 16:9 baseline | on      | on / off   | Plays the first clip again in 16:9 (no detection) at the end of the suite.              |
+| 16:9 baseline | on      | on / off   | Plays the first clip and the 50 fps one again in 16:9 (no detection) at the end.         |
 
 The values used are stored in the report's `config`, so always quote them
 with the numbers.
@@ -268,8 +268,9 @@ Further limits:
 
 ### 16:9 baseline
 
-This is the same clip in 16:9 mode: no detection, and one `drawImage` of the
-full frame per callback. Use it to compare dropped frames, long tasks and
+This is the first clip, then the first one above 30 fps without cuts
+(`2-speakers-b.mp4`, 50 fps), in 16:9 mode: no detection, and one
+`drawImage` of the full frame per callback. Use it to compare dropped frames, long tasks and
 frame accounting between reframing and plain playback.
 
 Do **not** compare `frameWorkMs` between the two runs directly. The baseline
@@ -332,6 +333,10 @@ lookaheadComparison, precisionWarnings, results[] }`. Each result contains `summ
       (frame-copy size, estimated buffer memory, frames dropped by the
       buffer or superseded on display), read at the end of the run. Added
       later within v5:
+      - `enabledByDefault` (lookahead is on by default with the SIMD
+        build, off with scalar) and `setByHost` (the switch was set
+        explicitly; always true in the suite, which runs each clip off and
+        on and restores the user's setting afterwards).
       - `bypassed`: on, but not running because the run is 16:9 (no
         detection); the 16:9 baseline shows `true` with `audioDelayMs` 0.
       - `audioDelayMs`: the audio delay actually applied.

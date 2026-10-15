@@ -153,8 +153,12 @@ export interface SlotHeightChange {
 export type LookaheadLengthSource = "measured" | "stored" | "default";
 
 export interface LookaheadStatus {
-  /** The switch: lookahead wanted. */
+  /** The switch: lookahead wanted (the host's choice, else the default for the active WASM build). */
   enabled: boolean;
+  /** What the switch is by default with the active WASM build: on with SIMD, off with scalar (LOOKAHEAD_ON_BY_DEFAULT). */
+  enabledByDefault: boolean;
+  /** Whether the host set the switch (setLookaheadEnabled(true/false)); false while it follows the build default. */
+  setByHost: boolean;
   /** Set when lookahead is wanted but forced off. */
   unavailableReason: LookaheadUnavailableReason | null;
   /** Wanted and available, but not running because the mode is 16:9 (no detection, nothing to look ahead for). */
@@ -232,6 +236,8 @@ export const INITIAL_METRICS: VertixMetrics = {
   displayedMediaTimeSec: null,
   lookahead: {
     enabled: false,
+    enabledByDefault: false,
+    setByHost: false,
     unavailableReason: null,
     bypassed: false,
     audioDelayMs: 0,
@@ -328,6 +334,15 @@ interface PendingDetection {
 const pendingDetections = new Map<number, PendingDetection>();
 
 let activeWasmBuild: WasmBuildSelection | null = null;
+// Engines to tell when the active build changes (their lookahead default follows it).
+const wasmBuildListeners = new Set<() => void>();
+
+/**
+ * Lookahead by default, per WASM build: on with SIMD; off with scalar,
+ * whose slower detections (~175-220 ms on a phone) make the delay long
+ * (~0.5 s).
+ */
+export const LOOKAHEAD_ON_BY_DEFAULT: Record<WasmBuildVariant, boolean> = { simd: true, scalar: false };
 
 /** The WASM build the worker and the main-thread fallback load: the default from the SIMD probe unless the benchmark suite switched it. */
 export function getActiveWasmBuild(): WasmBuildSelection {
@@ -346,6 +361,7 @@ export function switchWasmBuild(selection: WasmBuildSelection): Promise<boolean>
   disposeSharedWorker?.();
   for (const pending of pendingDetections.values()) pending.onCancel();
   pendingDetections.clear();
+  for (const listener of wasmBuildListeners) listener();
   return getSharedDetectionWorker();
 }
 
@@ -688,7 +704,13 @@ export class VertixEngine {
   // Lookahead: the output is shown lookaheadLengthMs behind the decoded
   // frame, so each frame's detection result is in before it is displayed.
   // Off by default until it has been checked on phones; the dashboard switch turns it on.
-  private lookaheadEnabled = false;
+  // The host's choice; null follows LOOKAHEAD_ON_BY_DEFAULT for the active build.
+  private lookaheadPreference: boolean | null = null;
+  // What refreshLookahead last applied, to notice a build change that flips the default.
+  private appliedLookaheadEnabled = false;
+  private boundOnWasmBuildChange = () => {
+    if (this.lookaheadEnabled !== this.appliedLookaheadEnabled) this.refreshLookahead("flush");
+  };
   private lookaheadUnavailable: LookaheadUnavailableReason | null = null;
   // Current (target) length, whole frames, and the frame interval it was computed with.
   private lookaheadLengthMs = 0;
@@ -769,6 +791,7 @@ export class VertixEngine {
   private boundOnLoadedMetadata = () => this.resetForNewSource();
 
   constructor() {
+    wasmBuildListeners.add(this.boundOnWasmBuildChange);
     const fc = new OffscreenCanvas(FACE_W, FACE_H);
     this.faceCanvas = fc;
     this.faceCtx = fc.getContext("2d", { willReadFrequently: true })!;
@@ -847,6 +870,7 @@ export class VertixEngine {
    * be using it.
    */
   destroy(): void {
+    wasmBuildListeners.delete(this.boundOnWasmBuildChange);
     this.detach();
     this.audioMonitor.detach();
     this.taintProbeCtx = null;
@@ -899,14 +923,29 @@ export class VertixEngine {
   }
 
   /**
-   * Turns lookahead on or off at runtime. Either way the change is one
-   * short gap: the buffered frames are dropped, and the audio is silent
-   * until audio delayed by the new amount comes out.
+   * Turns lookahead on or off at runtime; null goes back to the default
+   * for the active WASM build (LOOKAHEAD_ON_BY_DEFAULT), which then follows
+   * build switches. A change is one short gap: the buffered frames are
+   * dropped, and the audio is silent until audio delayed by the new amount
+   * comes out.
    */
-  setLookaheadEnabled(enabled: boolean): void {
-    if (enabled === this.lookaheadEnabled) return;
-    this.lookaheadEnabled = enabled;
-    this.refreshLookahead("flush");
+  setLookaheadEnabled(enabled: boolean | null): void {
+    this.lookaheadPreference = enabled;
+    if (this.lookaheadEnabled !== this.appliedLookaheadEnabled) {
+      this.refreshLookahead("flush");
+    } else {
+      this.metrics = { ...this.metrics, lookahead: this.lookaheadStatus() };
+      this.emitMetrics();
+    }
+  }
+
+  /** The host's choice from setLookaheadEnabled, or null while lookahead follows the build default. */
+  getLookaheadPreference(): boolean | null {
+    return this.lookaheadPreference;
+  }
+
+  private get lookaheadEnabled(): boolean {
+    return this.lookaheadPreference ?? LOOKAHEAD_ON_BY_DEFAULT[getActiveWasmBuild().variant];
   }
 
   getLookaheadStatus(): LookaheadStatus {
@@ -1158,7 +1197,8 @@ export class VertixEngine {
         : this.audioMonitor.silentPathSuspected
           ? "silent-audio-path"
           : null;
-    const active = this.lookaheadEnabled && this.lookaheadUnavailable === null && this.mode === "9:16";
+    this.appliedLookaheadEnabled = this.lookaheadEnabled;
+    const active = this.appliedLookaheadEnabled && this.lookaheadUnavailable === null && this.mode === "9:16";
     if (!active) {
       if (this.lookaheadLengthMs > 0) this.applyLookaheadLength({ frames: 0, lengthMs: 0 });
     } else if (this.lookaheadLengthMs === 0 || how === "flush") {
@@ -1302,6 +1342,8 @@ export class VertixEngine {
     const allocatedSlots = buffer?.allocatedSlots ?? 0;
     return {
       enabled: this.lookaheadEnabled,
+      enabledByDefault: LOOKAHEAD_ON_BY_DEFAULT[getActiveWasmBuild().variant],
+      setByHost: this.lookaheadPreference !== null,
       unavailableReason: this.lookaheadEnabled ? this.lookaheadUnavailable : null,
       bypassed: this.lookaheadEnabled && this.lookaheadUnavailable === null && this.mode === "16:9",
       audioDelayMs: Math.round(this.audioMonitor.outputDelaySec * 1000),

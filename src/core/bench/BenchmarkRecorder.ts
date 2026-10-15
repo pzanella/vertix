@@ -308,6 +308,9 @@ export interface BenchmarkClipRaw {
 /** Lookahead state of one run (schema v5). */
 export interface BenchmarkLookahead {
   enabled: boolean;
+  /** Added within v5: the default for the run's build (on with SIMD, off with scalar), and whether the switch was set explicitly (the suite always sets it). */
+  enabledByDefault: boolean;
+  setByHost: boolean;
   unavailableReason: string | null;
   /** Added within v5: on but not running because the mode is 16:9. */
   bypassed: boolean;

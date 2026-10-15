@@ -9,7 +9,7 @@ function describeStep(step: SuiteStep): string {
 
 describe("buildSuitePlan", () => {
   it("runs each clip with lookahead off on the loaded build, then on per build, without extra warm-ups", () => {
-    expect(buildSuitePlan(2, true, true).map(describeStep)).toEqual([
+    expect(buildSuitePlan(2, [0], true).map(describeStep)).toEqual([
       "warmup:simd",
       "0:simd:off",
       "0:simd:on",
@@ -24,6 +24,6 @@ describe("buildSuitePlan", () => {
   });
 
   it("runs off then on with the scalar build without SIMD", () => {
-    expect(buildSuitePlan(1, false, false).map(describeStep)).toEqual(["warmup:scalar", "0:scalar:off", "0:scalar:on"]);
+    expect(buildSuitePlan(1, [], false).map(describeStep)).toEqual(["warmup:scalar", "0:scalar:off", "0:scalar:on"]);
   });
 });

@@ -33,9 +33,14 @@ export function wasmBuildSequenceForClip(clipIndex: number): WasmBuildVariant[] 
  * loaded (so builds alternate across clips and no extra warm-up is
  * needed), then with lookahead on once per build when SIMD is supported
  * (A/B), else once with the scalar build. A warm-up precedes every build
- * switch, which recreates the worker cold.
+ * switch, which recreates the worker cold. Then a 16:9 baseline (no
+ * detection) of each clip in `baselineClipIndices`.
  */
-export function buildSuitePlan(clipCount: number, baseline: boolean, simdSupported: boolean): SuiteStep[] {
+export function buildSuitePlan(
+  clipCount: number,
+  baselineClipIndices: readonly number[],
+  simdSupported: boolean
+): SuiteStep[] {
   const steps: SuiteStep[] = [];
   let loaded: WasmBuildSelection | null = null;
 
@@ -67,6 +72,8 @@ export function buildSuitePlan(clipCount: number, baseline: boolean, simdSupport
     );
   }
 
-  if (baseline && clipCount > 0) steps.push({ kind: "baseline", clipIndex: 0 });
+  for (const clipIndex of baselineClipIndices) {
+    if (clipIndex < clipCount) steps.push({ kind: "baseline", clipIndex });
+  }
   return steps;
 }

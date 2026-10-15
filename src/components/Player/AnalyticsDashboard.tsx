@@ -167,6 +167,12 @@ export const AnalyticsDashboard = memo(function AnalyticsDashboard({
             </button>
           </div>
           <MetricRow
+            label="Default"
+            value={`${lookahead.enabledByDefault ? "On" : "Off"} with ${lookahead.enabledByDefault ? "SIMD" : "scalar"}${
+              lookahead.setByHost ? " · switched" : ""
+            }`}
+          />
+          <MetricRow
             label="Delay"
             value={lookaheadValue(lookahead)}
             tone={lookahead.enabled && lookahead.unavailableReason ? "warn" : "default"}

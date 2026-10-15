@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { VertixEngine, getActiveWasmBuild } from "./VertixEngine";
+import { VertixEngine, getActiveWasmBuild, switchWasmBuild } from "./VertixEngine";
 import type { SceneCutScores } from "./layoutEngine";
 import type { BenchmarkProbe } from "./bench/BenchmarkRecorder";
 import type { ScoredFrame } from "./lookahead/cutTrigger";
@@ -290,7 +290,7 @@ function setUp({ lookahead = true } = {}) {
   vi.spyOn(performance, "now").mockImplementation(() => video.clockMs);
   const canvas = fakeCanvas();
   engine.attach(video as unknown as HTMLVideoElement, canvas);
-  if (lookahead) engine.setLookaheadEnabled(true);
+  engine.setLookaheadEnabled(lookahead);
   const internals = engine as unknown as EngineInternals;
   const result = (sceneCut: SceneCutScores) => (mediaTimeSec: number) =>
     internals.processDetectionResult(LEFT_FACE, sceneCut, null, mediaTimeSec, 1280, 720, 405, 720, "worker", 1);
@@ -325,11 +325,38 @@ describe("VertixEngine lookahead", () => {
     vi.restoreAllMocks();
   });
 
-  it("is off by default", () => {
-    const { engine } = setUp({ lookahead: false });
-    expect(engine.getLookaheadStatus()).toMatchObject({ enabled: false, lengthMs: 0 });
-    expect(engine.getMetrics().lookahead.enabled).toBe(false);
-    engine.destroy();
+  describe("default", () => {
+    const useBuild = (variant: "simd" | "scalar") => void switchWasmBuild({ variant, reason: "benchmark-suite" });
+    afterEach(() => useBuild("simd"));
+
+    it("is on with the SIMD build and off with scalar, following build switches", () => {
+      useBuild("simd");
+      const engine = new VertixEngine();
+      engine.attach(new FakeVideo() as unknown as HTMLVideoElement, fakeCanvas());
+      expect(engine.getLookaheadStatus()).toMatchObject({ enabled: true, enabledByDefault: true, setByHost: false });
+      expect(engine.getLookaheadStatus().lengthMs).toBeGreaterThan(0);
+      useBuild("scalar");
+      expect(engine.getLookaheadStatus()).toMatchObject({ enabled: false, enabledByDefault: false, lengthMs: 0 });
+      useBuild("simd");
+      expect(engine.getLookaheadStatus().enabled).toBe(true);
+      engine.destroy();
+    });
+
+    it("a host setting wins over the build default, and null goes back to it", () => {
+      useBuild("scalar");
+      const engine = new VertixEngine();
+      engine.attach(new FakeVideo() as unknown as HTMLVideoElement, fakeCanvas());
+      engine.setLookaheadEnabled(true);
+      expect(engine.getLookaheadStatus()).toMatchObject({ enabled: true, setByHost: true });
+      expect(engine.getLookaheadPreference()).toBe(true);
+      useBuild("simd");
+      engine.setLookaheadEnabled(false);
+      expect(engine.getLookaheadStatus()).toMatchObject({ enabled: false, enabledByDefault: true, lengthMs: 0 });
+      engine.setLookaheadEnabled(null);
+      expect(engine.getLookaheadStatus()).toMatchObject({ enabled: true, setByHost: false });
+      expect(engine.getLookaheadPreference()).toBeNull();
+      engine.destroy();
+    });
   });
 
   it("when switched on, delays video and audio by a whole number of frames", () => {
