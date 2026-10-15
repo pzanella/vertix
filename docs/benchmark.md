@@ -382,9 +382,11 @@ lookaheadComparison, precisionWarnings, results[] }`. Each result contains `summ
         `clockErrorAbsMs` is the same as absolute values.
       - `frameOffset` (lookahead only): frames between the due frame and
         the one shown, positive when the one shown is older; 0 is exact.
-        When the due frame was never captured (its callback was skipped)
-        and the screen would fall behind, the nearest captured frame is
-        shown, the newer one on a tie (-1).
+        When the due frame was presented by the video element but never
+        captured (its callback was skipped, per `presentedFrames`) and the
+        screen would fall behind, the nearest captured frame is shown, the
+        newer one on a tie (-1). A frame the element dropped itself (or
+        without `presentedFrames`) is held over, as the element does (+1).
       - Raw: `frames.expectedDisplayMs`, and per display `onScreenAtMs`,
         `delayMs`, `frameOffset` and `clockErrorMs`.
     - `summary.trigger`: `{ count, mainThreadMs, triggeredDetections }`,

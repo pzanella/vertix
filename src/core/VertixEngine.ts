@@ -285,6 +285,8 @@ const FACE_DETECT_INTERVAL = 5;
 // Per-frame cut-trigger scores kept for cut localisation: a few seconds,
 // well over the gap between two detections.
 const SCORED_FRAME_HISTORY = 120;
+// Spans of uncaptured but presented frames kept: well over a lookahead length of skips.
+const UNCAPTURED_SPAN_HISTORY = 64;
 // A frame shown while paused waits for its own detection this long at most.
 const HELD_FRAME_TIMEOUT_MS = 500;
 // With lookahead, frames are shown from the frame callback while playing.
@@ -711,6 +713,12 @@ export class VertixEngine {
   private lastCapturedMediaTime: number | null = null;
   private frameInterval = new FrameIntervalTracker();
   private frameRateHintFps: number | null = null;
+  // Media-time spans whose frames the video element presented without a
+  // frame callback (never captured). Only for those does the display
+  // catch up to the next frame; a frame the element dropped itself is
+  // skipped the way the element skips it, holding the previous one.
+  private uncapturedPresentedSpans: { afterSec: number; beforeSec: number }[] = [];
+  private lastCallback: { mediaTimeSec: number; presentedFrames: number } | null = null;
   private heldFrameTimeout: ReturnType<typeof setTimeout> | undefined = undefined;
   private displayFrameId: number | null = null;
   private lastDisplayCallbackAt: number | null = null;
@@ -1005,6 +1013,7 @@ export class VertixEngine {
     this.captureIndex = 0;
     this.nextDetectionFrameIndex = FACE_DETECT_INTERVAL;
     this.frameInterval.reset();
+    this.forgetCallbackHistory();
     this.slotHeightGovernor.reset();
     this.slotHeightChanges = [];
     this.timeAtSlotHeightMs = {};
@@ -1110,6 +1119,7 @@ export class VertixEngine {
     this.metrics = { ...this.metrics, displayedMediaTimeSec: null };
     this.nextDetectionFrameIndex = this.captureIndex + FACE_DETECT_INTERVAL;
     this.frameInterval.restart();
+    this.forgetCallbackHistory();
     this.refreshLookahead("flush");
   }
 
@@ -1777,6 +1787,7 @@ export class VertixEngine {
     }
     this.lastFrameTime = now;
     this.frameInterval.push(metadata.mediaTime);
+    this.noteUncapturedFrames(metadata);
     if (now - this.lastMetricsPush > 300) {
       this.lastMetricsPush = now;
       this.updateSlotHeight(video, now);
@@ -1904,7 +1915,8 @@ export class VertixEngine {
     const delayMs = this.delaySchedule.valueAt(presentedAtMs);
     const dueSec = metadata.mediaTime - (delayMs / 1000) * rate;
     const shownSec = this.displayedMediaTimeSec;
-    const catchUp = shownSec !== null && shownSec < dueSec - intervalSec / 2;
+    const catchUp =
+      shownSec !== null && shownSec < dueSec - intervalSec / 2 && this.wasPresentedWithoutCallback(dueSec, intervalSec);
     const due = this.frameBuffer!.takeNearest(dueSec, intervalSec, catchUp);
     if (due) this.showBufferedFrame(due, now, presentedAtMs, delayMs, (dueSec - due.mediaTimeSec) / intervalSec);
     this.applyPendingMaxSlots(now);
@@ -1919,6 +1931,36 @@ export class VertixEngine {
     const last = this.lastScoredMediaSec;
     if (rate / intervalSec <= HIGH_FRAME_RATE_FPS + 0.5 || last === null || mediaTimeSec < last) return true;
     return mediaTimeSec - last >= intervalSec * 1.5;
+  }
+
+  /**
+   * Notes the frames between this callback and the previous one, if any:
+   * presented by the video element (its presentedFrames count rose by as
+   * many) but never captured. If presentedFrames is missing or rose by
+   * less, the element dropped them itself.
+   */
+  private noteUncapturedFrames(metadata: VideoFrameCallbackMetadata): void {
+    const last = this.lastCallback;
+    const presentedFrames = metadata.presentedFrames;
+    this.lastCallback = Number.isFinite(presentedFrames) ? { mediaTimeSec: metadata.mediaTime, presentedFrames } : null;
+    const intervalSec = this.knownIntervalSec();
+    if (!last || !this.lastCallback || !intervalSec) return;
+    const mediaSteps = Math.round((metadata.mediaTime - last.mediaTimeSec) / intervalSec);
+    if (mediaSteps < 2 || presentedFrames - last.presentedFrames < mediaSteps) return;
+    if (this.uncapturedPresentedSpans.length === UNCAPTURED_SPAN_HISTORY) this.uncapturedPresentedSpans.shift();
+    this.uncapturedPresentedSpans.push({ afterSec: last.mediaTimeSec, beforeSec: metadata.mediaTime });
+  }
+
+  private wasPresentedWithoutCallback(mediaTimeSec: number, intervalSec: number): boolean {
+    const slackSec = intervalSec / 4;
+    return this.uncapturedPresentedSpans.some(
+      (span) => span.afterSec + slackSec < mediaTimeSec && mediaTimeSec < span.beforeSec - slackSec
+    );
+  }
+
+  private forgetCallbackHistory(): void {
+    this.uncapturedPresentedSpans = [];
+    this.lastCallback = null;
   }
 
   /** A frame-rate change (another rendition) or the first measured interval moves the length to whole frames of the new rate. */

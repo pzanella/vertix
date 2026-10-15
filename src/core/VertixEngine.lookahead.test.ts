@@ -187,6 +187,15 @@ class FakeVideo {
     this.presented += 1;
   }
 
+  /** The element drops a frame itself: media time moves on, presentedFrames does not, no callback. */
+  dropFrame(): void {
+    this.mediaTime = Math.round((this.mediaTime + 1 / this.fps) * 1e6) / 1e6;
+    this.clockMs += 1000 / this.fps / this.playbackRate;
+  }
+
+  /** Leaves presentedFrames out of the callback metadata. */
+  omitPresentedFrames = false;
+
   presentFrame(): void {
     this.skipFrame();
     const callbacks = [...this.pending.values()];
@@ -195,7 +204,7 @@ class FakeVideo {
       width: 1280,
       height: 720,
       mediaTime: this.mediaTime,
-      presentedFrames: this.presented,
+      presentedFrames: this.omitPresentedFrames ? undefined : this.presented,
       expectedDisplayTime: this.clockMs,
     } as VideoFrameCallbackMetadata;
     for (const callback of callbacks) callback(this.clockMs, metadata);
@@ -371,6 +380,36 @@ describe("VertixEngine lookahead", () => {
     expect(us(engine.getDisplayedMediaTime())).toBe(us(missingSec + 1 / 25));
     play(1);
     expect(us(engine.getDisplayedMediaTime())).toBe(us(video.mediaTime - delayFrames / 25));
+    engine.destroy();
+  });
+
+  it("when the element dropped the due frame itself, holds the previous frame, as the element does", () => {
+    const { engine, video, play } = setUp();
+    const { delayFrames } = engine.getLookaheadStatus();
+    play(delayFrames + 5);
+    const beforeMissingSec = video.mediaTime;
+    video.dropFrame();
+    play(delayFrames - 2);
+    video.skipFrame();
+    play(1);
+    // The missing frame is due: no frame from after it yet.
+    expect(us(engine.getDisplayedMediaTime())).toBe(us(beforeMissingSec));
+    play(1);
+    expect(us(engine.getDisplayedMediaTime())).toBe(us(video.mediaTime - delayFrames / 25));
+    engine.destroy();
+  });
+
+  it("without presentedFrames in the frame metadata, holds the previous frame", () => {
+    const { engine, video, play } = setUp();
+    video.omitPresentedFrames = true;
+    const { delayFrames } = engine.getLookaheadStatus();
+    play(delayFrames + 5);
+    video.skipFrame();
+    const missingSec = video.mediaTime;
+    play(delayFrames - 2);
+    video.skipFrame();
+    play(1);
+    expect(us(engine.getDisplayedMediaTime())).toBe(us(missingSec - 1 / 25));
     engine.destroy();
   });
 
