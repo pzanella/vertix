@@ -139,6 +139,12 @@ not the layout math itself.
 
 ## Lookahead
 
+With lookahead off, frames are drawn in the frame callback as they are
+decoded. In 9:16 the frame is first copied once into an `OffscreenCanvas`
+(sized like a lookahead slot) and the crops, the B-roll background and the
+detection input are drawn from that copy, never from the `<video>` several
+times per frame; 16:9 draws the video once.
+
 With lookahead on (off by default) and in 9:16, every decoded frame is
 copied into a ring of `OffscreenCanvas` slots (`lookahead/frameRingBuffer.ts`).
 In the same frame callback, the buffered frame whose time has come is

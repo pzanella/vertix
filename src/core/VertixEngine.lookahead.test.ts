@@ -264,17 +264,19 @@ function fakeCanvas(): HTMLCanvasElement & { width: number } {
 
 /**
  * What the output canvas was drawn from since log index `from`: the single
- * frame source (the video, or a buffered copy), and whether everything else
- * drawn onto it was redrawn from that same source within the same span
- * (the blurred background). Also whether anything was blended in.
+ * frame source (the video, or a buffered copy), following canvases redrawn
+ * within the same span back to what they were drawn from (the live-frame
+ * copy, the blurred background). Also whether anything was blended in.
  */
 function outputSince(canvas: object, from: number) {
   const entries = drawLog.slice(from);
   const onOutput = entries.filter((e) => e.target === canvas && e.source);
   const redrawnFrom = new Map(entries.filter((e) => e.target !== canvas && e.source).map((e) => [e.target, e.source]));
-  const frameSources = new Set(
-    onOutput.map((e) => (redrawnFrom.has(e.source!) ? redrawnFrom.get(e.source!) : e.source))
-  );
+  const origin = (source: object): object => {
+    const from = redrawnFrom.get(source);
+    return from === undefined || from === source ? source : origin(from);
+  };
+  const frameSources = new Set(onOutput.map((e) => origin(e.source!)));
   return {
     frameSources,
     blended: onOutput.some((e) => (e.alpha ?? 1) < 1),
@@ -801,6 +803,37 @@ describe("VertixEngine lookahead", () => {
     expect([...storage.values()]).toEqual(["100"]);
     delete withStorage.localStorage;
     engine.destroy();
+  });
+
+  describe("without lookahead", () => {
+    it("in 9:16, draws the video once per frame, into one copy everything else is drawn from", () => {
+      const env = setUp({ lookahead: false });
+      // The first frame also has the 1x1 cross-origin probe.
+      env.play(1);
+      for (let i = 0; i < 30; i++) {
+        const from = drawLog.length;
+        env.play(1);
+        env.detect(env.video.mediaTime);
+        const videoDraws = drawLog.slice(from).filter((e) => e.source === env.video);
+        expect(videoDraws).toHaveLength(1);
+        expect(videoDraws[0].target).not.toBe(env.canvas);
+        expect([...outputSince(env.canvas, from).frameSources]).toEqual([env.video]);
+      }
+      env.engine.destroy();
+    });
+
+    it("in 16:9, draws the video once per frame straight onto the output", () => {
+      const env = setUp({ lookahead: false });
+      env.engine.setMode("16:9");
+      env.play(1);
+      for (let i = 0; i < 5; i++) {
+        const from = drawLog.length;
+        env.play(1);
+        const videoDraws = drawLog.slice(from).filter((e) => e.source === env.video);
+        expect(videoDraws).toEqual([expect.objectContaining({ target: env.canvas })]);
+      }
+      env.engine.destroy();
+    });
   });
 
   describe("scenes never mix", () => {

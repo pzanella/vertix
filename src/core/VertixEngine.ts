@@ -702,6 +702,9 @@ export class VertixEngine {
   private sourceTainted = false;
   private readonly deviceClass = detectDeviceClass();
   private frameBuffer: FrameRingBuffer<FrameSlot> | null = null;
+  // Without lookahead, in 9:16: the one copy of the current frame everything is drawn from.
+  private liveFrameCanvas: OffscreenCanvas | null = null;
+  private liveFrameCtx: OffscreenCanvasRenderingContext2D | null = null;
   private slotSize: SlotSize | null = null;
   private slotHeightGovernor = new SlotHeightGovernor();
   private slotHeightChanges: SlotHeightChange[] = [];
@@ -1849,7 +1852,13 @@ export class VertixEngine {
     this.scheduleNextFrame(video);
   }
 
-  /** No lookahead: detection on this frame if due, then draw it straight from the video. */
+  /**
+   * No lookahead. In 9:16 the frame is copied once into an offscreen canvas
+   * and everything (the crops, the B-roll background, the detection input)
+   * is drawn from that copy: drawing the video element itself several times
+   * per frame into the visible canvas made a phone drop a fifth of the
+   * frames at 50 fps. 16:9 draws the video once, straight.
+   */
   private renderLiveFrame(
     video: HTMLVideoElement,
     metadata: VideoFrameCallbackMetadata,
@@ -1857,19 +1866,23 @@ export class VertixEngine {
     frameDtSec: number
   ): void {
     const { w: srcW, h: srcH, cropW, cropH } = this.srcDims;
+    const renderStart = this.benchmarkProbe ? performance.now() : 0;
+    let source: HTMLVideoElement | OffscreenCanvas = video;
     if (this.mode === "9:16") {
+      source = this.copyLiveFrame(video);
       this.hasFrameSinceReset = true;
       this.frameCounter += 1;
       if (this.frameCounter % FACE_DETECT_INTERVAL === 0) {
         if (!this.detectionInFlight) {
-          this.dispatchDetection(video, metadata.mediaTime, srcW, srcH, cropW, cropH);
+          this.dispatchDetection(source, metadata.mediaTime, srcW, srcH, cropW, cropH);
         } else {
           this.benchmarkProbe?.recordSkippedDetection();
         }
       }
     }
-    const renderStart = this.benchmarkProbe ? performance.now() : 0;
-    this.renderFrame(video, srcW, srcH, null, metadata.mediaTime, now, frameDtSec);
+    const sourceW = source instanceof OffscreenCanvas ? source.width : srcW;
+    const sourceH = source instanceof OffscreenCanvas ? source.height : srcH;
+    this.renderFrame(source, sourceW, sourceH, null, metadata.mediaTime, now, frameDtSec);
     this.displayedMediaTimeSec = metadata.mediaTime;
     this.benchmarkProbe?.recordDisplay(
       now,
@@ -1879,6 +1892,20 @@ export class VertixEngine {
       metadata.expectedDisplayTime ?? now,
       0
     );
+  }
+
+  /** The current video frame, copied once into the live-frame canvas (sized like a lookahead slot: never above the source or what the output can show). */
+  private copyLiveFrame(video: HTMLVideoElement): OffscreenCanvas {
+    const { w, h } = this.srcDims;
+    const size = chooseSlotSize(w, h, 1, this.outputHeightOnScreenPx());
+    let canvas = this.liveFrameCanvas;
+    if (!canvas || canvas.width !== size.width || canvas.height !== size.height) {
+      canvas = new OffscreenCanvas(size.width, size.height);
+      this.liveFrameCanvas = canvas;
+      this.liveFrameCtx = canvas.getContext("2d", { alpha: false })!;
+    }
+    this.liveFrameCtx!.drawImage(video, 0, 0, canvas.width, canvas.height);
+    return canvas;
   }
 
   /**
