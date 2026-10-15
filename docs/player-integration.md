@@ -106,8 +106,10 @@ turns lookahead off, so the delay never causes silence.
 
 ## Lookahead and the player's time display
 
-Lookahead is off by default; `engine.setLookaheadEnabled(true)` turns it
-on. With lookahead on, in 9:16, the canvas shows each frame a fixed
+Lookahead is on by default with the SIMD WASM build and off with the
+scalar one (`LOOKAHEAD_ON_BY_DEFAULT`; scalar detections are slower, so
+its delay would be about 0.5 s). `engine.setLookaheadEnabled(true | false)`
+overrides that, and `setLookaheadEnabled(null)` goes back to the default. With lookahead on, in 9:16, the canvas shows each frame a fixed
 delay after the video element decodes it (a whole number of frames, about
 0.2 s on desktop and 0.3 s on a phone; `engine.getLookaheadStatus().lengthMs`),
 and the audio is delayed by the same amount. In 16:9 it is bypassed: no

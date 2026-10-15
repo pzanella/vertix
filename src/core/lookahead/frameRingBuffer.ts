@@ -134,10 +134,11 @@ export class FrameRingBuffer<Slot> {
    * The frame to show for media time `dueSec`, taken like `takeLatest`:
    * the frame at that time (within a quarter frame) or a held frame just
    * released; else, with `catchUp` (the screen shows a frame from before
-   * the due one, whose frame was never captured: a skipped frame
-   * callback), the waiting frame nearest the due time, at most one frame
-   * newer, the newer on a tie (audio leading the picture is the more
-   * noticeable error); else the latest earlier frame, if any.
+   * the due one, which the video element presented but whose frame
+   * callback was skipped), the waiting frame nearest the due time, at most
+   * one frame newer, the newer on a tie (audio leading the picture is the
+   * more noticeable error); else the latest earlier frame, if any (a frame
+   * the element dropped itself: held over, as the element does).
    */
   takeNearest(dueSec: number, intervalSec: number, catchUp: boolean): BufferedFrame<Slot> | null {
     const slackSec = intervalSec / 4;

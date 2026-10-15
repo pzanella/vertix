@@ -40,7 +40,7 @@ normal playback is unaffected by the button being there.
 | ------------- | ------- | ---------- | ---------------------------------------------------------------------------------------- |
 | WASM warm-up  | 3 s     | 0–10 s     | Seconds played **without recording** after every WASM build switch. 0 disables it.        |
 | Clip warm-up  | 1 s     | 0–3 s      | Media-time seconds at the start of each clip that are recorded but excluded from stats. |
-| 16:9 baseline | on      | on / off   | Plays the first clip again in 16:9 (no detection) at the end of the suite.              |
+| 16:9 baseline | on      | on / off   | Plays the first clip and the 50 fps one again in 16:9 (no detection) at the end.         |
 
 The values used are stored in the report's `config`, so always quote them
 with the numbers.
@@ -268,8 +268,9 @@ Further limits:
 
 ### 16:9 baseline
 
-This is the same clip in 16:9 mode: no detection, and one `drawImage` of the
-full frame per callback. Use it to compare dropped frames, long tasks and
+This is the first clip, then the first one above 30 fps without cuts
+(`2-speakers-b.mp4`, 50 fps), in 16:9 mode: no detection, and one
+`drawImage` of the full frame per callback. Use it to compare dropped frames, long tasks and
 frame accounting between reframing and plain playback.
 
 Do **not** compare `frameWorkMs` between the two runs directly. The baseline
@@ -332,6 +333,10 @@ lookaheadComparison, precisionWarnings, results[] }`. Each result contains `summ
       (frame-copy size, estimated buffer memory, frames dropped by the
       buffer or superseded on display), read at the end of the run. Added
       later within v5:
+      - `enabledByDefault` (lookahead is on by default with the SIMD
+        build, off with scalar) and `setByHost` (the switch was set
+        explicitly; always true in the suite, which runs each clip off and
+        on and restores the user's setting afterwards).
       - `bypassed`: on, but not running because the run is 16:9 (no
         detection); the 16:9 baseline shows `true` with `audioDelayMs` 0.
       - `audioDelayMs`: the audio delay actually applied.
@@ -382,22 +387,23 @@ lookaheadComparison, precisionWarnings, results[] }`. Each result contains `summ
         `clockErrorAbsMs` is the same as absolute values.
       - `frameOffset` (lookahead only): frames between the due frame and
         the one shown, positive when the one shown is older; 0 is exact.
-        When the due frame was never captured (its callback was skipped)
-        and the screen would fall behind, the nearest captured frame is
-        shown, the newer one on a tie (-1).
+        When the due frame was presented by the video element but never
+        captured (its callback was skipped, per `presentedFrames`) and the
+        screen would fall behind, the nearest captured frame is shown, the
+        newer one on a tie (-1). A frame the element dropped itself (or
+        without `presentedFrames`) is held over, as the element does (+1).
       - Raw: `frames.expectedDisplayMs`, and per display `onScreenAtMs`,
         `delayMs`, `frameOffset` and `clockErrorMs`.
     - `summary.trigger`: `{ count, mainThreadMs, triggeredDetections }`,
       the main-thread cost per frame of the cut trigger and how many
-      detections it started. Added later within v5: `drawMs` (preparing
-      the frame: `new VideoFrame(video)`, or scaling the buffered copy into
-      a small canvas and `transferToImageBitmap`) and `postMs`
-      (`postMessage`), the two parts of `mainThreadMs`; `path`
-      (`videoframe`, `bitmap`, or `mixed` when a run used both: the
-      VideoFrame path falls back to the bitmap one for a source it cannot
-      wrap or the worker cannot draw); `skippedBusy` (frames not scored
-      because the previous VideoFrame was still in the worker: one at a
-      time, so no decoder frame is held).
+      detections it started. Target: `mainThreadMs` p95 ≤ 2 ms on a
+      phone, with no extra dropped frames. Added later within v5: `drawMs`
+      (scaling the buffered copy into a small canvas and
+      `transferToImageBitmap`) and `postMs` (`postMessage`), the two parts
+      of `mainThreadMs`; `path` and `skippedBusy`. A VideoFrame path was
+      tried within v5 and removed (on a phone it was no cheaper and skipped
+      frames while the worker was busy): `path` is now always `bitmap`
+      (null without trigger frames) and `skippedBusy` always 0.
     - `summary.detectionGaps`: `{ pairs, irregular, histogram }`, gaps
       between detections in frames (mouth motion is measured over the gap;
       regular is 5).

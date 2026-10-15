@@ -153,8 +153,12 @@ export interface SlotHeightChange {
 export type LookaheadLengthSource = "measured" | "stored" | "default";
 
 export interface LookaheadStatus {
-  /** The switch: lookahead wanted. */
+  /** The switch: lookahead wanted (the host's choice, else the default for the active WASM build). */
   enabled: boolean;
+  /** What the switch is by default with the active WASM build: on with SIMD, off with scalar (LOOKAHEAD_ON_BY_DEFAULT). */
+  enabledByDefault: boolean;
+  /** Whether the host set the switch (setLookaheadEnabled(true/false)); false while it follows the build default. */
+  setByHost: boolean;
   /** Set when lookahead is wanted but forced off. */
   unavailableReason: LookaheadUnavailableReason | null;
   /** Wanted and available, but not running because the mode is 16:9 (no detection, nothing to look ahead for). */
@@ -232,6 +236,8 @@ export const INITIAL_METRICS: VertixMetrics = {
   displayedMediaTimeSec: null,
   lookahead: {
     enabled: false,
+    enabledByDefault: false,
+    setByHost: false,
     unavailableReason: null,
     bypassed: false,
     audioDelayMs: 0,
@@ -285,8 +291,8 @@ const FACE_DETECT_INTERVAL = 5;
 // Per-frame cut-trigger scores kept for cut localisation: a few seconds,
 // well over the gap between two detections.
 const SCORED_FRAME_HISTORY = 120;
-// A VideoFrame sent to the cut trigger with no answer after this long no longer blocks the next one.
-const VIDEO_FRAME_IN_FLIGHT_TIMEOUT_MS = 250;
+// Spans of uncaptured but presented frames kept: well over a lookahead length of skips.
+const UNCAPTURED_SPAN_HISTORY = 64;
 // A frame shown while paused waits for its own detection this long at most.
 const HELD_FRAME_TIMEOUT_MS = 500;
 // With lookahead, frames are shown from the frame callback while playing.
@@ -328,6 +334,15 @@ interface PendingDetection {
 const pendingDetections = new Map<number, PendingDetection>();
 
 let activeWasmBuild: WasmBuildSelection | null = null;
+// Engines to tell when the active build changes (their lookahead default follows it).
+const wasmBuildListeners = new Set<() => void>();
+
+/**
+ * Lookahead by default, per WASM build: on with SIMD; off with scalar,
+ * whose slower detections (~175-220 ms on a phone) make the delay long
+ * (~0.5 s).
+ */
+export const LOOKAHEAD_ON_BY_DEFAULT: Record<WasmBuildVariant, boolean> = { simd: true, scalar: false };
 
 /** The WASM build the worker and the main-thread fallback load: the default from the SIMD probe unless the benchmark suite switched it. */
 export function getActiveWasmBuild(): WasmBuildSelection {
@@ -346,6 +361,7 @@ export function switchWasmBuild(selection: WasmBuildSelection): Promise<boolean>
   disposeSharedWorker?.();
   for (const pending of pendingDetections.values()) pending.onCancel();
   pendingDetections.clear();
+  for (const listener of wasmBuildListeners) listener();
   return getSharedDetectionWorker();
 }
 
@@ -688,7 +704,13 @@ export class VertixEngine {
   // Lookahead: the output is shown lookaheadLengthMs behind the decoded
   // frame, so each frame's detection result is in before it is displayed.
   // Off by default until it has been checked on phones; the dashboard switch turns it on.
-  private lookaheadEnabled = false;
+  // The host's choice; null follows LOOKAHEAD_ON_BY_DEFAULT for the active build.
+  private lookaheadPreference: boolean | null = null;
+  // What refreshLookahead last applied, to notice a build change that flips the default.
+  private appliedLookaheadEnabled = false;
+  private boundOnWasmBuildChange = () => {
+    if (this.lookaheadEnabled !== this.appliedLookaheadEnabled) this.refreshLookahead("flush");
+  };
   private lookaheadUnavailable: LookaheadUnavailableReason | null = null;
   // Current (target) length, whole frames, and the frame interval it was computed with.
   private lookaheadLengthMs = 0;
@@ -702,6 +724,9 @@ export class VertixEngine {
   private sourceTainted = false;
   private readonly deviceClass = detectDeviceClass();
   private frameBuffer: FrameRingBuffer<FrameSlot> | null = null;
+  // Without lookahead, in 9:16: the one copy of the current frame everything is drawn from.
+  private liveFrameCanvas: OffscreenCanvas | null = null;
+  private liveFrameCtx: OffscreenCanvasRenderingContext2D | null = null;
   private slotSize: SlotSize | null = null;
   private slotHeightGovernor = new SlotHeightGovernor();
   private slotHeightChanges: SlotHeightChange[] = [];
@@ -713,6 +738,12 @@ export class VertixEngine {
   private lastCapturedMediaTime: number | null = null;
   private frameInterval = new FrameIntervalTracker();
   private frameRateHintFps: number | null = null;
+  // Media-time spans whose frames the video element presented without a
+  // frame callback (never captured). Only for those does the display
+  // catch up to the next frame; a frame the element dropped itself is
+  // skipped the way the element skips it, holding the previous one.
+  private uncapturedPresentedSpans: { afterSec: number; beforeSec: number }[] = [];
+  private lastCallback: { mediaTimeSec: number; presentedFrames: number } | null = null;
   private heldFrameTimeout: ReturnType<typeof setTimeout> | undefined = undefined;
   private displayFrameId: number | null = null;
   private lastDisplayCallbackAt: number | null = null;
@@ -739,9 +770,6 @@ export class VertixEngine {
   private cutTriggerUnavailable = false;
   // Bumped on every reset (seek, mode change, new source): scores from before it are ignored.
   private cutTriggerGeneration = 0;
-  // VideoFrame trigger path: the decoded frame itself goes to the worker, one at a time.
-  private videoFrameTriggerUnavailable = false;
-  private videoFrameInFlightSince: number | null = null;
   private pendingTriggerFrames = new Map<number, { mediaTimeSec: number; capturedAt: number }>();
   private scoredFrames: ScoredFrame[] = [];
   private pendingCutDetectionSec: number | null = null;
@@ -763,6 +791,7 @@ export class VertixEngine {
   private boundOnLoadedMetadata = () => this.resetForNewSource();
 
   constructor() {
+    wasmBuildListeners.add(this.boundOnWasmBuildChange);
     const fc = new OffscreenCanvas(FACE_W, FACE_H);
     this.faceCanvas = fc;
     this.faceCtx = fc.getContext("2d", { willReadFrequently: true })!;
@@ -841,6 +870,7 @@ export class VertixEngine {
    * be using it.
    */
   destroy(): void {
+    wasmBuildListeners.delete(this.boundOnWasmBuildChange);
     this.detach();
     this.audioMonitor.detach();
     this.taintProbeCtx = null;
@@ -893,14 +923,29 @@ export class VertixEngine {
   }
 
   /**
-   * Turns lookahead on or off at runtime. Either way the change is one
-   * short gap: the buffered frames are dropped, and the audio is silent
-   * until audio delayed by the new amount comes out.
+   * Turns lookahead on or off at runtime; null goes back to the default
+   * for the active WASM build (LOOKAHEAD_ON_BY_DEFAULT), which then follows
+   * build switches. A change is one short gap: the buffered frames are
+   * dropped, and the audio is silent until audio delayed by the new amount
+   * comes out.
    */
-  setLookaheadEnabled(enabled: boolean): void {
-    if (enabled === this.lookaheadEnabled) return;
-    this.lookaheadEnabled = enabled;
-    this.refreshLookahead("flush");
+  setLookaheadEnabled(enabled: boolean | null): void {
+    this.lookaheadPreference = enabled;
+    if (this.lookaheadEnabled !== this.appliedLookaheadEnabled) {
+      this.refreshLookahead("flush");
+    } else {
+      this.metrics = { ...this.metrics, lookahead: this.lookaheadStatus() };
+      this.emitMetrics();
+    }
+  }
+
+  /** The host's choice from setLookaheadEnabled, or null while lookahead follows the build default. */
+  getLookaheadPreference(): boolean | null {
+    return this.lookaheadPreference;
+  }
+
+  private get lookaheadEnabled(): boolean {
+    return this.lookaheadPreference ?? LOOKAHEAD_ON_BY_DEFAULT[getActiveWasmBuild().variant];
   }
 
   getLookaheadStatus(): LookaheadStatus {
@@ -1004,13 +1049,13 @@ export class VertixEngine {
     this.srcDimsInitialized = false;
     this.frameCounter = 0;
     this.sourceTainted = false;
-    this.videoFrameTriggerUnavailable = false;
     this.audioMonitor.resetSilentPath();
     this.flushLookahead();
     this.frameBuffer = null;
     this.captureIndex = 0;
     this.nextDetectionFrameIndex = FACE_DETECT_INTERVAL;
     this.frameInterval.reset();
+    this.forgetCallbackHistory();
     this.slotHeightGovernor.reset();
     this.slotHeightChanges = [];
     this.timeAtSlotHeightMs = {};
@@ -1116,6 +1161,7 @@ export class VertixEngine {
     this.metrics = { ...this.metrics, displayedMediaTimeSec: null };
     this.nextDetectionFrameIndex = this.captureIndex + FACE_DETECT_INTERVAL;
     this.frameInterval.restart();
+    this.forgetCallbackHistory();
     this.refreshLookahead("flush");
   }
 
@@ -1151,7 +1197,8 @@ export class VertixEngine {
         : this.audioMonitor.silentPathSuspected
           ? "silent-audio-path"
           : null;
-    const active = this.lookaheadEnabled && this.lookaheadUnavailable === null && this.mode === "9:16";
+    this.appliedLookaheadEnabled = this.lookaheadEnabled;
+    const active = this.appliedLookaheadEnabled && this.lookaheadUnavailable === null && this.mode === "9:16";
     if (!active) {
       if (this.lookaheadLengthMs > 0) this.applyLookaheadLength({ frames: 0, lengthMs: 0 });
     } else if (this.lookaheadLengthMs === 0 || how === "flush") {
@@ -1181,21 +1228,19 @@ export class VertixEngine {
   /**
    * Moves to `delay` without a flush: the DelaySchedule ramps, the audio
    * DelayNode follows the same ramp, and the pool grows now (or shrinks
-   * once the ramp is over, when fewer frames wait). The same length in
-   * another number of frames (a frame-rate change) needs no ramp, only
-   * another pool size.
+   * once fewer frames wait, see sizePool). The same length in another
+   * number of frames (a frame-rate change) needs no ramp, only another
+   * pool size.
    */
   private rampLookaheadLength(delay: FrameAlignedDelay): void {
     const now = performance.now();
-    let shrinkAt = now;
     if (delay.lengthMs !== this.lookaheadLengthMs) {
       const durationMs = this.delaySchedule.rampTo(now, delay.lengthMs);
       this.audioMonitor.rampOutputDelay(delay.lengthMs / 1000, durationMs / 1000);
       this.lookaheadLengthMs = delay.lengthMs;
-      shrinkAt = now + durationMs;
     }
     this.delayFrames = delay.frames;
-    this.sizePool(now, shrinkAt);
+    this.sizePool(now);
   }
 
   /** Accumulates the time spent at each copy height, and logs height changes. */
@@ -1224,7 +1269,7 @@ export class VertixEngine {
     const frameRateFps = interval ? (video.playbackRate || 1) / interval : null;
     const quality = video.getVideoPlaybackQuality?.() ?? null;
     const reason = this.slotHeightGovernor.update(now, frameRateFps, quality, buffer.overflowDrops);
-    if (reason) this.sizePool(now, now, reason);
+    if (reason) this.sizePool(now, reason);
     this.accumulateSlotHeightTime(now);
   }
 
@@ -1242,10 +1287,11 @@ export class VertixEngine {
   /**
    * Sizes the pool for the current delay: the largest copy size at which
    * the frames it must hold fit the budget, and the slot limit. Growth
-   * applies now; a smaller limit from `shrinkAt` (the end of a shrinking
-   * ramp), when fewer frames wait.
+   * applies now. A smaller limit applies only once the frames waiting now
+   * have been shown: after any running ramp, and one delay length later
+   * (a lower limit with more frames waiting would drop them).
    */
-  private sizePool(now: number, shrinkAt: number, reason: SlotHeightChange["reason"] = "pool"): void {
+  private sizePool(now: number, reason: SlotHeightChange["reason"] = "pool"): void {
     const buffer = this.frameBuffer;
     if (!buffer) return;
     const { w, h } = this.srcDims;
@@ -1255,11 +1301,12 @@ export class VertixEngine {
     this.slotSize = size;
     this.trackSlotHeight(size.height, now, reason);
     const slots = maxSlotsFor(size, neededSlots);
-    if (slots >= buffer.maxSlots || shrinkAt <= now) {
+    if (slots >= buffer.maxSlots || buffer.length === 0) {
       buffer.setMaxSlots(slots);
       this.pendingMaxSlots = null;
     } else {
-      this.pendingMaxSlots = { slots, at: shrinkAt };
+      const drainedAt = Math.max(this.delaySchedule.rampEndsAt, now) + this.delaySchedule.valueAt(now);
+      this.pendingMaxSlots = { slots, at: drainedAt };
     }
   }
 
@@ -1295,6 +1342,8 @@ export class VertixEngine {
     const allocatedSlots = buffer?.allocatedSlots ?? 0;
     return {
       enabled: this.lookaheadEnabled,
+      enabledByDefault: LOOKAHEAD_ON_BY_DEFAULT[getActiveWasmBuild().variant],
+      setByHost: this.lookaheadPreference !== null,
       unavailableReason: this.lookaheadEnabled ? this.lookaheadUnavailable : null,
       bypassed: this.lookaheadEnabled && this.lookaheadUnavailable === null && this.mode === "16:9",
       audioDelayMs: Math.round(this.audioMonitor.outputDelaySec * 1000),
@@ -1783,6 +1832,7 @@ export class VertixEngine {
     }
     this.lastFrameTime = now;
     this.frameInterval.push(metadata.mediaTime);
+    this.noteUncapturedFrames(metadata);
     if (now - this.lastMetricsPush > 300) {
       this.lastMetricsPush = now;
       this.updateSlotHeight(video, now);
@@ -1844,7 +1894,13 @@ export class VertixEngine {
     this.scheduleNextFrame(video);
   }
 
-  /** No lookahead: detection on this frame if due, then draw it straight from the video. */
+  /**
+   * No lookahead. In 9:16 the frame is copied once into an offscreen canvas
+   * and everything (the crops, the B-roll background, the detection input)
+   * is drawn from that copy: drawing the video element itself several times
+   * per frame into the visible canvas made a phone drop a fifth of the
+   * frames at 50 fps. 16:9 draws the video once, straight.
+   */
   private renderLiveFrame(
     video: HTMLVideoElement,
     metadata: VideoFrameCallbackMetadata,
@@ -1852,19 +1908,23 @@ export class VertixEngine {
     frameDtSec: number
   ): void {
     const { w: srcW, h: srcH, cropW, cropH } = this.srcDims;
+    const renderStart = this.benchmarkProbe ? performance.now() : 0;
+    let source: HTMLVideoElement | OffscreenCanvas = video;
     if (this.mode === "9:16") {
+      source = this.copyLiveFrame(video);
       this.hasFrameSinceReset = true;
       this.frameCounter += 1;
       if (this.frameCounter % FACE_DETECT_INTERVAL === 0) {
         if (!this.detectionInFlight) {
-          this.dispatchDetection(video, metadata.mediaTime, srcW, srcH, cropW, cropH);
+          this.dispatchDetection(source, metadata.mediaTime, srcW, srcH, cropW, cropH);
         } else {
           this.benchmarkProbe?.recordSkippedDetection();
         }
       }
     }
-    const renderStart = this.benchmarkProbe ? performance.now() : 0;
-    this.renderFrame(video, srcW, srcH, null, metadata.mediaTime, now, frameDtSec);
+    const sourceW = source instanceof OffscreenCanvas ? source.width : srcW;
+    const sourceH = source instanceof OffscreenCanvas ? source.height : srcH;
+    this.renderFrame(source, sourceW, sourceH, null, metadata.mediaTime, now, frameDtSec);
     this.displayedMediaTimeSec = metadata.mediaTime;
     this.benchmarkProbe?.recordDisplay(
       now,
@@ -1874,6 +1934,20 @@ export class VertixEngine {
       metadata.expectedDisplayTime ?? now,
       0
     );
+  }
+
+  /** The current video frame, copied once into the live-frame canvas (sized like a lookahead slot: never above the source or what the output can show). */
+  private copyLiveFrame(video: HTMLVideoElement): OffscreenCanvas {
+    const { w, h } = this.srcDims;
+    const size = chooseSlotSize(w, h, 1, this.outputHeightOnScreenPx());
+    let canvas = this.liveFrameCanvas;
+    if (!canvas || canvas.width !== size.width || canvas.height !== size.height) {
+      canvas = new OffscreenCanvas(size.width, size.height);
+      this.liveFrameCanvas = canvas;
+      this.liveFrameCtx = canvas.getContext("2d", { alpha: false })!;
+    }
+    this.liveFrameCtx!.drawImage(video, 0, 0, canvas.width, canvas.height);
+    return canvas;
   }
 
   /**
@@ -1903,14 +1977,15 @@ export class VertixEngine {
           this.benchmarkProbe?.recordSkippedDetection();
         }
       }
-      if (this.shouldScoreForCut(frame.mediaTimeSec, intervalSec, rate)) this.scoreFrameForCut(frame, video);
+      if (this.shouldScoreForCut(frame.mediaTimeSec, intervalSec, rate)) this.scoreFrameForCut(frame);
     }
 
     this.stopDisplayLoop();
     const delayMs = this.delaySchedule.valueAt(presentedAtMs);
     const dueSec = metadata.mediaTime - (delayMs / 1000) * rate;
     const shownSec = this.displayedMediaTimeSec;
-    const catchUp = shownSec !== null && shownSec < dueSec - intervalSec / 2;
+    const catchUp =
+      shownSec !== null && shownSec < dueSec - intervalSec / 2 && this.wasPresentedWithoutCallback(dueSec, intervalSec);
     const due = this.frameBuffer!.takeNearest(dueSec, intervalSec, catchUp);
     if (due) this.showBufferedFrame(due, now, presentedAtMs, delayMs, (dueSec - due.mediaTimeSec) / intervalSec);
     this.applyPendingMaxSlots(now);
@@ -1925,6 +2000,36 @@ export class VertixEngine {
     const last = this.lastScoredMediaSec;
     if (rate / intervalSec <= HIGH_FRAME_RATE_FPS + 0.5 || last === null || mediaTimeSec < last) return true;
     return mediaTimeSec - last >= intervalSec * 1.5;
+  }
+
+  /**
+   * Notes the frames between this callback and the previous one, if any:
+   * presented by the video element (its presentedFrames count rose by as
+   * many) but never captured. If presentedFrames is missing or rose by
+   * less, the element dropped them itself.
+   */
+  private noteUncapturedFrames(metadata: VideoFrameCallbackMetadata): void {
+    const last = this.lastCallback;
+    const presentedFrames = metadata.presentedFrames;
+    this.lastCallback = Number.isFinite(presentedFrames) ? { mediaTimeSec: metadata.mediaTime, presentedFrames } : null;
+    const intervalSec = this.knownIntervalSec();
+    if (!last || !this.lastCallback || !intervalSec) return;
+    const mediaSteps = Math.round((metadata.mediaTime - last.mediaTimeSec) / intervalSec);
+    if (mediaSteps < 2 || presentedFrames - last.presentedFrames < mediaSteps) return;
+    if (this.uncapturedPresentedSpans.length === UNCAPTURED_SPAN_HISTORY) this.uncapturedPresentedSpans.shift();
+    this.uncapturedPresentedSpans.push({ afterSec: last.mediaTimeSec, beforeSec: metadata.mediaTime });
+  }
+
+  private wasPresentedWithoutCallback(mediaTimeSec: number, intervalSec: number): boolean {
+    const slackSec = intervalSec / 4;
+    return this.uncapturedPresentedSpans.some(
+      (span) => span.afterSec + slackSec < mediaTimeSec && mediaTimeSec < span.beforeSec - slackSec
+    );
+  }
+
+  private forgetCallbackHistory(): void {
+    this.uncapturedPresentedSpans = [];
+    this.lastCallback = null;
   }
 
   /** A frame-rate change (another rendition) or the first measured interval moves the length to whole frames of the new rate. */
@@ -1997,66 +2102,22 @@ export class VertixEngine {
   }
 
   /**
-   * Sends the frame just buffered to the cut trigger. Preferred: the
-   * decoded frame itself as a VideoFrame (no draw on the main thread; the
-   * worker scales it and closes it), at most one in the worker at a time
-   * so no decoder frame is held for long. Fallback (no VideoFrame, or a
-   * source it cannot wrap): a GPU scale of the buffered copy and a
-   * transfer. Neither reads pixels back here.
+   * Sends a small copy of a buffered frame to the cut trigger: a GPU scale
+   * (drawImage) and a transfer, both synchronous, no pixel readback here.
    */
-  private scoreFrameForCut(frame: BufferedFrame<FrameSlot>, video: HTMLVideoElement): void {
+  private scoreFrameForCut(frame: BufferedFrame<FrameSlot>): void {
     const worker = this.ensureCutTriggerWorker();
     if (!worker) return;
-    const start = performance.now();
-    const useVideoFrame = this.canUseVideoFrameTrigger();
-    if (useVideoFrame && this.videoFrameInFlightSince !== null) {
-      if (start - this.videoFrameInFlightSince < VIDEO_FRAME_IN_FLIGHT_TIMEOUT_MS) {
-        this.benchmarkProbe?.recordTriggerSkippedBusy();
-        return;
-      }
-      this.videoFrameInFlightSince = null;
-    }
-    const videoFrame = useVideoFrame ? this.wrapVideoFrame(video, frame.mediaTimeSec) : null;
-    let source: VideoFrame | ImageBitmap;
-    if (videoFrame) {
-      source = videoFrame;
-    } else {
-      this.triggerSourceCanvas ??= new OffscreenCanvas(TRIGGER_SOURCE_W, TRIGGER_SOURCE_H);
-      source = scaledBitmap(this.triggerSourceCanvas, frame.slot.canvas);
-    }
-    const drawnAt = performance.now();
-    const message = { type: "score", generation: this.cutTriggerGeneration, frameId: frame.frameIndex, source };
-    try {
-      worker.postMessage(message, [source]);
-    } catch {
-      source.close();
-      if (videoFrame) this.videoFrameTriggerUnavailable = true;
-      return;
-    }
-    if (videoFrame) this.videoFrameInFlightSince = start;
     this.lastScoredMediaSec = frame.mediaTimeSec;
+    const start = performance.now();
     this.pendingTriggerFrames.set(frame.frameIndex, { mediaTimeSec: frame.mediaTimeSec, capturedAt: start });
+    this.triggerSourceCanvas ??= new OffscreenCanvas(TRIGGER_SOURCE_W, TRIGGER_SOURCE_H);
+    const bitmap = scaledBitmap(this.triggerSourceCanvas, frame.slot.canvas);
+    const drawnAt = performance.now();
+    const generation = this.cutTriggerGeneration;
+    worker.postMessage({ type: "score", generation, frameId: frame.frameIndex, bitmap }, [bitmap]);
     const end = performance.now();
-    this.benchmarkProbe?.recordTriggerCost(
-      end - start,
-      drawnAt - start,
-      end - drawnAt,
-      videoFrame ? "videoframe" : "bitmap"
-    );
-  }
-
-  private canUseVideoFrameTrigger(): boolean {
-    return !this.videoFrameTriggerUnavailable && typeof VideoFrame !== "undefined";
-  }
-
-  /** The video's current frame as a VideoFrame, or null (cross-origin without CORS throws; then never again for this source). */
-  private wrapVideoFrame(video: HTMLVideoElement, mediaTimeSec: number): VideoFrame | null {
-    try {
-      return new VideoFrame(video, { timestamp: Math.round(mediaTimeSec * 1e6) });
-    } catch {
-      this.videoFrameTriggerUnavailable = true;
-      return null;
-    }
+    this.benchmarkProbe?.recordTriggerCost(end - start, drawnAt - start, end - drawnAt);
   }
 
   /**
@@ -2076,17 +2137,14 @@ export class VertixEngine {
   private onCutTriggerScore(msg: {
     generation: number;
     frameId: number;
-    wasVideoFrame: boolean;
     failed: boolean;
     hist: number;
     grid: number;
     triggered: boolean;
   }): void {
-    if (msg.wasVideoFrame) this.videoFrameInFlightSince = null;
+    // A score from before the last reset (seek, mode change, new source) belongs to another frame.
     if (msg.generation !== this.cutTriggerGeneration) return;
     if (msg.failed) {
-      // The worker could not draw a VideoFrame of this source: buffered copies from now on.
-      if (msg.wasVideoFrame) this.videoFrameTriggerUnavailable = true;
       this.pendingTriggerFrames.delete(msg.frameId);
       return;
     }
@@ -2190,8 +2248,7 @@ export class VertixEngine {
       1,
       FRAME_BUFFER_BUDGET_BYTES
     );
-    const now = performance.now();
-    this.sizePool(now, now);
+    this.sizePool(performance.now());
     return this.frameBuffer;
   }
 

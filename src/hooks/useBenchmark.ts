@@ -20,7 +20,7 @@ import {
   type WasmBuildComparison,
 } from "../core";
 import { BENCHMARK_CLIPS } from "../components/Player/sampleClips";
-import { SETTLE_BETWEEN_CLIPS_MS } from "../components/Benchmark/benchmarkConfig";
+import { SETTLE_BETWEEN_CLIPS_MS, baselineClipIndices } from "../components/Benchmark/benchmarkConfig";
 
 export type BenchmarkStatus = "idle" | "running" | "done" | "cancelled" | "error";
 
@@ -146,7 +146,8 @@ export function useBenchmark({ config, getEngine, videoRef, load }: UseBenchmark
       // Collected before any playback: the timer-resolution probe busy-waits for a few ms.
       const environment = collectBenchmarkEnvironment();
       const results: BenchmarkClipResult[] = [];
-      const lookaheadWanted = engine.getLookaheadStatus().enabled;
+      // The user's switch (or null: the build default), restored after the suite.
+      const lookaheadPreference = engine.getLookaheadPreference();
       try {
         await plan(engine, video, controller.signal, results);
         const finished = buildBenchmarkReport(config, environment, comparison, results, lookaheadComparison);
@@ -162,7 +163,7 @@ export function useBenchmark({ config, getEngine, videoRef, load }: UseBenchmark
         }
       } finally {
         engine.setMode("9:16");
-        engine.setLookaheadEnabled(lookaheadWanted);
+        engine.setLookaheadEnabled(lookaheadPreference);
         restoreDefaultWasmBuild();
         abortRef.current = null;
         setStage(null);
@@ -173,7 +174,7 @@ export function useBenchmark({ config, getEngine, videoRef, load }: UseBenchmark
 
   const runSuite = useCallback(() => {
     const simdSupported = isWasmSimdSupported();
-    const steps = buildSuitePlan(BENCHMARK_CLIPS.length, config.baseline, simdSupported);
+    const steps = buildSuitePlan(BENCHMARK_CLIPS.length, baselineClipIndices(config), simdSupported);
     const kinds = steps.map((step) => step.kind);
     const comparison: WasmBuildComparison = simdSupported
       ? { builds: ["simd", "scalar"], order: "alternating-per-clip", simdSkippedReason: null }

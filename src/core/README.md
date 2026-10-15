@@ -58,7 +58,8 @@ engine.destroy();
 | `onMetricsUpdate(listener)` | Subscribe to live telemetry (FPS, detection confidence, motion, ...) — a few times a second. Fires once immediately with the current values, then on every update. Returns an unsubscribe function. |
 | `onStateChange(listener)` | Subscribe to everything else that changes (mode, video dimensions, speaker count, whether a transition is in progress, whether WASM has finished loading). Same immediate-fire-then-updates contract. Returns an unsubscribe function. |
 | `getMetrics()` / `getState()` | Read the current snapshot without subscribing. |
-| `setLookaheadEnabled(enabled)` | Lookahead on or off (default) at runtime: see [Lookahead](#lookahead). |
+| `setLookaheadEnabled(enabled)` | Lookahead on or off at runtime, or `null` for the default: on with the SIMD build, off with scalar (`LOOKAHEAD_ON_BY_DEFAULT`), following build switches. See [Lookahead](#lookahead). |
+| `getLookaheadPreference()` | The host's setting, or `null` while lookahead follows the build default. |
 | `getLookaheadStatus()` | Whether lookahead runs, its length, why it is unavailable, buffer size and memory. |
 | `setFrameRateHint(fps)` | Optional: the source's frame rate when the host knows it (e.g. Shaka's active variant), so the lookahead length and buffer are right from the first frame. Measured intervals take over; `null` clears it. |
 | `getDisplayedMediaTime()` | Media time of the frame on screen (behind `video.currentTime` by the lookahead while playing). |
@@ -139,7 +140,13 @@ not the layout math itself.
 
 ## Lookahead
 
-With lookahead on (off by default) and in 9:16, every decoded frame is
+With lookahead off, frames are drawn in the frame callback as they are
+decoded. In 9:16 the frame is first copied once into an `OffscreenCanvas`
+(sized like a lookahead slot) and the crops, the B-roll background and the
+detection input are drawn from that copy, never from the `<video>` several
+times per frame; 16:9 draws the video once.
+
+With lookahead on (by default with the SIMD build, off with scalar) and in 9:16, every decoded frame is
 copied into a ring of `OffscreenCanvas` slots (`lookahead/frameRingBuffer.ts`).
 In the same frame callback, the buffered frame whose time has come is
 drawn: the newest one with mediaTime <= current mediaTime − the delay.
@@ -181,13 +188,9 @@ dissolve or a layout change lands on the frame it belongs to.
 - **Cut trigger**: every buffered frame (above 30 fps, at most every
   second frame) goes to `cutTriggerWorker.ts`, which scores it at 64×48;
   a likely cut starts a detection on that frame at once instead of at the
-  next 5-frame tick. The frame is sent as a `VideoFrame` of the video (no
-  draw on the main thread; the worker scales it on the GPU, reads back
-  160×120 and closes it, also on errors), at most one at a time so no
-  decoder frame is held; if the source cannot be wrapped (cross-origin
-  without CORS) or the worker cannot draw it, the buffered copy is scaled
-  on the GPU to 160×120 and transferred instead. No readback on the main
-  thread either way. Scores carry the generation of the last reset (seek,
+  next 5-frame tick. The buffered copy is scaled on the GPU to 160×120
+  and transferred (no readback on the main thread); the worker reads it
+  back and closes it, also on errors. Scores carry the generation of the last reset (seek,
   mode change, new source), so late ones from before it are ignored. The
   WASM detector still decides. A cut found on a regular tick is moved
   back to the frame with the biggest frame-to-frame jump.

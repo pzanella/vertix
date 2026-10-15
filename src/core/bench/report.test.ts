@@ -40,6 +40,8 @@ function sampleResult(): BenchmarkClipResult {
     wasmBuild: { variant: "simd", reason: "benchmark-suite", runOrder: { position: 1, sequence: ["simd", "scalar"] } },
     lookahead: {
       enabled: true,
+      enabledByDefault: true,
+      setByHost: true,
       unavailableReason: null,
       bypassed: false,
       audioDelayMs: 160,

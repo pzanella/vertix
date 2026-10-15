@@ -24,6 +24,11 @@ export class DelaySchedule {
     return this.toMs;
   }
 
+  /** When the current ramp ends (in the past when not ramping). */
+  get rampEndsAt(): number {
+    return this.endAt;
+  }
+
   /** Jumps to `delayMs` at once (after a flush, nothing in flight depends on the old value). */
   set(delayMs: number): void {
     this.fromMs = delayMs;

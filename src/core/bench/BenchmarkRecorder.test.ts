@@ -134,12 +134,13 @@ describe("BenchmarkRecorder", () => {
     expect(trigger.postMs.max).toBeCloseTo(0.1);
   });
 
-  it("reports the trigger path and frames skipped while a VideoFrame was in the worker", () => {
+  it("reports the bitmap trigger path, with no frame skipped", () => {
     const recorder = new BenchmarkRecorder({ clipName: "a", video: fakeVideo(10), warmupSec: 0, nominalFps: 25 });
     recorder.recordFrame(0, 1, 0, 0);
-    recorder.recordTriggerCost(0.3, 0.1, 0.2, "videoframe");
-    recorder.recordTriggerSkippedBusy();
-    expect(recorder.finish("9:16").summary.trigger).toMatchObject({ path: "videoframe", skippedBusy: 1 });
+    recorder.recordTriggerCost(0.3, 0.1, 0.2);
+    const result = recorder.finish("9:16");
+    expect(result.summary.trigger).toMatchObject({ path: "bitmap", skippedBusy: 0 });
+    expect(result.raw.triggers.path).toEqual(["bitmap"]);
   });
 
   it("measures the A/V offset against the video element's clock, with and without lookahead", () => {
