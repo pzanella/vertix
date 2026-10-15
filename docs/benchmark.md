@@ -389,15 +389,14 @@ lookaheadComparison, precisionWarnings, results[] }`. Each result contains `summ
         `delayMs`, `frameOffset` and `clockErrorMs`.
     - `summary.trigger`: `{ count, mainThreadMs, triggeredDetections }`,
       the main-thread cost per frame of the cut trigger and how many
-      detections it started. Added later within v5: `drawMs` (preparing
-      the frame: `new VideoFrame(video)`, or scaling the buffered copy into
-      a small canvas and `transferToImageBitmap`) and `postMs`
-      (`postMessage`), the two parts of `mainThreadMs`; `path`
-      (`videoframe`, `bitmap`, or `mixed` when a run used both: the
-      VideoFrame path falls back to the bitmap one for a source it cannot
-      wrap or the worker cannot draw); `skippedBusy` (frames not scored
-      because the previous VideoFrame was still in the worker: one at a
-      time, so no decoder frame is held).
+      detections it started. Target: `mainThreadMs` p95 ≤ 2 ms on a
+      phone, with no extra dropped frames. Added later within v5: `drawMs`
+      (scaling the buffered copy into a small canvas and
+      `transferToImageBitmap`) and `postMs` (`postMessage`), the two parts
+      of `mainThreadMs`; `path` and `skippedBusy`. A VideoFrame path was
+      tried within v5 and removed (on a phone it was no cheaper and skipped
+      frames while the worker was busy): `path` is now always `bitmap`
+      (null without trigger frames) and `skippedBusy` always 0.
     - `summary.detectionGaps`: `{ pairs, irregular, histogram }`, gaps
       between detections in frames (mouth motion is measured over the gap;
       regular is 5).

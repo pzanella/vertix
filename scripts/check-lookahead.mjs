@@ -12,14 +12,12 @@
 //
 // Usage (after `npm run build:wasm && npm run build:worker` and
 // `npm run make:bench-clips`):
-//   node scripts/check-lookahead.mjs [--only=<clip file>] [--chrome=/path/to/chrome] [--headed] [--cpu-throttle=<rate>] [--trigger-ab] [--all-builds]
+//   node scripts/check-lookahead.mjs [--only=<clip file>] [--chrome=/path/to/chrome] [--headed] [--cpu-throttle=<rate>] [--all-builds]
 //
 // --cpu-throttle slows the page's CPU by that factor (DevTools CPU
 // throttling), a rough stand-in for a phone. 50 fps clips also run with
 // lookahead off and on on the other WASM build, and those without cuts
-// once in 16:9. --all-builds runs every clip off and on with both builds. --trigger-ab adds, per clip, a run with
-// lookahead on and VideoFrame hidden, so the cut trigger takes its bitmap
-// path (labelled "bitmap trigger").
+// once in 16:9. --all-builds runs every clip off and on with both builds.
 //
 // Timings in headless Chrome are not representative of a real device; the
 // frame counts are what this checks.
@@ -36,7 +34,6 @@ const chromePath =
   args.find((arg) => arg.startsWith("--chrome="))?.slice("--chrome=".length) ??
   "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
 const headed = args.includes("--headed");
-const triggerAb = args.includes("--trigger-ab");
 const allBuilds = args.includes("--all-builds");
 const cpuThrottle = Number(args.find((arg) => arg.startsWith("--cpu-throttle="))?.slice("--cpu-throttle=".length) ?? 1);
 const DEBUG_PORT = 9333;
@@ -61,7 +58,7 @@ const CLIPS = ONLY ? ALL_CLIPS.filter((clip) => clip.file === ONLY) : ALL_CLIPS;
  * - one 16:9 run (lookahead must be bypassed);
  * - a 16:9 -> 9:16 switch per build, timed.
  */
-async function runInPage(clips, extras, triggerAb, allBuilds) {
+async function runInPage(clips, extras, allBuilds) {
   const core = await import("/src/core/index.ts");
   const video = document.createElement("video");
   video.muted = false;
@@ -130,12 +127,6 @@ async function runInPage(clips, extras, triggerAb, allBuilds) {
   for (const clip of clips) {
     await run(clip, false, "clips");
     await run(clip, true, "clips");
-    if (triggerAb) {
-      const videoFrame = globalThis.VideoFrame;
-      globalThis.VideoFrame = undefined;
-      await run(clip, true, "bitmap trigger");
-      globalThis.VideoFrame = videoFrame;
-    }
     if (clip.fps > 30 || allBuilds) {
       const pageBuild = core.getActiveWasmBuild();
       const other = pageBuild.variant === "simd" ? "scalar" : "simd";
@@ -316,7 +307,7 @@ try {
   await loaded;
 
   const evaluation = cdp.send("Runtime.evaluate", {
-    expression: `(${runInPage.toString()})(${JSON.stringify(CLIPS)}, ${JSON.stringify(!ONLY)}, ${JSON.stringify(triggerAb)}, ${JSON.stringify(allBuilds)})`,
+    expression: `(${runInPage.toString()})(${JSON.stringify(CLIPS)}, ${JSON.stringify(!ONLY)}, ${JSON.stringify(allBuilds)})`,
     awaitPromise: true,
     returnByValue: true,
   });
@@ -367,12 +358,10 @@ try {
       "clock err p95 / |p95| ms":
         run.clockErrorMs.count > 0 ? `${run.clockErrorMs.p95.toFixed(1)} / ${run.clockErrorAbsMs.p95.toFixed(1)}` : "-",
       "frame offset p95": run.frameOffset.count > 0 ? run.frameOffset.p95.toFixed(2) : "-",
-      "trigger path": run.trigger.path ?? "-",
       "trigger p95 ms (draw / post)":
         run.trigger.mainThreadMs.p95 === null
           ? "-"
           : `${run.trigger.mainThreadMs.p95.toFixed(2)} (${run.trigger.drawMs.p95.toFixed(2)} / ${run.trigger.postMs.p95.toFixed(2)})`,
-      "trigger skipped busy": run.trigger.skippedBusy ?? "-",
       "triggered detections": run.trigger.triggeredDetections,
       "irregular gaps": `${run.detectionGaps.irregular}/${run.detectionGaps.pairs}`,
       "detect p95 ms": run.detectionTotalMs.p95?.toFixed(1) ?? "-",

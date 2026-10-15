@@ -51,14 +51,8 @@ export interface BenchmarkProbe {
   /** A detection was due on this frame but skipped because the previous one had not returned yet. */
   recordSkippedDetection(): void;
   recordLayoutChange(nowMs: number): void;
-  /**
-   * Main-thread time spent sending one frame to the cut trigger (lookahead
-   * only): in total, preparing it (a VideoFrame, or drawImage + transfer of
-   * a small copy), and posting it; and which of the two paths it took.
-   */
-  recordTriggerCost(mainThreadMs: number, drawMs?: number, postMs?: number, path?: TriggerPath): void;
-  /** A frame not sent to the cut trigger because the previous VideoFrame was still in the worker. */
-  recordTriggerSkippedBusy(): void;
+  /** Main-thread time spent sending one frame to the cut trigger (lookahead only): in total, scaling it (drawImage + transfer), and posting it. */
+  recordTriggerCost(mainThreadMs: number, drawMs?: number, postMs?: number): void;
   /**
    * A frame was drawn on the output canvas. `errorMs` (lookahead only) is
    * when it reaches the screen minus when it should (its own display time +
@@ -194,19 +188,22 @@ export interface DisplaySummary {
   workMs: SampleSummary;
 }
 
-/** How a frame reached the cut trigger: the decoded frame as a VideoFrame, or a scaled bitmap of the buffered copy. */
-export type TriggerPath = "videoframe" | "bitmap";
-const TRIGGER_PATHS: TriggerPath[] = ["videoframe", "bitmap"];
+/**
+ * How a frame reaches the cut trigger: a scaled bitmap of the buffered
+ * copy. A VideoFrame path existed within v5 and was removed (no cheaper on
+ * a phone, and it skipped frames); the fields stay in the schema.
+ */
+export type TriggerPath = "bitmap";
 
 export interface TriggerSummary {
   count: number;
-  /** Added within v5: the path the measured frames took ("mixed" if both). */
-  path: TriggerPath | "mixed" | null;
-  /** Added within v5: frames not scored because the previous VideoFrame was still in the worker. */
+  /** Added within v5: the path the measured frames took ("bitmap"), null without trigger frames. */
+  path: TriggerPath | null;
+  /** Added within v5: frames not scored while the worker was busy. Always 0 since the VideoFrame path was removed. */
   skippedBusy: number;
   /** Main-thread cost per frame: scaling the buffered frame and posting it to the trigger worker. */
   mainThreadMs: SampleSummary;
-  /** The two parts of mainThreadMs: preparing the frame (new VideoFrame, or drawImage into the small canvas + transferToImageBitmap), and postMessage. Added within v5. */
+  /** The two parts of mainThreadMs: drawImage into the small canvas + transferToImageBitmap, and postMessage. Added within v5. */
   drawMs: SampleSummary;
   postMs: SampleSummary;
   /** Detections dispatched by the trigger instead of the regular tick. */
@@ -440,10 +437,8 @@ export class BenchmarkRecorder implements BenchmarkProbe {
   private readonly triggerCost: Float64Array;
   private readonly triggerDraw: Float64Array;
   private readonly triggerPost: Float64Array;
-  private readonly triggerPath: Uint8Array;
   private readonly triggerWarmup: Uint8Array;
   private triggerCount = 0;
-  private triggerSkippedBusy = 0;
 
   private readonly skippedMediaTime: Float64Array;
   private readonly skippedWarmup: Uint8Array;
@@ -494,7 +489,6 @@ export class BenchmarkRecorder implements BenchmarkProbe {
     this.triggerCost = new Float64Array(frameCapacity);
     this.triggerDraw = new Float64Array(frameCapacity);
     this.triggerPost = new Float64Array(frameCapacity);
-    this.triggerPath = new Uint8Array(frameCapacity);
     this.triggerWarmup = new Uint8Array(frameCapacity);
 
     const detectionCapacity = Math.ceil(frameCapacity / 2);
@@ -661,7 +655,7 @@ export class BenchmarkRecorder implements BenchmarkProbe {
     this.cutShownCount = i + 1;
   }
 
-  recordTriggerCost(mainThreadMs: number, drawMs = NaN, postMs = NaN, path: TriggerPath = "bitmap"): void {
+  recordTriggerCost(mainThreadMs: number, drawMs = NaN, postMs = NaN): void {
     if (this.finished) return;
     const i = this.triggerCount;
     if (i >= this.triggerCost.length) {
@@ -671,14 +665,8 @@ export class BenchmarkRecorder implements BenchmarkProbe {
     this.triggerCost[i] = mainThreadMs;
     this.triggerDraw[i] = drawMs;
     this.triggerPost[i] = postMs;
-    this.triggerPath[i] = TRIGGER_PATHS.indexOf(path);
     this.triggerWarmup[i] = this.inWarmup ? 1 : 0;
     this.triggerCount = i + 1;
-  }
-
-  recordTriggerSkippedBusy(): void {
-    if (this.finished || this.inWarmup) return;
-    this.triggerSkippedBusy += 1;
   }
 
   recordLayoutChange(nowMs: number): void {
@@ -830,8 +818,8 @@ export class BenchmarkRecorder implements BenchmarkProbe {
       },
       trigger: {
         count: this.triggerCount,
-        path: this.measuredTriggerPath(),
-        skippedBusy: this.triggerSkippedBusy,
+        path: this.triggerCount > 0 ? "bitmap" : null,
+        skippedBusy: 0,
         mainThreadMs: summarize(selectWhere(this.triggerCost.subarray(0, this.triggerCount), measuredTrigger)),
         drawMs: summarize(selectWhere(this.triggerDraw.subarray(0, this.triggerCount), measuredTrigger)),
         postMs: summarize(selectWhere(this.triggerPost.subarray(0, this.triggerCount), measuredTrigger)),
@@ -867,13 +855,6 @@ export class BenchmarkRecorder implements BenchmarkProbe {
       this.frameExpectedDisplay.subarray(0, this.frameCount),
       displays
     );
-  }
-
-  private measuredTriggerPath(): TriggerPath | "mixed" | null {
-    const used = new Set<number>();
-    for (let i = 0; i < this.triggerCount; i++) if (this.triggerWarmup[i] === 0) used.add(this.triggerPath[i]);
-    if (used.size === 0) return null;
-    return used.size > 1 ? "mixed" : TRIGGER_PATHS[[...used][0]];
   }
 
   /** Displayed frames with media time in [fromSec, toSec). */
@@ -1046,7 +1027,7 @@ export class BenchmarkRecorder implements BenchmarkProbe {
         mainThreadMs: toArray(this.triggerCost, this.triggerCount),
         drawMs: toArray(this.triggerDraw, this.triggerCount),
         postMs: toArray(this.triggerPost, this.triggerCount),
-        path: toArray(this.triggerPath, this.triggerCount).map((p) => TRIGGER_PATHS[p]),
+        path: new Array<TriggerPath>(this.triggerCount).fill("bitmap"),
         warmup: toArray(this.triggerWarmup, this.triggerCount),
       },
       skippedDetections: {

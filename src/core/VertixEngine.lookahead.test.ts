@@ -101,16 +101,6 @@ vi.stubGlobal(
   }
 );
 
-class FakeVideoFrame {
-  static throwOnCreate = false;
-  closed = false;
-  constructor() {
-    if (FakeVideoFrame.throwOnCreate) throw new DOMException("tainted", "SecurityError");
-  }
-  close() {
-    this.closed = true;
-  }
-}
 vi.stubGlobal("createImageBitmap", () => new Promise(() => {}));
 
 // Manual requestAnimationFrame: runRefresh() runs what is pending, like one screen refresh.
@@ -245,7 +235,6 @@ function cutProbe() {
     recordSkippedDetection: noop,
     recordLayoutChange: noop,
     recordTriggerCost: noop,
-    recordTriggerSkippedBusy: noop,
     recordDisplay: noop,
     recordCutShown: (_now, cutMediaTimeSec, shownMediaTimeSec, source) =>
       cuts.push({ cutMediaTimeSec, shownMediaTimeSec, source }),
@@ -531,7 +520,8 @@ describe("VertixEngine lookahead", () => {
     engine.destroy();
   });
 
-  describe("cut trigger", () => {
+  it("ignores cut-trigger scores of frames sent before a source change", () => {
+    const { engine, video, internals, play } = setUp();
     const scoreMessages = () => workerMessages.filter((m) => m.type === "score");
     const reply = (message: WorkerMessage, extra: object = {}) =>
       workers.at(-1)!.onmessage!({
@@ -539,7 +529,6 @@ describe("VertixEngine lookahead", () => {
           type: "score",
           generation: message.generation,
           frameId: message.frameId,
-          wasVideoFrame: message.source instanceof FakeVideoFrame,
           failed: false,
           hist: 0,
           grid: 0,
@@ -547,70 +536,17 @@ describe("VertixEngine lookahead", () => {
           ...extra,
         },
       });
-    beforeEach(() => {
-      workerMessages.length = 0;
-      FakeVideoFrame.throwOnCreate = false;
-      vi.stubGlobal("VideoFrame", FakeVideoFrame);
-    });
-    afterEach(() => vi.stubGlobal("VideoFrame", undefined));
-
-    it("sends the decoded frame as a VideoFrame, one at a time", () => {
-      const { engine, play } = setUp();
-      let skippedBusy = 0;
-      const { probe } = cutProbe();
-      engine.setBenchmarkProbe({ ...probe, recordTriggerSkippedBusy: () => (skippedBusy += 1) });
-      play(3);
-      expect(scoreMessages()).toHaveLength(1);
-      expect(scoreMessages()[0].source).toBeInstanceOf(FakeVideoFrame);
-      expect(skippedBusy).toBe(2);
-      reply(scoreMessages()[0]);
-      play(1);
-      expect(scoreMessages()).toHaveLength(2);
-      engine.destroy();
-    });
-
-    it("falls back to the buffered copy when the video cannot be wrapped (cross-origin), until the next source", () => {
-      const { engine, video, play } = setUp();
-      FakeVideoFrame.throwOnCreate = true;
-      play(3);
-      expect(scoreMessages()).toHaveLength(3);
-      expect(scoreMessages().every((m) => !(m.source instanceof FakeVideoFrame))).toBe(true);
-      FakeVideoFrame.throwOnCreate = false;
-      play(1);
-      expect(scoreMessages().at(-1)!.source).not.toBeInstanceOf(FakeVideoFrame);
-      video.emit("loadedmetadata");
-      play(1);
-      expect(scoreMessages().at(-1)!.source).toBeInstanceOf(FakeVideoFrame);
-      engine.destroy();
-    });
-
-    it("falls back to the buffered copy when the worker cannot draw the VideoFrame", () => {
-      const { engine, play } = setUp();
-      play(1);
-      reply(scoreMessages()[0], { failed: true });
-      play(2);
-      expect(
-        scoreMessages()
-          .slice(1)
-          .every((m) => !(m.source instanceof FakeVideoFrame))
-      ).toBe(true);
-      engine.destroy();
-    });
-
-    it("ignores scores of frames sent before a source change", () => {
-      const { engine, video, internals, play } = setUp();
-      vi.stubGlobal("VideoFrame", undefined);
-      play(3);
-      const old = scoreMessages();
-      video.emit("loadedmetadata");
-      play(3);
-      // Same frame ids as before the change: only the generation tells them apart.
-      for (const message of old) reply(message, { hist: 0.9, grid: 0.9 });
-      expect(internals.scoredFrames).toEqual([]);
-      for (const message of scoreMessages().slice(old.length)) reply(message);
-      expect(internals.scoredFrames).toHaveLength(3);
-      engine.destroy();
-    });
+    workerMessages.length = 0;
+    play(3);
+    const old = scoreMessages();
+    video.emit("loadedmetadata");
+    play(3);
+    // Same frame ids as before the change: only the generation tells them apart.
+    for (const message of old) reply(message, { hist: 0.9, grid: 0.9 });
+    expect(internals.scoredFrames).toEqual([]);
+    for (const message of scoreMessages().slice(old.length)) reply(message);
+    expect(internals.scoredFrames).toHaveLength(3);
+    engine.destroy();
   });
 
   it("shrinks the pool once a shrinking ramp is over", () => {
