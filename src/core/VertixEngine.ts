@@ -1228,21 +1228,19 @@ export class VertixEngine {
   /**
    * Moves to `delay` without a flush: the DelaySchedule ramps, the audio
    * DelayNode follows the same ramp, and the pool grows now (or shrinks
-   * once the ramp is over, when fewer frames wait). The same length in
-   * another number of frames (a frame-rate change) needs no ramp, only
-   * another pool size.
+   * once fewer frames wait, see sizePool). The same length in another
+   * number of frames (a frame-rate change) needs no ramp, only another
+   * pool size.
    */
   private rampLookaheadLength(delay: FrameAlignedDelay): void {
     const now = performance.now();
-    let shrinkAt = now;
     if (delay.lengthMs !== this.lookaheadLengthMs) {
       const durationMs = this.delaySchedule.rampTo(now, delay.lengthMs);
       this.audioMonitor.rampOutputDelay(delay.lengthMs / 1000, durationMs / 1000);
       this.lookaheadLengthMs = delay.lengthMs;
-      shrinkAt = now + durationMs;
     }
     this.delayFrames = delay.frames;
-    this.sizePool(now, shrinkAt);
+    this.sizePool(now);
   }
 
   /** Accumulates the time spent at each copy height, and logs height changes. */
@@ -1271,7 +1269,7 @@ export class VertixEngine {
     const frameRateFps = interval ? (video.playbackRate || 1) / interval : null;
     const quality = video.getVideoPlaybackQuality?.() ?? null;
     const reason = this.slotHeightGovernor.update(now, frameRateFps, quality, buffer.overflowDrops);
-    if (reason) this.sizePool(now, now, reason);
+    if (reason) this.sizePool(now, reason);
     this.accumulateSlotHeightTime(now);
   }
 
@@ -1289,10 +1287,11 @@ export class VertixEngine {
   /**
    * Sizes the pool for the current delay: the largest copy size at which
    * the frames it must hold fit the budget, and the slot limit. Growth
-   * applies now; a smaller limit from `shrinkAt` (the end of a shrinking
-   * ramp), when fewer frames wait.
+   * applies now. A smaller limit applies only once the frames waiting now
+   * have been shown: after any running ramp, and one delay length later
+   * (a lower limit with more frames waiting would drop them).
    */
-  private sizePool(now: number, shrinkAt: number, reason: SlotHeightChange["reason"] = "pool"): void {
+  private sizePool(now: number, reason: SlotHeightChange["reason"] = "pool"): void {
     const buffer = this.frameBuffer;
     if (!buffer) return;
     const { w, h } = this.srcDims;
@@ -1302,11 +1301,12 @@ export class VertixEngine {
     this.slotSize = size;
     this.trackSlotHeight(size.height, now, reason);
     const slots = maxSlotsFor(size, neededSlots);
-    if (slots >= buffer.maxSlots || shrinkAt <= now) {
+    if (slots >= buffer.maxSlots || buffer.length === 0) {
       buffer.setMaxSlots(slots);
       this.pendingMaxSlots = null;
     } else {
-      this.pendingMaxSlots = { slots, at: shrinkAt };
+      const drainedAt = Math.max(this.delaySchedule.rampEndsAt, now) + this.delaySchedule.valueAt(now);
+      this.pendingMaxSlots = { slots, at: drainedAt };
     }
   }
 
@@ -2248,8 +2248,7 @@ export class VertixEngine {
       1,
       FRAME_BUFFER_BUDGET_BYTES
     );
-    const now = performance.now();
-    this.sizePool(now, now);
+    this.sizePool(performance.now());
     return this.frameBuffer;
   }
 

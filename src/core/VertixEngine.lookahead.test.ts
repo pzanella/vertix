@@ -617,6 +617,24 @@ describe("VertixEngine lookahead", () => {
     engine.destroy();
   });
 
+  it("lowers the pool limit only after the frames waiting now are shown, never dropping one", () => {
+    const { engine, internals, play } = setUp();
+    const build = getActiveWasmBuild().variant;
+    play(30);
+    const { lengthMs, delayFrames } = engine.getLookaheadStatus();
+    // A shrinking ramp starts, then the same new length becomes fewer frames while it runs.
+    for (let i = 0; i < 12; i++) internals.detectionLatency.record(build, 10, 3000 + i * 200, 20 + i);
+    internals.adoptMeasuredLength(build);
+    const shorter = engine.getLookaheadStatus();
+    expect(shorter.lengthMs).toBeLessThan(lengthMs);
+    internals.rampLookaheadLength({ frames: Math.max(1, shorter.delayFrames - 1), lengthMs: shorter.lengthMs });
+    expect(internals.frameBuffer!.maxSlots).toBeGreaterThanOrEqual(slotsForDelay(delayFrames));
+    play(200);
+    expect(engine.getLookaheadStatus().overflowDrops).toBe(0);
+    expect(internals.frameBuffer!.maxSlots).toBe(slotsForDelay(Math.max(1, shorter.delayFrames - 1)));
+    engine.destroy();
+  });
+
   it("shrinks the pool once a shrinking ramp is over", () => {
     const { engine, internals, play } = setUp();
     const build = getActiveWasmBuild().variant;
