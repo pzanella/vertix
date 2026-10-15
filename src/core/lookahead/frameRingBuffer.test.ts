@@ -1,9 +1,24 @@
 import { describe, expect, it } from "vitest";
 import { FrameRingBuffer, type BufferedFrame } from "./frameRingBuffer";
 
-function setUp(maxSlots = 4) {
+interface TestSlot {
+  id: number;
+  bytes: number;
+}
+
+function setUp(maxSlots = 4, budgetBytes = Number.POSITIVE_INFINITY) {
   let created = 0;
-  const buffer = new FrameRingBuffer(() => ({ id: created++ }), maxSlots);
+  const size = { bytes: 1 };
+  const buffer = new FrameRingBuffer<TestSlot>(
+    {
+      create: () => ({ id: created++, bytes: size.bytes }),
+      bytesPerNewSlot: () => size.bytes,
+      bytesOf: (slot) => slot.bytes,
+      isCurrent: (slot) => slot.bytes === size.bytes,
+    },
+    maxSlots,
+    budgetBytes
+  );
   let frameIndex = 0;
   const capture = (mediaTimeSec: number, held = false) => {
     const slot = buffer.acquire();
@@ -18,8 +33,8 @@ function setUp(maxSlots = 4) {
     buffer.enqueue(frame);
     return frame;
   };
-  const upTo = (sec: number) => (f: BufferedFrame<{ id: number }>) => f.mediaTimeSec <= sec;
-  return { buffer, capture, upTo, created: () => created };
+  const upTo = (sec: number) => (f: BufferedFrame<TestSlot>) => f.mediaTimeSec <= sec;
+  return { buffer, capture, upTo, size, created: () => created };
 }
 
 describe("FrameRingBuffer", () => {
@@ -101,5 +116,117 @@ describe("FrameRingBuffer", () => {
     buffer.release(buffer.takeLatest(upTo(2))!);
     expect(buffer.allocatedSlots).toBe(2);
     expect(buffer.length).toBe(2);
+  });
+
+  it("stays within the byte budget", () => {
+    const { buffer, capture } = setUp(10, 3);
+    for (let i = 1; i <= 5; i++) capture(i);
+    expect(buffer.allocatedSlots).toBe(3);
+    expect(buffer.allocatedBytes).toBe(3);
+    expect(buffer.overflowDrops).toBe(2);
+  });
+
+  describe("720p -> 540p copies at the 96 MiB budget limit", () => {
+    const BUDGET = 96 * 1024 * 1024;
+    const BYTES_720 = 1280 * 720 * 4;
+    const BYTES_540 = 960 * 540 * 4;
+
+    /** Plays `frames` frames at `fps`, each shown `delayFrames(t)` frames after capture; returns the frames shown. */
+    function playThrough(
+      env: ReturnType<typeof setUp>,
+      from: number,
+      frames: number,
+      delayFrames: (i: number) => number
+    ) {
+      const shown: number[] = [];
+      for (let i = from; i < from + frames; i++) {
+        env.capture(i);
+        const due = env.buffer.takeLatest(env.upTo(i - delayFrames(i)));
+        if (due) {
+          shown.push(due.mediaTimeSec);
+          env.buffer.release(due);
+        }
+      }
+      return shown;
+    }
+
+    it("same delay: old copies are swapped one for one, no frame dropped, never over the budget", () => {
+      const env = setUp(Math.floor(BUDGET / BYTES_720), BUDGET);
+      env.size.bytes = BYTES_720;
+      // 26 frames waiting + the one being captured: 27 slots of 720p, the most the budget holds.
+      playThrough(env, 0, 100, () => 26);
+      expect(env.buffer.allocatedSlots).toBe(27);
+      env.size.bytes = BYTES_540;
+      env.buffer.setMaxSlots(27);
+      playThrough(env, 100, 100, () => 26);
+      expect(env.buffer.overflowDrops).toBe(0);
+      expect(env.buffer.peakAllocatedBytes).toBeLessThanOrEqual(BUDGET);
+      expect(env.buffer.allocatedBytes).toBeLessThanOrEqual(27 * BYTES_540);
+      console.log(
+        `720p -> 540p, same delay: peak ${env.buffer.peakAllocatedBytes} B of ${BUDGET} B, overflow ${env.buffer.overflowDrops}`
+      );
+    });
+
+    it("delay growing at the switch: drops the oldest waiting frames rather than going over the budget", () => {
+      const env = setUp(Math.floor(BUDGET / BYTES_720), BUDGET);
+      env.size.bytes = BYTES_720;
+      playThrough(env, 0, 100, () => 26);
+      env.size.bytes = BYTES_540;
+      env.buffer.setMaxSlots(42);
+      // The delay grows to 40 frames at once: more frames must wait than the old copies leave room for.
+      const shown = playThrough(env, 100, 200, () => 40);
+      expect(env.buffer.peakAllocatedBytes).toBeLessThanOrEqual(BUDGET);
+      expect(env.buffer.overflowDrops).toBeGreaterThan(0);
+      for (let i = 1; i < shown.length; i++) expect(shown[i]).toBeGreaterThan(shown[i - 1]);
+      // Once the old copies are gone, the 40-frame delay fits in 540p copies.
+      expect(env.buffer.allocatedBytes).toBe(env.buffer.allocatedSlots * BYTES_540);
+      console.log(
+        `720p -> 540p, delay 26 -> 40: peak ${env.buffer.peakAllocatedBytes} B of ${BUDGET} B, overflow ${env.buffer.overflowDrops}`
+      );
+    });
+  });
+
+  describe("takeNearest", () => {
+    it("takes the frame at the due time", () => {
+      const { buffer, capture } = setUp();
+      capture(1.0);
+      capture(1.02);
+      capture(1.04);
+      expect(buffer.takeNearest(1.02, 0.02, true)?.mediaTimeSec).toBe(1.02);
+      expect(buffer.skippedOnDisplay).toBe(1);
+    });
+
+    it("waits when the due frame is not there yet and the screen is not behind", () => {
+      const { buffer, capture } = setUp();
+      capture(1.02);
+      expect(buffer.takeNearest(1.0, 0.02, false)).toBeNull();
+    });
+
+    it("never shows a frame early at the start (nothing shown yet)", () => {
+      const { buffer, capture } = setUp();
+      capture(1.02);
+      capture(1.04);
+      expect(buffer.takeNearest(1.0, 0.02, false)).toBeNull();
+    });
+
+    it("when the due frame was never captured and the screen is behind, takes the newer frame on a tie", () => {
+      const { buffer, capture } = setUp();
+      capture(0.98);
+      capture(1.02);
+      expect(buffer.takeNearest(1.0, 0.02, true)?.mediaTimeSec).toBe(1.02);
+    });
+
+    it("takes the nearer earlier frame when the newer one is further", () => {
+      const { buffer, capture } = setUp();
+      capture(0.99);
+      capture(1.02);
+      expect(buffer.takeNearest(1.0, 0.02, true)?.mediaTimeSec).toBe(0.99);
+    });
+
+    it("never takes a frame more than one frame newer", () => {
+      const { buffer, capture } = setUp();
+      capture(1.06);
+      expect(buffer.takeNearest(1.0, 0.02, true)).toBeNull();
+    });
   });
 });

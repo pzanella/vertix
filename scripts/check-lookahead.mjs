@@ -12,7 +12,13 @@
 //
 // Usage (after `npm run build:wasm && npm run build:worker` and
 // `npm run make:bench-clips`):
-//   node scripts/check-lookahead.mjs [--only=<clip file>] [--chrome=/path/to/chrome] [--headed]
+//   node scripts/check-lookahead.mjs [--only=<clip file>] [--chrome=/path/to/chrome] [--headed] [--cpu-throttle=<rate>] [--trigger-ab]
+//
+// --cpu-throttle slows the page's CPU by that factor (DevTools CPU
+// throttling), a rough stand-in for a phone. 50 fps clips also run with
+// lookahead off and on on the other WASM build. --trigger-ab adds, per clip, a run with
+// lookahead on and VideoFrame hidden, so the cut trigger takes its bitmap
+// path (labelled "bitmap trigger").
 //
 // Timings in headless Chrome are not representative of a real device; the
 // frame counts are what this checks.
@@ -29,6 +35,8 @@ const chromePath =
   args.find((arg) => arg.startsWith("--chrome="))?.slice("--chrome=".length) ??
   "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
 const headed = args.includes("--headed");
+const triggerAb = args.includes("--trigger-ab");
+const cpuThrottle = Number(args.find((arg) => arg.startsWith("--cpu-throttle="))?.slice("--cpu-throttle=".length) ?? 1);
 const DEBUG_PORT = 9333;
 const CLIP_TIMEOUT_MS = 10 * 60 * 1000;
 
@@ -39,6 +47,7 @@ const ALL_CLIPS = [
   { file: "cross-offset.mp4", url: "/bench/cross-offset.mp4", fps: 25, knownCutsSec: [4.08, 8.12, 12.16] },
   { file: "3-speakers.mp4", url: "/samples/3-speakers.mp4", fps: 25, knownCutsSec: [] },
   { file: "2-speakers-b.mp4", url: "/samples/2-speakers-b.mp4", fps: 50, knownCutsSec: [] },
+  { file: "cross-50fps.mp4", url: "/bench/cross-50fps.mp4", fps: 50, knownCutsSec: [4.06, 8.14, 12.18] },
 ];
 const CLIPS = ONLY ? ALL_CLIPS.filter((clip) => clip.file === ONLY) : ALL_CLIPS;
 
@@ -50,7 +59,7 @@ const CLIPS = ONLY ? ALL_CLIPS.filter((clip) => clip.file === ONLY) : ALL_CLIPS;
  * - one 16:9 run (lookahead must be bypassed);
  * - a 16:9 -> 9:16 switch per build, timed.
  */
-async function runInPage(clips, extras) {
+async function runInPage(clips, extras, triggerAb) {
   const core = await import("/src/core/index.ts");
   const video = document.createElement("video");
   video.muted = false;
@@ -97,6 +106,9 @@ async function runInPage(clips, extras) {
       cutsShown: summary.cutsShown,
       sceneCuts: summary.sceneCuts,
       displayErrorMs: summary.display.errorMs,
+      clockErrorMs: summary.display.clockErrorMs,
+      clockErrorAbsMs: summary.display.clockErrorAbsMs,
+      frameOffset: summary.display.frameOffset,
       displayed: summary.display.count,
       effectiveFps: summary.effectiveFps,
       frames: summary.frames,
@@ -115,6 +127,26 @@ async function runInPage(clips, extras) {
   for (const clip of clips) {
     await run(clip, false, "clips");
     await run(clip, true, "clips");
+    if (triggerAb) {
+      const videoFrame = globalThis.VideoFrame;
+      globalThis.VideoFrame = undefined;
+      await run(clip, true, "bitmap trigger");
+      globalThis.VideoFrame = videoFrame;
+    }
+    if (clip.fps > 30) {
+      const pageBuild = core.getActiveWasmBuild();
+      const other = pageBuild.variant === "simd" ? "scalar" : "simd";
+      await core.switchWasmBuild({ variant: other, reason: "benchmark-suite" });
+      await core.runUnrecordedWarmup(engine, video, {
+        mode: "9:16",
+        lookahead: true,
+        loadSource: load(clip.url),
+        seconds: 3,
+      });
+      await run(clip, false, "clips");
+      await run(clip, true, "clips");
+      await core.switchWasmBuild(pageBuild);
+    }
   }
 
   const modeSwitches = [];
@@ -271,6 +303,7 @@ try {
     }
   });
   await cdp.send("Runtime.enable");
+  if (cpuThrottle > 1) await cdp.send("Emulation.setCPUThrottlingRate", { rate: cpuThrottle });
   await cdp.send("Page.enable");
   const loaded = new Promise((resolve) =>
     cdp.listeners.push((msg) => msg.method === "Page.loadEventFired" && resolve())
@@ -279,7 +312,7 @@ try {
   await loaded;
 
   const evaluation = cdp.send("Runtime.evaluate", {
-    expression: `(${runInPage.toString()})(${JSON.stringify(CLIPS)}, ${JSON.stringify(!ONLY)})`,
+    expression: `(${runInPage.toString()})(${JSON.stringify(CLIPS)}, ${JSON.stringify(!ONLY)}, ${JSON.stringify(triggerAb)})`,
     awaitPromise: true,
     returnByValue: true,
   });
@@ -303,6 +336,7 @@ try {
       });
     }
   }
+  if (cpuThrottle > 1) console.log(`CPU throttled ${cpuThrottle}x`);
   console.table(rows);
   console.table(
     runs.map((run) => ({
@@ -314,15 +348,26 @@ try {
       "L source": run.lookahead.lengthSource,
       "audio delay ms": run.lookahead.audioDelayMs,
       slot: run.lookahead.slotWidth ? `${run.lookahead.slotWidth}x${run.lookahead.slotHeight}` : "-",
-      "slots / MB": `${run.lookahead.allocatedSlots} / ${Math.round((run.lookahead.bufferBytes / 1048576) * 10) / 10}`,
+      "slots / MB (peak)": `${run.lookahead.allocatedSlots} / ${Math.round((run.lookahead.bufferBytes / 1048576) * 10) / 10} (${Math.round((run.lookahead.peakBufferBytes / 1048576) * 10) / 10})`,
       "overflow / skipped": `${run.lookahead.overflowDrops} / ${run.lookahead.skippedOnDisplay}`,
+      "ms at slot height": Object.entries(run.lookahead.timeAtSlotHeightMs ?? {})
+        .map(([height, ms]) => `${height}: ${Math.round(ms)}`)
+        .join(", "),
       fps: run.effectiveFps?.toFixed(1) ?? "-",
       "dropped (playback quality)": `${run.frames.playbackQualityDroppedFrames}/${run.frames.playbackQualityTotalFrames}`,
       "display err p50/p95 ms":
         run.displayErrorMs.count > 0
           ? `${run.displayErrorMs.p50.toFixed(1)}/${run.displayErrorMs.p95.toFixed(1)}`
           : "-",
-      "trigger p95 ms": run.trigger.mainThreadMs.p95?.toFixed(3) ?? "-",
+      "clock err p95 / |p95| ms":
+        run.clockErrorMs.count > 0 ? `${run.clockErrorMs.p95.toFixed(1)} / ${run.clockErrorAbsMs.p95.toFixed(1)}` : "-",
+      "frame offset p95": run.frameOffset.count > 0 ? run.frameOffset.p95.toFixed(2) : "-",
+      "trigger path": run.trigger.path ?? "-",
+      "trigger p95 ms (draw / post)":
+        run.trigger.mainThreadMs.p95 === null
+          ? "-"
+          : `${run.trigger.mainThreadMs.p95.toFixed(2)} (${run.trigger.drawMs.p95.toFixed(2)} / ${run.trigger.postMs.p95.toFixed(2)})`,
+      "trigger skipped busy": run.trigger.skippedBusy ?? "-",
       "triggered detections": run.trigger.triggeredDetections,
       "irregular gaps": `${run.detectionGaps.irregular}/${run.detectionGaps.pairs}`,
       "detect p95 ms": run.detectionTotalMs.p95?.toFixed(1) ?? "-",
@@ -353,7 +398,7 @@ try {
   writeFileSync(
     join(root, ".eval/lookahead-check.json"),
     JSON.stringify(
-      { checkedAt: new Date().toISOString(), runs, modeSwitches, activeSpeakerAgreement: agreement },
+      { checkedAt: new Date().toISOString(), cpuThrottle, runs, modeSwitches, activeSpeakerAgreement: agreement },
       null,
       2
     )

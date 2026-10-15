@@ -1,3 +1,4 @@
+import { avClockErrorsMs } from "./avClock";
 import {
   EMPTY_SUMMARY,
   deltas,
@@ -18,7 +19,14 @@ export type DetectionPath = "worker" | "main-thread";
  * is a plain number (or a string literal), so a call never allocates.
  */
 export interface BenchmarkProbe {
-  recordFrame(nowMs: number, workMs: number, mediaTimeSec: number, presentedFrames: number): void;
+  /** One frame callback; `expectedDisplayMs` is when the video element shows that frame (rVFC expectedDisplayTime). */
+  recordFrame(
+    nowMs: number,
+    workMs: number,
+    mediaTimeSec: number,
+    presentedFrames: number,
+    expectedDisplayMs?: number
+  ): void;
   recordDetection(
     path: DetectionPath,
     downscaleMs: number,
@@ -43,15 +51,32 @@ export interface BenchmarkProbe {
   /** A detection was due on this frame but skipped because the previous one had not returned yet. */
   recordSkippedDetection(): void;
   recordLayoutChange(nowMs: number): void;
-  /** Main-thread time spent sending one frame to the cut trigger (lookahead only): in total, scaling it (drawImage + transfer), and posting it. */
-  recordTriggerCost(mainThreadMs: number, drawMs?: number, postMs?: number): void;
+  /**
+   * Main-thread time spent sending one frame to the cut trigger (lookahead
+   * only): in total, preparing it (a VideoFrame, or drawImage + transfer of
+   * a small copy), and posting it; and which of the two paths it took.
+   */
+  recordTriggerCost(mainThreadMs: number, drawMs?: number, postMs?: number, path?: TriggerPath): void;
+  /** A frame not sent to the cut trigger because the previous VideoFrame was still in the worker. */
+  recordTriggerSkippedBusy(): void;
   /**
    * A frame was drawn on the output canvas. `errorMs` (lookahead only) is
    * when it reaches the screen minus when it should (its own display time +
    * the lookahead): the video side of the audio/video offset, since the
-   * audio delay is sample-exact. NaN without lookahead.
+   * audio delay is sample-exact. NaN without lookahead. `onScreenAtMs`:
+   * when it reaches the screen; `delayMs`: the lookahead it is shown
+   * behind (0 without); `frameOffset` (lookahead only): frames between the
+   * due frame and this one, positive when this one is older.
    */
-  recordDisplay(nowMs: number, mediaTimeSec: number, workMs: number, errorMs: number): void;
+  recordDisplay(
+    nowMs: number,
+    mediaTimeSec: number,
+    workMs: number,
+    errorMs: number,
+    onScreenAtMs?: number,
+    delayMs?: number,
+    frameOffset?: number
+  ): void;
   /** A hard-cut decision for the frame at `cutMediaTimeSec` was applied on the displayed frame at `shownMediaTimeSec`. */
   recordCutShown(nowMs: number, cutMediaTimeSec: number, shownMediaTimeSec: number, source: CutSource): void;
 }
@@ -154,15 +179,34 @@ export interface DisplaySummary {
   count: number;
   /** Lookahead only: screen time minus due time per displayed frame (the video side of the A/V offset). */
   errorMs: SampleSummary;
+  /**
+   * Added within v5, with and without lookahead: screen time minus when
+   * the frame's audio is heard, against a steady clock fitted to the
+   * video element's display times (see avClock.ts). Without lookahead it
+   * is the video element's own jitter, the baseline.
+   */
+  clockErrorMs: SampleSummary;
+  /** Added within v5: clockErrorMs as absolute values. */
+  clockErrorAbsMs: SampleSummary;
+  /** Added within v5, lookahead only: frames between the due frame and the one shown (positive: older; 0 is exact). */
+  frameOffset: SampleSummary;
   /** Render cost of one displayed frame (with lookahead: in the display loop, apart from frameWorkMs). */
   workMs: SampleSummary;
 }
 
+/** How a frame reached the cut trigger: the decoded frame as a VideoFrame, or a scaled bitmap of the buffered copy. */
+export type TriggerPath = "videoframe" | "bitmap";
+const TRIGGER_PATHS: TriggerPath[] = ["videoframe", "bitmap"];
+
 export interface TriggerSummary {
   count: number;
+  /** Added within v5: the path the measured frames took ("mixed" if both). */
+  path: TriggerPath | "mixed" | null;
+  /** Added within v5: frames not scored because the previous VideoFrame was still in the worker. */
+  skippedBusy: number;
   /** Main-thread cost per frame: scaling the buffered frame and posting it to the trigger worker. */
   mainThreadMs: SampleSummary;
-  /** The two parts of mainThreadMs: drawImage into the small canvas + transferToImageBitmap, and postMessage. Added within v5. */
+  /** The two parts of mainThreadMs: preparing the frame (new VideoFrame, or drawImage into the small canvas + transferToImageBitmap), and postMessage. Added within v5. */
   drawMs: SampleSummary;
   postMs: SampleSummary;
   /** Detections dispatched by the trigger instead of the regular tick. */
@@ -215,6 +259,8 @@ export interface BenchmarkClipRaw {
     workMs: number[];
     mediaTimeSec: number[];
     presentedFrames: number[];
+    /** Added within v5: rVFC expectedDisplayTime. */
+    expectedDisplayMs: number[];
     warmup: number[];
   };
   detections: {
@@ -243,9 +289,20 @@ export interface BenchmarkClipRaw {
     resolvedCx: number[];
   };
   /** Schema v5. */
-  displays: { nowMs: number[]; mediaTimeSec: number[]; workMs: number[]; errorMs: number[]; warmup: number[] };
+  displays: {
+    nowMs: number[];
+    mediaTimeSec: number[];
+    workMs: number[];
+    errorMs: number[];
+    /** Added within v5. */
+    onScreenAtMs: number[];
+    delayMs: number[];
+    frameOffset: number[];
+    clockErrorMs: number[];
+    warmup: number[];
+  };
   cutsShown: { nowMs: number[]; cutMediaTimeSec: number[]; shownMediaTimeSec: number[]; source: CutSource[] };
-  triggers: { mainThreadMs: number[]; drawMs: number[]; postMs: number[]; warmup: number[] };
+  triggers: { mainThreadMs: number[]; drawMs: number[]; postMs: number[]; path: TriggerPath[]; warmup: number[] };
   skippedDetections: { mediaTimeSec: number[]; warmup: number[] };
   layoutChanges: { nowMs: number[]; mediaTimeSec: number[]; warmup: number[] };
   longTasks: { startTimeMs: number[]; durationMs: number[]; warmup: number[] };
@@ -276,6 +333,12 @@ export interface BenchmarkLookahead {
   overflowDrops: number;
   /** Added within v5: frames passed over on display, following a skipped frame callback or a shrinking delay. */
   skippedOnDisplay: number;
+  /** Added within v5: frame-copy height changes, `{ mediaTimeSec, height, reason }`. */
+  slotHeightChanges: { mediaTimeSec: number; height: number; reason: string }[];
+  /** Added within v5: wall time at each frame-copy height, in ms, keyed by height. */
+  timeAtSlotHeightMs: Record<string, number>;
+  /** Added within v5: most frame-buffer memory used at once (RGBA estimate), within the 96 MiB budget. */
+  peakBufferBytes: number;
 }
 
 export interface BenchmarkClipResult {
@@ -330,6 +393,7 @@ export class BenchmarkRecorder implements BenchmarkProbe {
   private readonly frameWork: Float64Array;
   private readonly frameMediaTime: Float64Array;
   private readonly framePresented: Float64Array;
+  private readonly frameExpectedDisplay: Float64Array;
   private readonly frameWarmup: Uint8Array;
   private frameCount = 0;
   private frameOverflow = 0;
@@ -361,6 +425,9 @@ export class BenchmarkRecorder implements BenchmarkProbe {
   private readonly displayMediaTime: Float64Array;
   private readonly displayWork: Float64Array;
   private readonly displayError: Float64Array;
+  private readonly displayOnScreen: Float64Array;
+  private readonly displayDelay: Float64Array;
+  private readonly displayFrameOffset: Float64Array;
   private readonly displayWarmup: Uint8Array;
   private displayCount = 0;
 
@@ -373,8 +440,10 @@ export class BenchmarkRecorder implements BenchmarkProbe {
   private readonly triggerCost: Float64Array;
   private readonly triggerDraw: Float64Array;
   private readonly triggerPost: Float64Array;
+  private readonly triggerPath: Uint8Array;
   private readonly triggerWarmup: Uint8Array;
   private triggerCount = 0;
+  private triggerSkippedBusy = 0;
 
   private readonly skippedMediaTime: Float64Array;
   private readonly skippedWarmup: Uint8Array;
@@ -412,15 +481,20 @@ export class BenchmarkRecorder implements BenchmarkProbe {
     this.frameWork = new Float64Array(frameCapacity);
     this.frameMediaTime = new Float64Array(frameCapacity);
     this.framePresented = new Float64Array(frameCapacity);
+    this.frameExpectedDisplay = new Float64Array(frameCapacity);
     this.frameWarmup = new Uint8Array(frameCapacity);
     this.displayNow = new Float64Array(frameCapacity);
     this.displayMediaTime = new Float64Array(frameCapacity);
     this.displayWork = new Float64Array(frameCapacity);
     this.displayError = new Float64Array(frameCapacity);
+    this.displayOnScreen = new Float64Array(frameCapacity);
+    this.displayDelay = new Float64Array(frameCapacity);
+    this.displayFrameOffset = new Float64Array(frameCapacity);
     this.displayWarmup = new Uint8Array(frameCapacity);
     this.triggerCost = new Float64Array(frameCapacity);
     this.triggerDraw = new Float64Array(frameCapacity);
     this.triggerPost = new Float64Array(frameCapacity);
+    this.triggerPath = new Uint8Array(frameCapacity);
     this.triggerWarmup = new Uint8Array(frameCapacity);
 
     const detectionCapacity = Math.ceil(frameCapacity / 2);
@@ -457,7 +531,13 @@ export class BenchmarkRecorder implements BenchmarkProbe {
     }
   }
 
-  recordFrame(nowMs: number, workMs: number, mediaTimeSec: number, presentedFrames: number): void {
+  recordFrame(
+    nowMs: number,
+    workMs: number,
+    mediaTimeSec: number,
+    presentedFrames: number,
+    expectedDisplayMs = NaN
+  ): void {
     if (this.finished) return;
     if (this.warmupEndMediaTime === null) this.warmupEndMediaTime = mediaTimeSec + this.warmupSec;
     this.inWarmup = mediaTimeSec < this.warmupEndMediaTime;
@@ -476,6 +556,7 @@ export class BenchmarkRecorder implements BenchmarkProbe {
     this.frameWork[i] = workMs;
     this.frameMediaTime[i] = mediaTimeSec;
     this.framePresented[i] = presentedFrames;
+    this.frameExpectedDisplay[i] = expectedDisplayMs;
     this.frameWarmup[i] = this.inWarmup ? 1 : 0;
     this.frameCount = i + 1;
   }
@@ -540,7 +621,15 @@ export class BenchmarkRecorder implements BenchmarkProbe {
     this.skippedCount = i + 1;
   }
 
-  recordDisplay(nowMs: number, mediaTimeSec: number, workMs: number, errorMs: number): void {
+  recordDisplay(
+    nowMs: number,
+    mediaTimeSec: number,
+    workMs: number,
+    errorMs: number,
+    onScreenAtMs = NaN,
+    delayMs = 0,
+    frameOffset = NaN
+  ): void {
     if (this.finished) return;
     const i = this.displayCount;
     if (i >= this.displayNow.length) {
@@ -551,6 +640,9 @@ export class BenchmarkRecorder implements BenchmarkProbe {
     this.displayMediaTime[i] = mediaTimeSec;
     this.displayWork[i] = workMs;
     this.displayError[i] = errorMs;
+    this.displayOnScreen[i] = onScreenAtMs;
+    this.displayDelay[i] = delayMs;
+    this.displayFrameOffset[i] = frameOffset;
     this.displayWarmup[i] = this.warmupEndMediaTime !== null && mediaTimeSec < this.warmupEndMediaTime ? 1 : 0;
     this.displayCount = i + 1;
   }
@@ -569,7 +661,7 @@ export class BenchmarkRecorder implements BenchmarkProbe {
     this.cutShownCount = i + 1;
   }
 
-  recordTriggerCost(mainThreadMs: number, drawMs = NaN, postMs = NaN): void {
+  recordTriggerCost(mainThreadMs: number, drawMs = NaN, postMs = NaN, path: TriggerPath = "bitmap"): void {
     if (this.finished) return;
     const i = this.triggerCount;
     if (i >= this.triggerCost.length) {
@@ -579,8 +671,14 @@ export class BenchmarkRecorder implements BenchmarkProbe {
     this.triggerCost[i] = mainThreadMs;
     this.triggerDraw[i] = drawMs;
     this.triggerPost[i] = postMs;
+    this.triggerPath[i] = TRIGGER_PATHS.indexOf(path);
     this.triggerWarmup[i] = this.inWarmup ? 1 : 0;
     this.triggerCount = i + 1;
+  }
+
+  recordTriggerSkippedBusy(): void {
+    if (this.finished || this.inWarmup) return;
+    this.triggerSkippedBusy += 1;
   }
 
   recordLayoutChange(nowMs: number): void {
@@ -687,6 +785,7 @@ export class BenchmarkRecorder implements BenchmarkProbe {
     const measuredDisplay = (i: number) => this.displayWarmup[i] === 0;
     const measuredTrigger = (i: number) => this.triggerWarmup[i] === 0;
     const displayCount = this.displayCount;
+    const measuredClockErrors = selectWhere(this.clockErrors(), measuredDisplay);
     let triggeredDetections = 0;
     for (let i = 0; i < detectionCount; i++) if (this.detectionTriggered[i] === 1) triggeredDetections += 1;
 
@@ -724,10 +823,15 @@ export class BenchmarkRecorder implements BenchmarkProbe {
       display: {
         count: selectWhere(this.displayMediaTime.subarray(0, displayCount), measuredDisplay).length,
         errorMs: summarize(selectWhere(this.displayError.subarray(0, displayCount), measuredDisplay)),
+        clockErrorMs: summarize(measuredClockErrors),
+        clockErrorAbsMs: summarize(measuredClockErrors.map(Math.abs)),
+        frameOffset: summarize(selectWhere(this.displayFrameOffset.subarray(0, displayCount), measuredDisplay)),
         workMs: summarize(selectWhere(this.displayWork.subarray(0, displayCount), measuredDisplay)),
       },
       trigger: {
         count: this.triggerCount,
+        path: this.measuredTriggerPath(),
+        skippedBusy: this.triggerSkippedBusy,
         mainThreadMs: summarize(selectWhere(this.triggerCost.subarray(0, this.triggerCount), measuredTrigger)),
         drawMs: summarize(selectWhere(this.triggerDraw.subarray(0, this.triggerCount), measuredTrigger)),
         postMs: summarize(selectWhere(this.triggerPost.subarray(0, this.triggerCount), measuredTrigger)),
@@ -747,6 +851,29 @@ export class BenchmarkRecorder implements BenchmarkProbe {
         longTasks: this.longTaskOverflow,
       },
     };
+  }
+
+  private clockErrors(): number[] {
+    const displays = [];
+    for (let i = 0; i < this.displayCount; i++) {
+      displays.push({
+        mediaTimeSec: this.displayMediaTime[i],
+        onScreenAtMs: this.displayOnScreen[i],
+        delayMs: this.displayDelay[i],
+      });
+    }
+    return avClockErrorsMs(
+      this.frameMediaTime.subarray(0, this.frameCount),
+      this.frameExpectedDisplay.subarray(0, this.frameCount),
+      displays
+    );
+  }
+
+  private measuredTriggerPath(): TriggerPath | "mixed" | null {
+    const used = new Set<number>();
+    for (let i = 0; i < this.triggerCount; i++) if (this.triggerWarmup[i] === 0) used.add(this.triggerPath[i]);
+    if (used.size === 0) return null;
+    return used.size > 1 ? "mixed" : TRIGGER_PATHS[[...used][0]];
   }
 
   /** Displayed frames with media time in [fromSec, toSec). */
@@ -873,6 +1000,7 @@ export class BenchmarkRecorder implements BenchmarkProbe {
         workMs: toArray(this.frameWork, f),
         mediaTimeSec: toArray(this.frameMediaTime, f),
         presentedFrames: toArray(this.framePresented, f),
+        expectedDisplayMs: toArray(this.frameExpectedDisplay, f),
         warmup: toArray(this.frameWarmup, f),
       },
       detections: {
@@ -902,6 +1030,10 @@ export class BenchmarkRecorder implements BenchmarkProbe {
         mediaTimeSec: toArray(this.displayMediaTime, this.displayCount),
         workMs: toArray(this.displayWork, this.displayCount),
         errorMs: toArray(this.displayError, this.displayCount),
+        onScreenAtMs: toArray(this.displayOnScreen, this.displayCount),
+        delayMs: toArray(this.displayDelay, this.displayCount),
+        frameOffset: toArray(this.displayFrameOffset, this.displayCount),
+        clockErrorMs: this.clockErrors(),
         warmup: toArray(this.displayWarmup, this.displayCount),
       },
       cutsShown: {
@@ -914,6 +1046,7 @@ export class BenchmarkRecorder implements BenchmarkProbe {
         mainThreadMs: toArray(this.triggerCost, this.triggerCount),
         drawMs: toArray(this.triggerDraw, this.triggerCount),
         postMs: toArray(this.triggerPost, this.triggerCount),
+        path: toArray(this.triggerPath, this.triggerCount).map((p) => TRIGGER_PATHS[p]),
         warmup: toArray(this.triggerWarmup, this.triggerCount),
       },
       skippedDetections: {

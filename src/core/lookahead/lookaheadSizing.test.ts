@@ -63,6 +63,11 @@ describe("chooseSlotSize", () => {
     expect(chooseSlotSize(1920, 1080, slotsForDelay(13), null).height).toBe(720);
   });
 
+  it("applies a height cap", () => {
+    expect(chooseSlotSize(1280, 720, slotsForDelay(8), null, 540)).toMatchObject({ width: 960, height: 540 });
+    expect(chooseSlotSize(640, 360, slotsForDelay(8), null, 540)).toMatchObject({ width: 640, height: 360 });
+  });
+
   it("never upscales", () => {
     expect(chooseSlotSize(640, 360, slotsForDelay(15), 2000)).toMatchObject({ width: 640, height: 360 });
   });

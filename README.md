@@ -63,8 +63,9 @@ manual pixel copying.
 - **Stable camera** — a dead zone plus smoothing means the crop only moves
   for a real, intentional reposition, not every small gesture.
 - **Smooth transitions** — layout changes (single → split → b-roll, ...)
-  cross-dissolve instead of cutting instantly. After a hard cut in the
-  source video, the crop snaps to the new shot instead.
+  cross-dissolve instead of cutting instantly, between two crops of the
+  live frame. After a hard cut in the source video, the crop snaps to the
+  new shot instead.
 - **Live analytics dashboard** — frame callback rate, detection confidence,
   motion activity, frame interval, detection-worker latency, and main-thread
   stalls, each with a live trend chart.

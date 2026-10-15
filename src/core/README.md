@@ -60,6 +60,7 @@ engine.destroy();
 | `getMetrics()` / `getState()` | Read the current snapshot without subscribing. |
 | `setLookaheadEnabled(enabled)` | Lookahead on or off (default) at runtime: see [Lookahead](#lookahead). |
 | `getLookaheadStatus()` | Whether lookahead runs, its length, why it is unavailable, buffer size and memory. |
+| `setFrameRateHint(fps)` | Optional: the source's frame rate when the host knows it (e.g. Shaka's active variant), so the lookahead length and buffer are right from the first frame. Measured intervals take over; `null` clears it. |
 | `getDisplayedMediaTime()` | Media time of the frame on screen (behind `video.currentTime` by the lookahead while playing). |
 | `setBenchmarkProbe(probe \| null)` | Benchmark mode only: report per-frame and per-detection timings to a `BenchmarkProbe` (e.g. a `BenchmarkRecorder`). `null` (the default) turns it off. See `docs/benchmark.md`. |
 
@@ -125,7 +126,11 @@ score of at least 0.12 that is also 3x its recent median, and at least
 count at once and snaps the crop. Within a stable layout, individual
 crops move only past a dead zone, then glide; the full layout decision
 never reruns, except when the active speaker switches to someone far
-away, which cross-dissolves instead of panning. This two-layer design, a stable layout plus independently-smoothed
+away, which cross-dissolves instead of panning. A cross-dissolve blends
+the old crop rects into the new ones, both cut from the frame being drawn
+(never a still of an earlier frame), so it can never mix two scenes; a
+cut during one snaps. A new source clears the canvas, the buffer and the
+crop state. This two-layer design, a stable layout plus independently-smoothed
 positions within it, came out of several rounds of tuning against real
 footage. If camera movement still feels off, look at the constants in
 `layoutEngine.ts` (`PANE_SMOOTHING_TAU_SEC`), `VertixEngine.ts`
@@ -159,15 +164,33 @@ dissolve or a layout change lands on the frame it belongs to.
   (`lookahead/delaySchedule.ts`, at most a 5% speed change), with no flush.
 - **Frame copies**: the frames the delay needs plus 2, at the largest size
   (never above the source, never above 1.5× the output canvas height on
-  screen) at which they fit 96 MiB. The pool grows or shrinks with the
-  delay without dropping frames. Copies are drawn from the video
+  screen) at which they fit 96 MiB. The frame rate is the smallest
+  recurring step between frame callbacks (skipped callbacks only add
+  longer steps); until it is measured (or hinted with
+  `setFrameRateHint`) the pool may hold the delay at 60 fps. Slots are
+  created on demand, so a generous limit costs nothing. The pool grows or
+  shrinks with the delay or the frame rate without dropping frames; when
+  it needs a smaller copy size, new slots get it and old-size slots are
+  freed as their frames are shown. Old-size slots still count against the
+  budget: when they leave no room for a new slot, the oldest waiting frame
+  is dropped (counted in `overflowDrops`) rather than going over it. Above 30 fps, while the video element drops more than 5% of
+  its frames over 3 s or the buffer overflows, new copies are 540 lines
+  high; full height returns after 10 s under 2%
+  (`lookahead/slotHeightGovernor.ts`). Copies are drawn from the video
   synchronously, so no decoder frame is held.
-- **Cut trigger**: every buffered frame is scaled on the GPU to 160×120
-  and transferred (no readback on the main thread) to
-  `cutTriggerWorker.ts`, which scores it at 64×48; a likely cut starts a
-  detection on that frame at once instead of at the next 5-frame tick. The WASM detector still
-  decides. A cut found on a regular tick is moved back to the frame with
-  the biggest frame-to-frame jump.
+- **Cut trigger**: every buffered frame (above 30 fps, at most every
+  second frame) goes to `cutTriggerWorker.ts`, which scores it at 64×48;
+  a likely cut starts a detection on that frame at once instead of at the
+  next 5-frame tick. The frame is sent as a `VideoFrame` of the video (no
+  draw on the main thread; the worker scales it on the GPU, reads back
+  160×120 and closes it, also on errors), at most one at a time so no
+  decoder frame is held; if the source cannot be wrapped (cross-origin
+  without CORS) or the worker cannot draw it, the buffered copy is scaled
+  on the GPU to 160×120 and transferred instead. No readback on the main
+  thread either way. Scores carry the generation of the last reset (seek,
+  mode change, new source), so late ones from before it are ignored. The
+  WASM detector still decides. A cut found on a regular tick is moved
+  back to the frame with the biggest frame-to-frame jump.
 - **Unavailable**: without a Web Audio graph (the element's own audio
   could not be delayed), or for a cross-origin source without CORS (a
   tainted canvas, or exact silence for 3 s from a cross-origin element

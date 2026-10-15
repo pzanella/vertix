@@ -40,38 +40,77 @@ vi.mock("./audioActivity", () => ({
   },
 }));
 
-const fake2dContext = () => ({
-  drawImage() {},
-  clearRect() {},
+/** Every drawImage / clearRect on any canvas: onto what, from what, at which alpha. */
+interface DrawEntry {
+  target: object;
+  source?: object;
+  alpha?: number;
+  clear?: boolean;
+}
+const drawLog: DrawEntry[] = [];
+
+const fake2dContext = (target: object) => ({
+  drawImage(source: object) {
+    drawLog.push({ target, source, alpha: this.globalAlpha });
+  },
+  clearRect() {
+    drawLog.push({ target, clear: true });
+  },
   getImageData: () => ({ data: new Uint8ClampedArray(4) }),
   filter: "none",
   globalAlpha: 1,
+  imageSmoothingQuality: "low",
 });
 
 vi.stubGlobal(
   "OffscreenCanvas",
   class {
+    private ctx: ReturnType<typeof fake2dContext> | null = null;
     constructor(
       public width: number,
       public height: number
     ) {}
     getContext() {
-      return fake2dContext();
+      return (this.ctx ??= fake2dContext(this));
     }
     transferToImageBitmap() {
       return { close() {} };
     }
   }
 );
+interface WorkerMessage {
+  type: string;
+  generation?: number;
+  frameId?: number;
+  source?: unknown;
+}
+const workerMessages: WorkerMessage[] = [];
+const workers: { onmessage: ((e: { data: unknown }) => void) | null }[] = [];
 vi.stubGlobal(
   "Worker",
   class {
     onmessage = null;
     onerror = null;
-    postMessage() {}
+    constructor() {
+      workers.push(this);
+    }
+    postMessage(message: WorkerMessage) {
+      workerMessages.push(message);
+    }
     terminate() {}
   }
 );
+
+class FakeVideoFrame {
+  static throwOnCreate = false;
+  closed = false;
+  constructor() {
+    if (FakeVideoFrame.throwOnCreate) throw new DOMException("tainted", "SecurityError");
+  }
+  close() {
+    this.closed = true;
+  }
+}
 vi.stubGlobal("createImageBitmap", () => new Promise(() => {}));
 
 // Manual requestAnimationFrame: runRefresh() runs what is pending, like one screen refresh.
@@ -102,6 +141,9 @@ class FakeVideo {
   mediaTime = 0;
   clockMs = 0;
   presented = 0;
+  droppedVideoFrames = 0;
+  /** Share of frames the video element reports as dropped (getVideoPlaybackQuality). */
+  dropShare = 0;
   private nextId = 1;
   private readonly pending = new Map<number, FrameCallback>();
   private readonly listeners = new Map<string, Set<() => void>>();
@@ -133,8 +175,23 @@ class FakeVideo {
     return this.mediaTime;
   }
 
+  /** Like Chrome's VideoPlaybackQuality: the fields are getters on the prototype. */
+  getVideoPlaybackQuality() {
+    const dropped = this.droppedVideoFrames;
+    const total = this.presented;
+    return new (class {
+      get droppedVideoFrames() {
+        return dropped;
+      }
+      get totalVideoFrames() {
+        return total;
+      }
+    })();
+  }
+
   /** Advances one frame without running any frame callback (a dropped frame / skipped callback). */
   skipFrame(): void {
+    this.droppedVideoFrames += this.dropShare;
     this.mediaTime = Math.round((this.mediaTime + 1 / this.fps) * 1e6) / 1e6;
     this.clockMs += 1000 / this.fps / this.playbackRate;
     this.presented += 1;
@@ -159,6 +216,8 @@ interface EngineInternals {
   scoredFrames: ScoredFrame[];
   detectionLatency: DetectionLatencyTracker;
   adoptMeasuredLength(build: string): void;
+  rampLookaheadLength(delay: { frames: number; lengthMs: number }): void;
+  decisions: { push(decision: object): void };
   frameBuffer: { maxSlots: number; allocatedSlots: number } | null;
   processDetectionResult(
     facesFlat: Float64Array,
@@ -186,6 +245,7 @@ function cutProbe() {
     recordSkippedDetection: noop,
     recordLayoutChange: noop,
     recordTriggerCost: noop,
+    recordTriggerSkippedBusy: noop,
     recordDisplay: noop,
     recordCutShown: (_now, cutMediaTimeSec, shownMediaTimeSec, source) =>
       cuts.push({ cutMediaTimeSec, shownMediaTimeSec, source }),
@@ -198,7 +258,30 @@ const CUT: SceneCutScores = { hist: 0.5, grid: 0.5, isCut: true };
 const NO_CUT: SceneCutScores = { hist: 0, grid: 0, isCut: false };
 
 function fakeCanvas(): HTMLCanvasElement & { width: number } {
-  return { width: 0, height: 0, clientHeight: 0, getContext: fake2dContext } as unknown as HTMLCanvasElement;
+  const canvas = { width: 0, height: 0, clientHeight: 0 } as { getContext?: () => object };
+  const ctx = fake2dContext(canvas);
+  canvas.getContext = () => ctx;
+  return canvas as unknown as HTMLCanvasElement;
+}
+
+/**
+ * What the output canvas was drawn from since log index `from`: the single
+ * frame source (the video, or a buffered copy), and whether everything else
+ * drawn onto it was redrawn from that same source within the same span
+ * (the blurred background). Also whether anything was blended in.
+ */
+function outputSince(canvas: object, from: number) {
+  const entries = drawLog.slice(from);
+  const onOutput = entries.filter((e) => e.target === canvas && e.source);
+  const redrawnFrom = new Map(entries.filter((e) => e.target !== canvas && e.source).map((e) => [e.target, e.source]));
+  const frameSources = new Set(
+    onOutput.map((e) => (redrawnFrom.has(e.source!) ? redrawnFrom.get(e.source!) : e.source))
+  );
+  return {
+    frameSources,
+    blended: onOutput.some((e) => (e.alpha ?? 1) < 1),
+    cleared: entries.some((e) => e.target === canvas && e.clear),
+  };
 }
 
 function setUp({ lookahead = true } = {}) {
@@ -282,6 +365,26 @@ describe("VertixEngine lookahead", () => {
     engine.destroy();
   });
 
+  it("when the due frame was never captured and the screen would fall behind, shows the next frame, never going back", () => {
+    const { engine, video, play } = setUp();
+    const { delayFrames } = engine.getLookaheadStatus();
+    play(delayFrames + 5);
+    // Frame X's callback is skipped, and so is the one that would have shown the frame before X.
+    video.skipFrame();
+    const missingSec = video.mediaTime;
+    play(delayFrames - 2);
+    video.skipFrame();
+    play(1);
+    expect(us(video.mediaTime - delayFrames / 25)).toBe(us(missingSec));
+    // Not the frame before X (a frame late): the one after it (a frame early).
+    expect(us(engine.getDisplayedMediaTime())).toBe(us(missingSec + 1 / 25));
+    play(1);
+    expect(us(engine.getDisplayedMediaTime())).toBe(us(missingSec + 1 / 25));
+    play(1);
+    expect(us(engine.getDisplayedMediaTime())).toBe(us(video.mediaTime - delayFrames / 25));
+    engine.destroy();
+  });
+
   it("follows a frame-rate change with a ramp: no flush, never backwards, then whole frames of the new rate", () => {
     const { engine, video, play } = setUp();
     play(30);
@@ -325,6 +428,189 @@ describe("VertixEngine lookahead", () => {
     expect(us(engine.getDisplayedMediaTime())).toBe(us(video.mediaTime - after.delayFrames / 25));
     expect(engine.getLookaheadStatus().droppedFrames).toBe(0);
     engine.destroy();
+  });
+
+  it("at 50 fps from the first frame, sizes the pool for 50 fps and never overflows", () => {
+    const { engine, video, internals, play } = setUp();
+    video.fps = 50;
+    play(200);
+    const status = engine.getLookaheadStatus();
+    expect(status.lengthMs).toBe(status.delayFrames * 20);
+    expect(internals.frameBuffer!.maxSlots).toBe(slotsForDelay(status.delayFrames));
+    expect(status.overflowDrops).toBe(0);
+    engine.destroy();
+  });
+
+  it("at 50 fps with most frame callbacks skipped, still measures 50 fps and never overflows", () => {
+    const { engine, video, play } = setUp();
+    video.fps = 50;
+    for (let i = 0; i < 150; i++) {
+      for (let skip = i % 3; skip > 0; skip--) video.skipFrame();
+      play(1);
+    }
+    const status = engine.getLookaheadStatus();
+    expect(status.lengthMs).toBe(status.delayFrames * 20);
+    expect(status.overflowDrops).toBe(0);
+    expect(us(engine.getDisplayedMediaTime())).toBeGreaterThanOrEqual(
+      us(video.mediaTime - status.delayFrames / 50 - 0.02)!
+    );
+    engine.destroy();
+  });
+
+  it("uses the host's frame-rate hint from the first frame", () => {
+    const { engine, video, internals, play } = setUp({ lookahead: false });
+    engine.setFrameRateHint(50);
+    engine.setLookaheadEnabled(true);
+    const { lengthMs, delayFrames } = engine.getLookaheadStatus();
+    expect(lengthMs).toBe(delayFrames * 20);
+    video.fps = 50;
+    play(1);
+    expect(internals.frameBuffer!.maxSlots).toBe(slotsForDelay(delayFrames));
+    play(100);
+    expect(engine.getLookaheadStatus()).toMatchObject({ lengthMs, delayFrames, overflowDrops: 0 });
+    engine.destroy();
+  });
+
+  it("before the frame rate is known, lets the pool hold the delay at 60 fps", () => {
+    const { engine, internals, play } = setUp();
+    play(1);
+    const { lengthMs } = engine.getLookaheadStatus();
+    expect(internals.frameBuffer!.maxSlots).toBe(slotsForDelay(Math.ceil(lengthMs / (1000 / 60))));
+    engine.destroy();
+  });
+
+  it("grows the pool when the same length becomes more frames", () => {
+    const { engine, internals, play } = setUp();
+    play(20);
+    const { lengthMs, delayFrames } = engine.getLookaheadStatus();
+    internals.rampLookaheadLength({ frames: delayFrames * 2, lengthMs });
+    expect(internals.frameBuffer!.maxSlots).toBe(slotsForDelay(delayFrames * 2));
+    expect(audio.rampOutputDelay).not.toHaveBeenCalled();
+    engine.destroy();
+  });
+
+  it("at 50 fps, reduces the copies to 540 lines while the video element drops frames, and logs it", () => {
+    const { engine, video, play } = setUp();
+    video.fps = 50;
+    play(100);
+    expect(engine.getLookaheadStatus().slotHeight).toBe(720);
+    const skippedBefore = engine.getLookaheadStatus().skippedOnDisplay;
+    video.dropShare = 0.1;
+    play(250);
+    const status = engine.getLookaheadStatus();
+    expect(status.slotHeight).toBe(540);
+    expect(status.slotHeightChanges).toEqual([{ mediaTimeSec: expect.any(Number), height: 540, reason: "drops" }]);
+    expect(status.timeAtSlotHeightMs[720]).toBeGreaterThan(2000);
+    expect(status.timeAtSlotHeightMs[540]).toBeGreaterThan(0);
+    // The switch itself loses no frame.
+    expect(status.overflowDrops).toBe(0);
+    expect(status.skippedOnDisplay).toBe(skippedBefore);
+    engine.destroy();
+  });
+
+  it("keeps full-size copies at 25 fps even while frames are dropped", () => {
+    const { engine, video, play } = setUp();
+    video.dropShare = 0.2;
+    play(300);
+    expect(engine.getLookaheadStatus()).toMatchObject({ slotHeight: 720, slotHeightChanges: [] });
+    engine.destroy();
+  });
+
+  it("sends every frame to the cut trigger up to 30 fps, every second frame above", () => {
+    const { engine, video, play } = setUp();
+    const scored = () => workerMessages.filter((m) => m.type === "score").length;
+    play(20);
+    let before = scored();
+    play(40);
+    expect(scored() - before).toBe(40);
+    video.fps = 50;
+    play(20);
+    before = scored();
+    play(40);
+    expect(scored() - before).toBe(20);
+    engine.destroy();
+  });
+
+  describe("cut trigger", () => {
+    const scoreMessages = () => workerMessages.filter((m) => m.type === "score");
+    const reply = (message: WorkerMessage, extra: object = {}) =>
+      workers.at(-1)!.onmessage!({
+        data: {
+          type: "score",
+          generation: message.generation,
+          frameId: message.frameId,
+          wasVideoFrame: message.source instanceof FakeVideoFrame,
+          failed: false,
+          hist: 0,
+          grid: 0,
+          triggered: false,
+          ...extra,
+        },
+      });
+    beforeEach(() => {
+      workerMessages.length = 0;
+      FakeVideoFrame.throwOnCreate = false;
+      vi.stubGlobal("VideoFrame", FakeVideoFrame);
+    });
+    afterEach(() => vi.stubGlobal("VideoFrame", undefined));
+
+    it("sends the decoded frame as a VideoFrame, one at a time", () => {
+      const { engine, play } = setUp();
+      let skippedBusy = 0;
+      const { probe } = cutProbe();
+      engine.setBenchmarkProbe({ ...probe, recordTriggerSkippedBusy: () => (skippedBusy += 1) });
+      play(3);
+      expect(scoreMessages()).toHaveLength(1);
+      expect(scoreMessages()[0].source).toBeInstanceOf(FakeVideoFrame);
+      expect(skippedBusy).toBe(2);
+      reply(scoreMessages()[0]);
+      play(1);
+      expect(scoreMessages()).toHaveLength(2);
+      engine.destroy();
+    });
+
+    it("falls back to the buffered copy when the video cannot be wrapped (cross-origin), until the next source", () => {
+      const { engine, video, play } = setUp();
+      FakeVideoFrame.throwOnCreate = true;
+      play(3);
+      expect(scoreMessages()).toHaveLength(3);
+      expect(scoreMessages().every((m) => !(m.source instanceof FakeVideoFrame))).toBe(true);
+      FakeVideoFrame.throwOnCreate = false;
+      play(1);
+      expect(scoreMessages().at(-1)!.source).not.toBeInstanceOf(FakeVideoFrame);
+      video.emit("loadedmetadata");
+      play(1);
+      expect(scoreMessages().at(-1)!.source).toBeInstanceOf(FakeVideoFrame);
+      engine.destroy();
+    });
+
+    it("falls back to the buffered copy when the worker cannot draw the VideoFrame", () => {
+      const { engine, play } = setUp();
+      play(1);
+      reply(scoreMessages()[0], { failed: true });
+      play(2);
+      expect(
+        scoreMessages()
+          .slice(1)
+          .every((m) => !(m.source instanceof FakeVideoFrame))
+      ).toBe(true);
+      engine.destroy();
+    });
+
+    it("ignores scores of frames sent before a source change", () => {
+      const { engine, video, internals, play } = setUp();
+      vi.stubGlobal("VideoFrame", undefined);
+      play(3);
+      const old = scoreMessages();
+      video.emit("loadedmetadata");
+      play(3);
+      // Same frame ids as before the change: only the generation tells them apart.
+      for (const message of old) reply(message, { hist: 0.9, grid: 0.9 });
+      expect(internals.scoredFrames).toEqual([]);
+      for (const message of scoreMessages().slice(old.length)) reply(message);
+      expect(internals.scoredFrames).toHaveLength(3);
+      engine.destroy();
+    });
   });
 
   it("shrinks the pool once a shrinking ramp is over", () => {
@@ -540,5 +826,107 @@ describe("VertixEngine lookahead", () => {
     expect([...storage.values()]).toEqual(["100"]);
     delete withStorage.localStorage;
     engine.destroy();
+  });
+
+  describe("scenes never mix", () => {
+    /** Feeds a one-face detection on every frame until the count change starts a dissolve (B-roll -> one speaker). */
+    const untilDissolve = (env: ReturnType<typeof setUp>) => {
+      for (let i = 0; i < 300 && !env.engine.getState().isTransitioning; i++) {
+        env.play(1);
+        env.detect(env.video.mediaTime);
+      }
+      expect(env.engine.getState().isTransitioning).toBe(true);
+    };
+
+    it("without lookahead, a dissolve blends two crops of the frame being drawn, never an earlier frame", () => {
+      const env = setUp({ lookahead: false });
+      untilDissolve(env);
+      let blendedFrames = 0;
+      while (env.engine.getState().isTransitioning) {
+        const from = drawLog.length;
+        env.play(1);
+        const drawn = outputSince(env.canvas, from);
+        expect([...drawn.frameSources]).toEqual([env.video]);
+        if (drawn.blended) blendedFrames += 1;
+      }
+      expect(blendedFrames).toBeGreaterThan(2);
+      env.engine.destroy();
+    });
+
+    it("with lookahead, a speaker-switch dissolve blends two crops of the displayed frame only", () => {
+      const env = setUp();
+      const { delayFrames } = env.engine.getLookaheadStatus();
+      env.play(3);
+      env.detectCut(env.video.mediaTime);
+      env.play(delayFrames + 2);
+      expect(env.engine.getState().speakerCount).toBe(1);
+      const switchSec = us(env.video.mediaTime)!;
+      env.internals.decisions.push({
+        mediaTimeSec: switchSec,
+        speakerCount: 1,
+        targetPanes: [{ pane: { source: { x: 800, y: 0, w: 405, h: 720 }, dest: { x: 0, y: 0, w: 405, h: 720 } } }],
+        reframe: "dissolve",
+        isCut: false,
+        cutSource: null,
+        skinRejectedFaces: [],
+      });
+      let blendedFrames = 0;
+      for (let i = 0; i < delayFrames + 12; i++) {
+        const from = drawLog.length;
+        env.play(1);
+        const drawn = outputSince(env.canvas, from);
+        if (drawn.frameSources.size === 0) continue;
+        expect(drawn.frameSources.size).toBe(1);
+        expect(drawn.frameSources.has(env.canvas)).toBe(false);
+        if (drawn.blended) blendedFrames += 1;
+      }
+      expect(blendedFrames).toBeGreaterThan(2);
+      env.engine.destroy();
+    });
+
+    it("a cut during a dissolve snaps: no blend from the frame it is applied on", () => {
+      const env = setUp({ lookahead: false });
+      untilDissolve(env);
+      env.play(1);
+      env.detectCut(env.video.mediaTime);
+      const from = drawLog.length;
+      env.play(1);
+      expect(env.engine.getState().isTransitioning).toBe(false);
+      expect(outputSince(env.canvas, from).blended).toBe(false);
+      env.engine.destroy();
+    });
+
+    it("a cut decided late is still a snap", () => {
+      const env = setUp({ lookahead: false });
+      env.play(5);
+      const cutSec = env.video.mediaTime;
+      env.play(5);
+      env.detectCut(cutSec);
+      const from = drawLog.length;
+      env.play(1);
+      expect(env.engine.getState()).toMatchObject({ speakerCount: 1, isTransitioning: false });
+      expect(outputSince(env.canvas, from).blended).toBe(false);
+      env.engine.destroy();
+    });
+
+    it("on a source change, clears the canvas and shows nothing from the previous clip", () => {
+      const env = setUp();
+      const { delayFrames } = env.engine.getLookaheadStatus();
+      env.play(3);
+      env.detectCut(env.video.mediaTime);
+      env.play(delayFrames + 5);
+      expect(env.engine.getState().speakerCount).toBe(1);
+      const from = drawLog.length;
+      env.video.emit("loadedmetadata");
+      const changedAtSec = env.video.mediaTime;
+      expect(outputSince(env.canvas, from).cleared).toBe(true);
+      expect(env.engine.getDisplayedMediaTime()).toBeNull();
+      expect(env.engine.getLookaheadStatus().bufferedFrames).toBe(0);
+      expect(env.engine.getState()).toMatchObject({ speakerCount: 0, isTransitioning: false });
+      const shown = env.play(delayFrames + 3).filter((t): t is number => t !== null);
+      expect(shown.length).toBeGreaterThan(0);
+      expect(shown.every((t) => t > changedAtSec)).toBe(true);
+      env.engine.destroy();
+    });
   });
 });

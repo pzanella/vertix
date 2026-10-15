@@ -25,9 +25,12 @@ import { FrameRingBuffer, type BufferedFrame } from "./lookahead/frameRingBuffer
 import { TRIGGER_SOURCE_H, TRIGGER_SOURCE_W, locateCut, type ScoredFrame } from "./lookahead/cutTrigger";
 import { DetectionLatencyTracker } from "./lookahead/detectionLatency";
 import {
+  ASSUMED_MAX_FPS,
+  BYTES_PER_PIXEL,
   DEFAULT_DETECTION_P95_MS,
   DEFAULT_FRAME_INTERVAL_MS,
   DEFAULT_TRIGGER_P95_MS,
+  FRAME_BUFFER_BUDGET_BYTES,
   RollingP95,
   alignToFrames,
   chooseSlotSize,
@@ -42,6 +45,12 @@ import {
 } from "./lookahead/lookaheadSizing";
 import { DelaySchedule } from "./lookahead/delaySchedule";
 import { FrameIntervalTracker } from "./lookahead/frameInterval";
+import {
+  HIGH_FRAME_RATE_FPS,
+  REDUCED_SLOT_HEIGHT,
+  SlotHeightGovernor,
+  type SlotHeightChangeReason,
+} from "./lookahead/slotHeightGovernor";
 import {
   defaultWasmBuild,
   importWasmBindings,
@@ -132,6 +141,14 @@ export type LookaheadUnavailableReason =
   /** The graph carries exact silence while a cross-origin element plays unmuted audio (same cause, detected from the audio side). */
   | "silent-audio-path";
 
+/** A change of the frame-copy height: the governor's decision ("drops", "overflow", "recovered", "frame-rate") or a new pool size ("pool"). */
+export interface SlotHeightChange {
+  /** Media time of the frame being captured when it changed. */
+  mediaTimeSec: number;
+  height: number;
+  reason: SlotHeightChangeReason | "pool";
+}
+
 /** Where the detection p95 behind the lookahead length came from. */
 export type LookaheadLengthSource = "measured" | "stored" | "default";
 
@@ -165,6 +182,12 @@ export interface LookaheadStatus {
   overflowDrops: number;
   /** Passed over on display: the frame callback for their counterpart was skipped, or the delay was shrinking. */
   skippedOnDisplay: number;
+  /** Frame-copy height changes since this source was loaded (see SlotHeightGovernor). */
+  slotHeightChanges: SlotHeightChange[];
+  /** Wall time spent at each frame-copy height since this source was loaded, in ms, keyed by height. */
+  timeAtSlotHeightMs: Record<string, number>;
+  /** Most frame-buffer memory used at once (RGBA estimate), never above the 96 MiB budget. */
+  peakBufferBytes: number;
 }
 
 export interface VertixState {
@@ -224,6 +247,9 @@ export const INITIAL_METRICS: VertixMetrics = {
     droppedFrames: 0,
     overflowDrops: 0,
     skippedOnDisplay: 0,
+    slotHeightChanges: [],
+    timeAtSlotHeightMs: {},
+    peakBufferBytes: 0,
   },
 };
 
@@ -259,6 +285,8 @@ const FACE_DETECT_INTERVAL = 5;
 // Per-frame cut-trigger scores kept for cut localisation: a few seconds,
 // well over the gap between two detections.
 const SCORED_FRAME_HISTORY = 120;
+// A VideoFrame sent to the cut trigger with no answer after this long no longer blocks the next one.
+const VIDEO_FRAME_IN_FLIGHT_TIMEOUT_MS = 250;
 // A frame shown while paused waits for its own detection this long at most.
 const HELD_FRAME_TIMEOUT_MS = 500;
 // With lookahead, frames are shown from the frame callback while playing.
@@ -480,6 +508,28 @@ const LAYOUT_TRANSITION_MS = 250;
  * `filter: blur()`, just on a quarter as many pixels) to keep this cheap
  * without looking blocky.
  */
+/** Draws the `rect` crop (source-video pixels, scaled to the source's own size) into `dest`, on whole pixels. */
+function drawCrop(
+  ctx: CanvasRenderingContext2D,
+  source: CanvasImageSource,
+  rect: PaneRect,
+  dest: PaneRect,
+  scaleX: number,
+  scaleY: number
+): void {
+  ctx.drawImage(
+    source,
+    Math.round(rect.x * scaleX),
+    Math.round(rect.y * scaleY),
+    Math.round(rect.w * scaleX),
+    Math.round(rect.h * scaleY),
+    Math.round(dest.x),
+    Math.round(dest.y),
+    Math.round(dest.w),
+    Math.round(dest.h)
+  );
+}
+
 function drawFitFrame(
   ctx: CanvasRenderingContext2D,
   blurCanvas: OffscreenCanvas,
@@ -508,6 +558,12 @@ function drawFitFrame(
   const fitScale = outW / srcW;
   const fgH = Math.round(srcH * fitScale);
   ctx.drawImage(video, 0, Math.round((outH - fgH) / 2), outW, fgH);
+}
+
+/** A framing to draw from the current frame: the fitted full frame (B-roll), or crops into panes. */
+interface DrawnLayout {
+  broll: boolean;
+  panes: { source: PaneRect; dest: PaneRect }[];
 }
 
 interface FrameSlot {
@@ -617,8 +673,17 @@ export class VertixEngine {
   private layoutSignature = "";
   // Set by an applied decision, consumed by the frame it was applied on.
   private pendingReframe: Reframe | null = null;
-  private transitionSnapshotCanvas: OffscreenCanvas | null = null;
+  // A dissolve crossfades from the framing on screen when it started to
+  // the new one, both cropped from the frame being drawn: it never shows
+  // pixels of an earlier frame, so it can never mix two scenes.
+  private transitionFrom: DrawnLayout | null = null;
   private transitionStart: number | null = null;
+  // What the last 9:16 frame was drawn with (references, not copies).
+  private drawnLayout: { broll: boolean; targetPanes: PaneTarget[]; smoothedPanes: PaneRect[] } = {
+    broll: true,
+    targetPanes: [],
+    smoothedPanes: [],
+  };
 
   // Lookahead: the output is shown lookaheadLengthMs behind the decoded
   // frame, so each frame's detection result is in before it is displayed.
@@ -638,10 +703,16 @@ export class VertixEngine {
   private readonly deviceClass = detectDeviceClass();
   private frameBuffer: FrameRingBuffer<FrameSlot> | null = null;
   private slotSize: SlotSize | null = null;
+  private slotHeightGovernor = new SlotHeightGovernor();
+  private slotHeightChanges: SlotHeightChange[] = [];
+  private timeAtSlotHeightMs: Record<string, number> = {};
+  private slotHeightSince: { height: number; atMs: number } | null = null;
+  private lastScoredMediaSec: number | null = null;
   private captureIndex = 0;
   private nextDetectionFrameIndex = FACE_DETECT_INTERVAL;
   private lastCapturedMediaTime: number | null = null;
   private frameInterval = new FrameIntervalTracker();
+  private frameRateHintFps: number | null = null;
   private heldFrameTimeout: ReturnType<typeof setTimeout> | undefined = undefined;
   private displayFrameId: number | null = null;
   private lastDisplayCallbackAt: number | null = null;
@@ -666,7 +737,11 @@ export class VertixEngine {
   private triggerSourceCanvas: OffscreenCanvas | null = null;
   private detectionSourceCanvas: OffscreenCanvas | null = null;
   private cutTriggerUnavailable = false;
+  // Bumped on every reset (seek, mode change, new source): scores from before it are ignored.
   private cutTriggerGeneration = 0;
+  // VideoFrame trigger path: the decoded frame itself goes to the worker, one at a time.
+  private videoFrameTriggerUnavailable = false;
+  private videoFrameInFlightSince: number | null = null;
   private pendingTriggerFrames = new Map<number, { mediaTimeSec: number; capturedAt: number }>();
   private scoredFrames: ScoredFrame[] = [];
   private pendingCutDetectionSec: number | null = null;
@@ -804,8 +879,8 @@ export class VertixEngine {
   /**
    * Draws detections the skin-tone filter rejected as dashed boxes on
    * `canvas`, which the host lays exactly over the output canvas. They are
-   * never drawn on the output itself, so they can't leak into the video or
-   * a layout-change snapshot. Pass null to stop.
+   * never drawn on the output itself, so they can't leak into the video.
+   * Pass null to stop.
    */
   setSkinRejectionOverlay(canvas: HTMLCanvasElement | null): void {
     this.skinRejectionOverlay = canvas;
@@ -830,6 +905,19 @@ export class VertixEngine {
 
   getLookaheadStatus(): LookaheadStatus {
     return this.lookaheadStatus();
+  }
+
+  /**
+   * The source's frame rate, when the host knows it (e.g. Shaka's active
+   * variant), so the lookahead length and the frame buffer are right from
+   * the first frame instead of after the first few. Measured frame
+   * intervals take over as soon as there are enough. Null clears it.
+   */
+  setFrameRateHint(fps: number | null): void {
+    const hint = fps !== null && Number.isFinite(fps) && fps > 0 ? fps : null;
+    if (hint === this.frameRateHintFps) return;
+    this.frameRateHintFps = hint;
+    if (this.lookaheadLengthMs > 0) this.refreshLookahead(this.frameBuffer?.length ? "ramp" : "flush");
   }
 
   /** Media time of the frame on screen, or null (see VertixMetrics.displayedMediaTimeSec). */
@@ -905,16 +993,28 @@ export class VertixEngine {
     });
   }
 
+  /**
+   * A new source (or the first): nothing of the previous one may be shown
+   * after this. The canvas is cleared, the buffer flushed, the crop and
+   * dissolve state reset, and late detection and cut-trigger results are
+   * dropped by their generation.
+   */
   private resetForNewSource(): void {
+    this.clearOutput();
     this.srcDimsInitialized = false;
     this.frameCounter = 0;
     this.sourceTainted = false;
+    this.videoFrameTriggerUnavailable = false;
     this.audioMonitor.resetSilentPath();
     this.flushLookahead();
     this.frameBuffer = null;
     this.captureIndex = 0;
     this.nextDetectionFrameIndex = FACE_DETECT_INTERVAL;
     this.frameInterval.reset();
+    this.slotHeightGovernor.reset();
+    this.slotHeightChanges = [];
+    this.timeAtSlotHeightMs = {};
+    this.slotHeightSince = null;
     this.displayedMediaTimeSec = null;
     this.meta = null;
     this.lastFrameTime = null;
@@ -930,6 +1030,13 @@ export class VertixEngine {
     this.resetTrackingState();
     this.emitState();
     this.emitMetrics();
+  }
+
+  private clearOutput(): void {
+    const canvas = this.canvas;
+    if (!canvas) return;
+    this.outputCtx ??= canvas.getContext("2d");
+    this.outputCtx?.clearRect(0, 0, canvas.width, canvas.height);
   }
 
   /** Clears face-tracking/layout state without touching video dimensions or WASM readiness — used on seek and mode changes. */
@@ -965,7 +1072,7 @@ export class VertixEngine {
     this.targetPanes = [];
     this.layoutSignature = "";
     this.pendingReframe = null;
-    this.transitionStart = null;
+    this.endLayoutDissolve();
     this.metrics = {
       ...this.metrics,
       faceSizes: [],
@@ -1074,23 +1181,85 @@ export class VertixEngine {
   /**
    * Moves to `delay` without a flush: the DelaySchedule ramps, the audio
    * DelayNode follows the same ramp, and the pool grows now (or shrinks
-   * once the ramp is over, when fewer frames wait).
+   * once the ramp is over, when fewer frames wait). The same length in
+   * another number of frames (a frame-rate change) needs no ramp, only
+   * another pool size.
    */
   private rampLookaheadLength(delay: FrameAlignedDelay): void {
-    if (delay.lengthMs === this.lookaheadLengthMs) return;
     const now = performance.now();
-    const durationMs = this.delaySchedule.rampTo(now, delay.lengthMs);
-    this.audioMonitor.rampOutputDelay(delay.lengthMs / 1000, durationMs / 1000);
-    this.lookaheadLengthMs = delay.lengthMs;
+    let shrinkAt = now;
+    if (delay.lengthMs !== this.lookaheadLengthMs) {
+      const durationMs = this.delaySchedule.rampTo(now, delay.lengthMs);
+      this.audioMonitor.rampOutputDelay(delay.lengthMs / 1000, durationMs / 1000);
+      this.lookaheadLengthMs = delay.lengthMs;
+      shrinkAt = now + durationMs;
+    }
     this.delayFrames = delay.frames;
+    this.sizePool(now, shrinkAt);
+  }
+
+  /** Accumulates the time spent at each copy height, and logs height changes. */
+  private trackSlotHeight(height: number, now: number, reason: SlotHeightChange["reason"]): void {
+    const since = this.slotHeightSince;
+    if (since?.height === height) return;
+    if (since) {
+      this.accumulateSlotHeightTime(now);
+      this.slotHeightChanges.push({ mediaTimeSec: this.lastCapturedMediaTime ?? 0, height, reason });
+    }
+    this.slotHeightSince = { height, atMs: now };
+  }
+
+  private accumulateSlotHeightTime(now: number): void {
+    const since = this.slotHeightSince;
+    if (!since) return;
+    this.timeAtSlotHeightMs[since.height] = (this.timeAtSlotHeightMs[since.height] ?? 0) + (now - since.atMs);
+    since.atMs = now;
+  }
+
+  /** Feeds the slot-height governor (a few times a second while lookahead runs); a new decision resizes the copies. */
+  private updateSlotHeight(video: HTMLVideoElement, now: number): void {
     const buffer = this.frameBuffer;
-    if (!buffer || !this.slotSize) return;
-    const slots = maxSlotsFor(this.slotSize, slotsForDelay(delay.frames));
-    if (slots >= buffer.maxSlots) {
+    if (this.lookaheadLengthMs === 0 || !buffer) return;
+    const interval = this.knownIntervalSec();
+    const frameRateFps = interval ? (video.playbackRate || 1) / interval : null;
+    const quality = video.getVideoPlaybackQuality?.() ?? null;
+    const reason = this.slotHeightGovernor.update(now, frameRateFps, quality, buffer.overflowDrops);
+    if (reason) this.sizePool(now, now, reason);
+    this.accumulateSlotHeightTime(now);
+  }
+
+  /** Media seconds per frame: measured, else the host's hint, else null. */
+  private knownIntervalSec(): number | null {
+    return this.frameInterval.intervalSec ?? (this.frameRateHintFps !== null ? 1 / this.frameRateHintFps : null);
+  }
+
+  /** Delay frames the pool must hold: at the known frame rate, or at ASSUMED_MAX_FPS before it is known. */
+  private poolDelayFrames(): number {
+    if (this.knownIntervalSec() !== null) return this.delayFrames;
+    return alignToFrames(this.lookaheadLengthMs, 1 / ASSUMED_MAX_FPS, this.video?.playbackRate || 1).frames;
+  }
+
+  /**
+   * Sizes the pool for the current delay: the largest copy size at which
+   * the frames it must hold fit the budget, and the slot limit. Growth
+   * applies now; a smaller limit from `shrinkAt` (the end of a shrinking
+   * ramp), when fewer frames wait.
+   */
+  private sizePool(now: number, shrinkAt: number, reason: SlotHeightChange["reason"] = "pool"): void {
+    const buffer = this.frameBuffer;
+    if (!buffer) return;
+    const { w, h } = this.srcDims;
+    const neededSlots = slotsForDelay(this.poolDelayFrames());
+    const heightCap = this.slotHeightGovernor.reduced ? REDUCED_SLOT_HEIGHT : null;
+    const size = chooseSlotSize(w, h, neededSlots, this.outputHeightOnScreenPx(), heightCap);
+    this.slotSize = size;
+    this.trackSlotHeight(size.height, now, reason);
+    const slots = maxSlotsFor(size, neededSlots);
+    if (slots >= buffer.maxSlots || shrinkAt <= now) {
       buffer.setMaxSlots(slots);
       this.pendingMaxSlots = null;
     } else {
-      this.pendingMaxSlots = { slots, at: now + durationMs };
+      this.pendingMaxSlots = { slots, at: shrinkAt };
     }
   }
 
@@ -1104,7 +1273,7 @@ export class VertixEngine {
     const detectionP95 = measured ?? stored ?? DEFAULT_DETECTION_P95_MS[this.deviceClass][build];
     this.lookaheadDetectionP95Ms = detectionP95;
     const playbackRate = this.video?.playbackRate || 1;
-    this.lengthIntervalSec = this.frameInterval.intervalSec;
+    this.lengthIntervalSec = this.knownIntervalSec();
     const intervalSec = this.lengthIntervalSec ?? DEFAULT_FRAME_INTERVAL_MS / 1000;
     const lengthMs = lookaheadLengthMs(
       detectionP95,
@@ -1136,11 +1305,14 @@ export class VertixEngine {
       slotWidth: buffer ? (this.slotSize?.width ?? null) : null,
       slotHeight: buffer ? (this.slotSize?.height ?? null) : null,
       allocatedSlots,
-      bufferBytes: allocatedSlots * (this.slotSize?.bytesPerSlot ?? 0),
+      bufferBytes: buffer?.allocatedBytes ?? 0,
       bufferedFrames: buffer?.length ?? 0,
       droppedFrames: buffer ? buffer.overflowDrops + buffer.skippedOnDisplay : 0,
       overflowDrops: buffer?.overflowDrops ?? 0,
       skippedOnDisplay: buffer?.skippedOnDisplay ?? 0,
+      slotHeightChanges: [...this.slotHeightChanges],
+      timeAtSlotHeightMs: { ...this.timeAtSlotHeightMs },
+      peakBufferBytes: buffer?.peakAllocatedBytes ?? 0,
     };
   }
 
@@ -1542,27 +1714,27 @@ export class VertixEngine {
   }
 
   /**
-   * Snapshots the current output so the next framing cross-dissolves in
-   * over LAYOUT_TRANSITION_MS. If a fade is already running, the canvas
-   * holds a partial blend, not a clean frame, so this cuts straight to the
-   * new framing instead of stacking a second fade on top of it.
+   * Starts a cross-dissolve from the framing on screen (its crop rects,
+   * kept fixed) to the new one, over LAYOUT_TRANSITION_MS. If a dissolve
+   * is already running, this cuts straight to the new framing instead of
+   * stacking a second one on top of it.
    */
-  private startLayoutDissolve(canvas: HTMLCanvasElement, cropW: number, cropH: number, now: number): void {
+  private startLayoutDissolve(now: number): void {
     if (this.transitionStart !== null) {
-      this.transitionStart = null;
+      this.endLayoutDissolve();
       return;
     }
-    if (
-      !this.transitionSnapshotCanvas ||
-      this.transitionSnapshotCanvas.width !== cropW ||
-      this.transitionSnapshotCanvas.height !== cropH
-    ) {
-      this.transitionSnapshotCanvas = new OffscreenCanvas(cropW, cropH);
-    }
-    const snapCtx = this.transitionSnapshotCanvas.getContext("2d")!;
-    snapCtx.clearRect(0, 0, cropW, cropH);
-    snapCtx.drawImage(canvas, 0, 0);
+    const { broll, targetPanes, smoothedPanes } = this.drawnLayout;
+    this.transitionFrom = {
+      broll,
+      panes: broll ? [] : targetPanes.map((p, i) => ({ source: { ...smoothedPanes[i] }, dest: { ...p.pane.dest } })),
+    };
     this.transitionStart = now;
+  }
+
+  private endLayoutDissolve(): void {
+    this.transitionStart = null;
+    this.transitionFrom = null;
   }
 
   // Runs on every decoded frame. Without lookahead the frame is rendered
@@ -1613,6 +1785,7 @@ export class VertixEngine {
     this.frameInterval.push(metadata.mediaTime);
     if (now - this.lastMetricsPush > 300) {
       this.lastMetricsPush = now;
+      this.updateSlotHeight(video, now);
       if (this.audioMonitor.silentPathSuspected !== this.audioMonitor.checkSilentPath(video, now)) {
         this.refreshLookahead("keep");
       }
@@ -1659,7 +1832,15 @@ export class VertixEngine {
       this.renderLiveFrame(video, metadata, now, frameDtSec);
     }
 
-    if (probe) probe.recordFrame(now, performance.now() - workStart, metadata.mediaTime, metadata.presentedFrames);
+    if (probe) {
+      probe.recordFrame(
+        now,
+        performance.now() - workStart,
+        metadata.mediaTime,
+        metadata.presentedFrames,
+        metadata.expectedDisplayTime ?? now
+      );
+    }
     this.scheduleNextFrame(video);
   }
 
@@ -1685,20 +1866,32 @@ export class VertixEngine {
     const renderStart = this.benchmarkProbe ? performance.now() : 0;
     this.renderFrame(video, srcW, srcH, null, metadata.mediaTime, now, frameDtSec);
     this.displayedMediaTimeSec = metadata.mediaTime;
-    this.benchmarkProbe?.recordDisplay(now, metadata.mediaTime, performance.now() - renderStart, NaN);
+    this.benchmarkProbe?.recordDisplay(
+      now,
+      metadata.mediaTime,
+      performance.now() - renderStart,
+      NaN,
+      metadata.expectedDisplayTime ?? now,
+      0
+    );
   }
 
   /**
    * Lookahead, while playing: copies the frame into the buffer, runs
    * detection on it if due, then shows the buffered frame whose time has
-   * come — the newest with mediaTime <= this frame's mediaTime minus the
-   * delay. Picking by media time keeps audio and video in sync when a
-   * callback is skipped. The delay is a whole number of frames, so that
-   * frame appears exactly when the video element would show it.
+   * come: the one at this frame's mediaTime minus the delay. Picking by
+   * media time keeps audio and video in sync when a callback is skipped;
+   * if the due frame itself was never captured (its callback was skipped)
+   * and the screen would fall behind, the nearest captured frame is shown
+   * (see FrameRingBuffer.takeNearest). The delay is a whole number of
+   * frames, so that frame appears exactly when the video element would
+   * show it.
    */
   private captureFrame(video: HTMLVideoElement, metadata: VideoFrameCallbackMetadata, now: number): void {
     this.followFrameRate();
     const presentedAtMs = metadata.expectedDisplayTime ?? now;
+    const rate = video.playbackRate || 1;
+    const intervalSec = this.knownIntervalSec() ?? DEFAULT_FRAME_INTERVAL_MS / 1000;
     const frame = this.bufferFrame(video, metadata.mediaTime, presentedAtMs, false);
     if (this.mode === "9:16") {
       this.hasFrameSinceReset = true;
@@ -1710,24 +1903,33 @@ export class VertixEngine {
           this.benchmarkProbe?.recordSkippedDetection();
         }
       }
-      this.scoreFrameForCut(frame);
+      if (this.shouldScoreForCut(frame.mediaTimeSec, intervalSec, rate)) this.scoreFrameForCut(frame, video);
     }
 
     this.stopDisplayLoop();
     const delayMs = this.delaySchedule.valueAt(presentedAtMs);
-    const rate = video.playbackRate || 1;
-    const intervalSec = this.frameInterval.intervalSec ?? DEFAULT_FRAME_INTERVAL_MS / 1000;
-    // A quarter frame of slack absorbs rounding in media timestamps.
-    const dueUpToSec = metadata.mediaTime - (delayMs / 1000) * rate + intervalSec / 4;
-    const due = this.frameBuffer!.takeLatest((f) => f.mediaTimeSec <= dueUpToSec);
-    if (due) this.showBufferedFrame(due, now, presentedAtMs - (due.presentedAtMs + delayMs));
+    const dueSec = metadata.mediaTime - (delayMs / 1000) * rate;
+    const shownSec = this.displayedMediaTimeSec;
+    const catchUp = shownSec !== null && shownSec < dueSec - intervalSec / 2;
+    const due = this.frameBuffer!.takeNearest(dueSec, intervalSec, catchUp);
+    if (due) this.showBufferedFrame(due, now, presentedAtMs, delayMs, (dueSec - due.mediaTimeSec) / intervalSec);
     this.applyPendingMaxSlots(now);
     this.armStallWatchdog(intervalSec / rate);
   }
 
+  /**
+   * Every frame up to HIGH_FRAME_RATE_FPS; above it, a frame at most every
+   * second frame (a cut between two scored frames is found on the second).
+   */
+  private shouldScoreForCut(mediaTimeSec: number, intervalSec: number, rate: number): boolean {
+    const last = this.lastScoredMediaSec;
+    if (rate / intervalSec <= HIGH_FRAME_RATE_FPS + 0.5 || last === null || mediaTimeSec < last) return true;
+    return mediaTimeSec - last >= intervalSec * 1.5;
+  }
+
   /** A frame-rate change (another rendition) or the first measured interval moves the length to whole frames of the new rate. */
   private followFrameRate(): void {
-    const interval = this.frameInterval.intervalSec;
+    const interval = this.knownIntervalSec();
     if (interval === null) return;
     const used = this.lengthIntervalSec;
     if (used === null || Math.abs(interval - used) / used > FRAME_RATE_CHANGE_FRACTION) this.refreshLookahead("ramp");
@@ -1746,7 +1948,18 @@ export class VertixEngine {
     this.stallWatchdog = setTimeout(() => this.ensureDisplayLoop(), frameWallSec * 1000 * STALL_FRAMES);
   }
 
-  private showBufferedFrame(frame: BufferedFrame<FrameSlot>, now: number, errorMs: number): void {
+  /**
+   * Draws a buffered frame that reaches the screen at `onScreenAtMs`, due
+   * `delayMs` after its own display time; `frameOffset` is how many frames
+   * it is from the due one (positive: older).
+   */
+  private showBufferedFrame(
+    frame: BufferedFrame<FrameSlot>,
+    now: number,
+    onScreenAtMs: number,
+    delayMs: number,
+    frameOffset: number
+  ): void {
     const frameDtSec = this.lastDisplayedAt !== null ? (now - this.lastDisplayedAt) / 1000 : 0;
     this.lastDisplayedAt = now;
     const renderStart = performance.now();
@@ -1754,7 +1967,15 @@ export class VertixEngine {
     this.renderFrame(canvas, canvas.width, canvas.height, frame.mediaTimeSec, frame.mediaTimeSec, now, frameDtSec);
     this.frameBuffer?.release(frame);
     this.displayedMediaTimeSec = frame.mediaTimeSec;
-    this.benchmarkProbe?.recordDisplay(now, frame.mediaTimeSec, performance.now() - renderStart, errorMs);
+    this.benchmarkProbe?.recordDisplay(
+      now,
+      frame.mediaTimeSec,
+      performance.now() - renderStart,
+      onScreenAtMs - (frame.presentedAtMs + delayMs),
+      onScreenAtMs,
+      delayMs,
+      frameOffset
+    );
   }
 
   private ensureCutTriggerWorker(): Worker | null {
@@ -1776,20 +1997,66 @@ export class VertixEngine {
   }
 
   /**
-   * Sends a small copy of a buffered frame to the cut trigger: a GPU scale
-   * (drawImage) and a transfer, both synchronous, no pixel readback here.
+   * Sends the frame just buffered to the cut trigger. Preferred: the
+   * decoded frame itself as a VideoFrame (no draw on the main thread; the
+   * worker scales it and closes it), at most one in the worker at a time
+   * so no decoder frame is held for long. Fallback (no VideoFrame, or a
+   * source it cannot wrap): a GPU scale of the buffered copy and a
+   * transfer. Neither reads pixels back here.
    */
-  private scoreFrameForCut(frame: BufferedFrame<FrameSlot>): void {
+  private scoreFrameForCut(frame: BufferedFrame<FrameSlot>, video: HTMLVideoElement): void {
     const worker = this.ensureCutTriggerWorker();
     if (!worker) return;
     const start = performance.now();
-    this.pendingTriggerFrames.set(frame.frameIndex, { mediaTimeSec: frame.mediaTimeSec, capturedAt: start });
-    this.triggerSourceCanvas ??= new OffscreenCanvas(TRIGGER_SOURCE_W, TRIGGER_SOURCE_H);
-    const bitmap = scaledBitmap(this.triggerSourceCanvas, frame.slot.canvas);
+    const useVideoFrame = this.canUseVideoFrameTrigger();
+    if (useVideoFrame && this.videoFrameInFlightSince !== null) {
+      if (start - this.videoFrameInFlightSince < VIDEO_FRAME_IN_FLIGHT_TIMEOUT_MS) {
+        this.benchmarkProbe?.recordTriggerSkippedBusy();
+        return;
+      }
+      this.videoFrameInFlightSince = null;
+    }
+    const videoFrame = useVideoFrame ? this.wrapVideoFrame(video, frame.mediaTimeSec) : null;
+    let source: VideoFrame | ImageBitmap;
+    if (videoFrame) {
+      source = videoFrame;
+    } else {
+      this.triggerSourceCanvas ??= new OffscreenCanvas(TRIGGER_SOURCE_W, TRIGGER_SOURCE_H);
+      source = scaledBitmap(this.triggerSourceCanvas, frame.slot.canvas);
+    }
     const drawnAt = performance.now();
-    worker.postMessage({ type: "score", frameId: frame.frameIndex, bitmap }, [bitmap]);
+    const message = { type: "score", generation: this.cutTriggerGeneration, frameId: frame.frameIndex, source };
+    try {
+      worker.postMessage(message, [source]);
+    } catch {
+      source.close();
+      if (videoFrame) this.videoFrameTriggerUnavailable = true;
+      return;
+    }
+    if (videoFrame) this.videoFrameInFlightSince = start;
+    this.lastScoredMediaSec = frame.mediaTimeSec;
+    this.pendingTriggerFrames.set(frame.frameIndex, { mediaTimeSec: frame.mediaTimeSec, capturedAt: start });
     const end = performance.now();
-    this.benchmarkProbe?.recordTriggerCost(end - start, drawnAt - start, end - drawnAt);
+    this.benchmarkProbe?.recordTriggerCost(
+      end - start,
+      drawnAt - start,
+      end - drawnAt,
+      videoFrame ? "videoframe" : "bitmap"
+    );
+  }
+
+  private canUseVideoFrameTrigger(): boolean {
+    return !this.videoFrameTriggerUnavailable && typeof VideoFrame !== "undefined";
+  }
+
+  /** The video's current frame as a VideoFrame, or null (cross-origin without CORS throws; then never again for this source). */
+  private wrapVideoFrame(video: HTMLVideoElement, mediaTimeSec: number): VideoFrame | null {
+    try {
+      return new VideoFrame(video, { timestamp: Math.round(mediaTimeSec * 1e6) });
+    } catch {
+      this.videoFrameTriggerUnavailable = true;
+      return null;
+    }
   }
 
   /**
@@ -1806,7 +2073,23 @@ export class VertixEngine {
     return Promise.resolve(scaledBitmap(this.detectionSourceCanvas, source));
   }
 
-  private onCutTriggerScore(msg: { frameId: number; hist: number; grid: number; triggered: boolean }): void {
+  private onCutTriggerScore(msg: {
+    generation: number;
+    frameId: number;
+    wasVideoFrame: boolean;
+    failed: boolean;
+    hist: number;
+    grid: number;
+    triggered: boolean;
+  }): void {
+    if (msg.wasVideoFrame) this.videoFrameInFlightSince = null;
+    if (msg.generation !== this.cutTriggerGeneration) return;
+    if (msg.failed) {
+      // The worker could not draw a VideoFrame of this source: buffered copies from now on.
+      if (msg.wasVideoFrame) this.videoFrameTriggerUnavailable = true;
+      this.pendingTriggerFrames.delete(msg.frameId);
+      return;
+    }
     const pending = this.pendingTriggerFrames.get(msg.frameId);
     if (!pending) return;
     this.pendingTriggerFrames.delete(msg.frameId);
@@ -1842,6 +2125,7 @@ export class VertixEngine {
     this.cutTriggerGeneration += 1;
     this.pendingTriggerFrames.clear();
     this.scoredFrames = [];
+    this.lastScoredMediaSec = null;
     this.cutTriggerWorker?.postMessage({ type: "reset" });
   }
 
@@ -1891,17 +2175,23 @@ export class VertixEngine {
   /** The pool, sized for the current delay: copies no larger than the source or than the output canvas can show. */
   private ensureFrameBuffer(): FrameRingBuffer<FrameSlot> {
     if (this.frameBuffer) return this.frameBuffer;
-    const { w, h } = this.srcDims;
-    const neededSlots = slotsForDelay(this.delayFrames);
-    const size = chooseSlotSize(w, h, neededSlots, this.outputHeightOnScreenPx());
-    this.slotSize = size;
-    this.frameBuffer = new FrameRingBuffer(
-      () => {
-        const canvas = new OffscreenCanvas(size.width, size.height);
-        return { canvas, ctx: canvas.getContext("2d", { alpha: false })! };
+    const isCurrentSize = (slot: FrameSlot) =>
+      slot.canvas.width === this.slotSize?.width && slot.canvas.height === this.slotSize.height;
+    this.frameBuffer = new FrameRingBuffer<FrameSlot>(
+      {
+        create: () => {
+          const canvas = new OffscreenCanvas(this.slotSize!.width, this.slotSize!.height);
+          return { canvas, ctx: canvas.getContext("2d", { alpha: false })! };
+        },
+        bytesPerNewSlot: () => this.slotSize!.bytesPerSlot,
+        bytesOf: (slot) => slot.canvas.width * slot.canvas.height * BYTES_PER_PIXEL,
+        isCurrent: isCurrentSize,
       },
-      maxSlotsFor(size, neededSlots)
+      1,
+      FRAME_BUFFER_BUDGET_BYTES
     );
+    const now = performance.now();
+    this.sizePool(now, now);
     return this.frameBuffer;
   }
 
@@ -1943,7 +2233,12 @@ export class VertixEngine {
     const onScreenAt = now + this.refreshIntervalMs;
     const delayMs = this.delaySchedule.valueAt(onScreenAt);
     const frame = buffer.takeLatest((f) => f.presentedAtMs + delayMs <= onScreenAt + this.refreshIntervalMs / 2);
-    if (frame) this.showBufferedFrame(frame, now, onScreenAt - (frame.presentedAtMs + delayMs));
+    if (frame) {
+      const frameWallMs =
+        ((this.knownIntervalSec() ?? DEFAULT_FRAME_INTERVAL_MS / 1000) * 1000) / (this.video?.playbackRate || 1);
+      const frameOffset = (onScreenAt - (frame.presentedAtMs + delayMs)) / frameWallMs;
+      this.showBufferedFrame(frame, now, onScreenAt, delayMs, frameOffset);
+    }
 
     if (buffer.length > 0) {
       this.ensureDisplayLoop();
@@ -2007,14 +2302,14 @@ export class VertixEngine {
       this.pendingReframe = null;
       // After a source cut, the old frame shows the previous shot: never
       // fade from it, and stop any fade still running.
-      if (reframe === "snap") this.transitionStart = null;
+      if (reframe === "snap") this.endLayoutDissolve();
 
       if (targetSignature !== this.layoutSignature) {
         // Skipped on the very first commit — there's no prior frame to fade from.
         if (this.layoutSignature !== "") {
           this.sceneSwitchCount += 1;
           probe?.recordLayoutChange(now);
-          if (reframe !== "snap") this.startLayoutDissolve(canvas, cropW, cropH, now);
+          if (reframe !== "snap") this.startLayoutDissolve(now);
         }
         this.layoutSignature = targetSignature;
 
@@ -2037,7 +2332,7 @@ export class VertixEngine {
       } else if (reframe !== null && speakerCount > 0) {
         // Same pane count, new framing (a cut, or another speaker): jump
         // to the target instead of gliding across the frame.
-        if (reframe === "dissolve") this.startLayoutDissolve(canvas, cropW, cropH, now);
+        if (reframe === "dissolve") this.startLayoutDissolve(now);
         this.smoothedPanes = this.targetPanes.map((p) => ({ ...p.pane.source }));
       }
 
@@ -2052,30 +2347,29 @@ export class VertixEngine {
         for (let i = 0; i < this.targetPanes.length; i++) {
           const target = this.targetPanes[i].pane;
           const smoothed = lerpPaneRectInto(this.smoothedPanes[i], target.source, smoothingAlpha);
-          ctx.drawImage(
-            source,
-            Math.round(smoothed.x * scaleX),
-            Math.round(smoothed.y * scaleY),
-            Math.round(smoothed.w * scaleX),
-            Math.round(smoothed.h * scaleY),
-            Math.round(target.dest.x),
-            Math.round(target.dest.y),
-            Math.round(target.dest.w),
-            Math.round(target.dest.h)
-          );
+          drawCrop(ctx, source, smoothed, target.dest, scaleX, scaleY);
         }
       }
+      this.drawnLayout.broll = speakerCount === 0;
+      this.drawnLayout.targetPanes = this.targetPanes;
+      this.drawnLayout.smoothedPanes = this.smoothedPanes;
 
-      if (this.transitionStart !== null) {
+      const from = this.transitionFrom;
+      if (this.transitionStart !== null && from) {
         const t = Math.min(1, (now - this.transitionStart) / LAYOUT_TRANSITION_MS);
-        // Ease-in-out: the old frame dissolves away gradually at both ends
-        // of the transition instead of snapping out almost immediately, so
-        // a speaker coming into focus reads as a smooth reveal.
+        // Ease-in-out: the old framing dissolves away gradually at both
+        // ends of the transition instead of snapping out almost
+        // immediately, so a speaker coming into focus reads as a smooth
+        // reveal. Drawn from this same frame, at the old crop.
         ctx.globalAlpha = 1 - easeInOutCubic(t);
-        ctx.drawImage(this.transitionSnapshotCanvas!, 0, 0);
+        if (from.broll) {
+          drawFitFrame(ctx, this.blurCanvas, source, srcW, srcH, cropW, cropH);
+        } else {
+          for (const pane of from.panes) drawCrop(ctx, source, pane.source, pane.dest, scaleX, scaleY);
+        }
         ctx.globalAlpha = 1;
         if (t >= 1) {
-          this.transitionStart = null;
+          this.endLayoutDissolve();
           this.emitState();
         }
       }

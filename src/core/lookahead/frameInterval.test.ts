@@ -8,6 +8,13 @@ describe("FrameIntervalTracker", () => {
     expect(tracker.intervalSec).toBeCloseTo(0.04, 9);
   });
 
+  it("measures 50 fps when most frame callbacks are skipped", () => {
+    const tracker = new FrameIntervalTracker();
+    let frame = 0;
+    for (const step of [2, 1, 3, 2, 2, 1, 3, 2, 3, 2, 1, 2, 3, 2, 2]) tracker.push((frame += step) * 0.02);
+    expect(tracker.intervalSec).toBeCloseTo(0.02, 9);
+  });
+
   it("follows a frame-rate change within a few frames", () => {
     const tracker = new FrameIntervalTracker();
     let t = 0;

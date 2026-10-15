@@ -31,13 +31,15 @@ export interface BenchmarkClip {
 /**
  * Benchmark-only test clips with known hard cuts, made by
  * `npm run make:bench-clips` from the sample clips (1280x720,
- * 25 fps, no audio; not in the repository). Not offered in the sample picker.
+ * 25 fps or 50 fps, no audio; not in the repository). Not offered in the sample picker.
  */
 export const CUT_TEST_CLIPS: BenchmarkClip[] = [
   { file: "cross-count.mp4", nominalFps: 25, durationSec: 16, knownCutsSec: [4, 8, 12] },
   { file: "cross-same-count.mp4", nominalFps: 25, durationSec: 16, knownCutsSec: [4, 8, 12] },
   // Cuts between detection frames (frames 102, 203, 304), for the cut trigger and cut localisation.
   { file: "cross-offset.mp4", nominalFps: 25, durationSec: 16.16, knownCutsSec: [4.08, 8.12, 12.16] },
+  // 50 fps, cuts on odd frames (203, 407, 609): some fall on frames the half-rate cut trigger skips.
+  { file: "cross-50fps.mp4", nominalFps: 50, durationSec: 16.18, knownCutsSec: [4.06, 8.14, 12.18] },
 ].map((clip) => ({ ...clip, url: asset(`bench/${clip.file}`) }));
 
 export const SAMPLE_CLIPS: SampleClip[] = [

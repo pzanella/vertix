@@ -50,10 +50,13 @@ with the numbers.
 1. Collect the environment info. This includes a few milliseconds of
    busy-waiting to measure the timer resolution, so it happens before any
    playback.
-2. For each of the six clips in `public/samples/` and the three test clips in
+2. For each of the six clips in `public/samples/` and the four test clips in
    `public/bench/` (`cross-count.mp4`, `cross-same-count.mp4`: hard cuts at
    4, 8 and 12 s, on detection frames; `cross-offset.mp4`: hard cuts at
-   4.08, 8.12 and 12.16 s, between detection frames), in order, run the
+   4.08, 8.12 and 12.16 s, between detection frames; `cross-50fps.mp4`:
+   50 fps, hard cuts at 4.06, 8.14 and 12.18 s, on odd frames between
+   detection frames, so some fall on frames the half-rate cut trigger
+   skips), in order, run the
    clip once with lookahead off, on the build already loaded, then once per
    WASM build with lookahead on (see
    [WASM builds](#wasm-builds-simd-and-scalar)): SIMD then scalar on the
@@ -342,6 +345,17 @@ lookaheadComparison, precisionWarnings, results[] }`. Each result contains `summ
         `skippedOnDisplay` (a buffered frame passed over because the frame
         callback of its counterpart was skipped, or while the delay
         shrinks); `droppedFrames` is their sum.
+      - `slotHeightChanges` (`{ mediaTimeSec, height, reason }` per change
+        of the frame-copy height; `reason` is `drops`, `overflow`,
+        `recovered`, `frame-rate` from the slot-height governor, or `pool`
+        for a new pool size) and `timeAtSlotHeightMs` (wall time at each
+        height, keyed by height). Above 30 fps the copies drop to 540 lines
+        while the video element drops more than 5% of its frames over 3 s
+        or the buffer overflows, and go back after 10 s under 2%.
+      - `peakBufferBytes`: most frame-buffer memory used at once. Old-size
+        copies still waiting count against the 96 MiB budget during a size
+        change; when they leave no room, the oldest waiting frame is dropped
+        (counted in `overflowDrops`) instead.
     - `summary.cutsShown[]`: every applied cut decision,
       `{ cutMediaTimeSec, shownMediaTimeSec, framesLate, source }`, where
       `framesLate` counts displayed frames from the cut frame up to the one
@@ -356,17 +370,38 @@ lookaheadComparison, precisionWarnings, results[] }`. Each result contains `summ
       frame (`framesLate` null when the crop never changed for it).
     - `summary.display`: `{ count, errorMs, workMs }`. `errorMs` (lookahead
       only) is when a frame reaches the screen minus when it should
-      (its own display time + the lookahead). The audio delay is exact,
-      so this is the audio/video offset as far as the page can measure it.
+      (its own display time + the lookahead). It counts the presentation
+      jitter of both frames: on a phone that drops frames it reads about
+      ±30 ms even when the exact frame is shown. Added later within v5:
+      - `clockErrorMs` (with and without lookahead): when a frame reaches
+        the screen minus when its audio is heard, against a steady clock
+        fitted to the video element's display times (median of
+        `expectedDisplayTime − mediaTime` over ±2 s of frame callbacks;
+        playback rate 1). Without lookahead it is the video element's own
+        jitter: the baseline to compare the lookahead run with.
+        `clockErrorAbsMs` is the same as absolute values.
+      - `frameOffset` (lookahead only): frames between the due frame and
+        the one shown, positive when the one shown is older; 0 is exact.
+        When the due frame was never captured (its callback was skipped)
+        and the screen would fall behind, the nearest captured frame is
+        shown, the newer one on a tie (-1).
+      - Raw: `frames.expectedDisplayMs`, and per display `onScreenAtMs`,
+        `delayMs`, `frameOffset` and `clockErrorMs`.
     - `summary.trigger`: `{ count, mainThreadMs, triggeredDetections }`,
       the main-thread cost per frame of the cut trigger and how many
-      detections it started. Added later within v5: `drawMs` (scaling the
-      frame into a small canvas and `transferToImageBitmap`) and `postMs`
-      (`postMessage`), the two parts of `mainThreadMs`.
+      detections it started. Added later within v5: `drawMs` (preparing
+      the frame: `new VideoFrame(video)`, or scaling the buffered copy into
+      a small canvas and `transferToImageBitmap`) and `postMs`
+      (`postMessage`), the two parts of `mainThreadMs`; `path`
+      (`videoframe`, `bitmap`, or `mixed` when a run used both: the
+      VideoFrame path falls back to the bitmap one for a source it cannot
+      wrap or the worker cannot draw); `skippedBusy` (frames not scored
+      because the previous VideoFrame was still in the worker: one at a
+      time, so no decoder frame is held).
     - `summary.detectionGaps`: `{ pairs, irregular, histogram }`, gaps
       between detections in frames (mouth motion is measured over the gap;
       regular is 5).
-    - Raw: `displays`, `cutsShown`, `triggers` (with `drawMs` and `postMs`),
+    - Raw: `displays`, `cutsShown`, `triggers` (with `drawMs`, `postMs` and `path`),
       and per detection `triggered`, `resolvedFaces`, `resolvedCx`.
   - New in v4: `summary.sceneCutCount` and `summary.sceneCuts[]`
     (`{ mediaTimeSec, histScore, gridScore, warmup }`, the hard cuts the
