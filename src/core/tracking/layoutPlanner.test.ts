@@ -95,4 +95,17 @@ describe("LayoutPlanner synthetic sequences", () => {
     const subjects = plans.map(({ plan }) => plan.subjectTrackId);
     expect(subjects.every((id) => id === subjects[0] && id !== null)).toBe(true);
   });
+
+  it("a third face seen for a moment next to a two-person shot stays stacked (only confirmed tracks start the 3+ rules)", () => {
+    const blip = (t: number) => Math.abs(t - 2) < 0.01 || Math.abs(t - 2.2) < 0.01;
+    const plans = run(
+      (t) => [
+        testFace(0.25, 0.4, 0.17),
+        testFace(0.72, 0.4, 0.16),
+        ...(blip(t) ? [testFace(0.63, 0.4, 0.14, 40)] : []),
+      ],
+      4
+    );
+    expect(plans.every(({ plan }) => plan.rule === "stacked")).toBe(true);
+  });
 });

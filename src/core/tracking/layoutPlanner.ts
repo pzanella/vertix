@@ -125,6 +125,10 @@ export class LayoutPlanner {
     // among 3+ people, so a missed face does not reset the panel evidence
     // or reshape the group.
     const presentForeground = tracks.filter((t) => t.foreground && (t.visible || t.confirmed));
+    // Only confirmed tracks start the 3+ rules: a face seen for one or two
+    // detections (often a false detection next to a real face) must not
+    // turn a two-person shot into a main-subject shot.
+    const confirmedCount = presentForeground.filter((t) => t.confirmed).length;
     const foregroundCount = visibleForeground.length;
 
     let rule: LayoutRule;
@@ -137,12 +141,14 @@ export class LayoutPlanner {
       rule = "subject";
       paneTracks = [keepSubject];
       subjectTrackId = keepSubject.id;
-    } else if (presentForeground.length < SUBJECT_RULE_MIN_FACES) {
+    } else if (confirmedCount < SUBJECT_RULE_MIN_FACES) {
       this.subjects.reset();
       this.fallbackId = null;
       this.groupShown = false;
-      paneTracks = this.ordered(visibleForeground);
-      rule = foregroundCount === 0 ? "broll" : foregroundCount === 1 ? "single" : "stacked";
+      const shown =
+        foregroundCount < SUBJECT_RULE_MIN_FACES ? visibleForeground : visibleForeground.filter((t) => t.confirmed);
+      paneTracks = this.ordered(shown);
+      rule = shown.length === 0 ? "broll" : shown.length === 1 ? "single" : "stacked";
     } else {
       this.belowMinSinceSec = null;
       const context = scoreContext(presentForeground, audioEnergy, atSec);
