@@ -43,13 +43,15 @@ const clips = [
     stopAtSec: null,
   })),
   ...(args.includes("--licensed")
-    ? readLocalClips(here).map((clip) => ({
-        name: clip.label,
-        url: clip.url,
-        fps: null,
-        hls: true,
-        stopAtSec: clip.maxSeconds,
-      }))
+    ? readLocalClips(here)
+        .filter((clip) => !wanted || wanted.includes(clip.label))
+        .map((clip) => ({
+          name: clip.label,
+          url: clip.url,
+          fps: null,
+          hls: true,
+          stopAtSec: clip.maxSeconds,
+        }))
     : []),
 ];
 const variants = (option("variants") ?? "evidence,until-moved").split(",");
@@ -84,7 +86,9 @@ async function runInPage(clips, variants) {
       await shakaPlayer.attach(video);
     }
     video.crossOrigin = "anonymous";
-    await shakaPlayer.load(clip.url).catch(() => console.error("[check] a local clip failed to load"));
+    await shakaPlayer
+      .load(clip.url)
+      .catch((error) => console.error(`[check] ${clip.name} failed to load (Shaka error ${error?.code ?? "?"})`));
     void video.play();
   };
 
@@ -121,6 +125,13 @@ async function runInPage(clips, variants) {
       console.log(`[check] ${clip.hls ? "local clip" : clip.name}, panel ${variant}`);
       snapshots = [];
       const loadSource = load(clip);
+      // Checkouts without stopAtSec support: end the clip by seeking to its end.
+      const stopAtEnd = () => {
+        if (clip.stopAtSec && video.currentTime >= clip.stopAtSec + 0.5 && Number.isFinite(video.duration)) {
+          video.currentTime = video.duration;
+        }
+      };
+      video.addEventListener("timeupdate", stopAtEnd);
       const result = await core.runBenchmarkClip(engine, video, {
         clipName: clip.name,
         mode: "9:16",
@@ -130,6 +141,7 @@ async function runInPage(clips, variants) {
         stopAtSec: clip.stopAtSec ?? undefined,
         wasmBuild: { ...core.getActiveWasmBuild(), runOrder: null },
       });
+      video.removeEventListener("timeupdate", stopAtEnd);
       const { summary, raw } = result;
       runs.push({
         clip: clip.name,
@@ -171,6 +183,7 @@ async function runAspectInPage(clips) {
       engine.setMode(mode);
       video.src = clip;
       await video.play();
+      const frameMetadata = await new Promise((resolve) => video.requestVideoFrameCallback((_, m) => resolve(m)));
       await sleep(2500);
       const state = engine.getState();
       const metrics = engine.getMetrics();
@@ -183,6 +196,7 @@ async function runAspectInPage(clips) {
         clip: clip.split("/").pop(),
         mode,
         videoSize: `${video.videoWidth}x${video.videoHeight}`,
+        frameMetadataSize: `${frameMetadata.width}x${frameMetadata.height}`,
         sourceShownAsIs: state.sourceShownAsIs,
         canvas: `${shown.w}x${shown.h}`,
         canvasAspect: Math.round((shown.w / shown.h) * 1000) / 1000,
