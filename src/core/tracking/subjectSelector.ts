@@ -35,6 +35,10 @@ export const SUBJECT_HOLD_SEC = 2.5;
 // A challenger must beat the subject by the lead factor for this long
 // (about 5 detections) to take over.
 export const SUBJECT_SWITCH_SUSTAIN_SEC = 1.0;
+// A pick made at a cut is provisional for this long: mouth activity is not
+// measured across a cut, so that pick rests on size alone. Within this
+// time a track with a clear lead takes over at once, without the hold.
+export const PROVISIONAL_PICK_SEC = 1.0;
 // Absorbs float rounding in media timestamps.
 const TIME_EPSILON_SEC = 1e-3;
 
@@ -110,7 +114,8 @@ function extendStreak(streak: Streak | null, trackId: number, atSec: number): St
 }
 
 /**
- * Chooses and holds the main subject among 3+ foreground tracks. A subject
+ * Chooses and holds the main subject among 3+ foreground tracks. A pick
+ * made at a cut (`pickNow`) is provisional for PROVISIONAL_PICK_SEC. A subject
  * is held for at least SUBJECT_HOLD_SEC, then replaced only by a track that
  * beats it by the lead factor (see leadFactor) for SUBJECT_SWITCH_SUSTAIN_SEC. Without a
  * subject, a clear leader is picked once it has led for INITIAL_PICK_SEC,
@@ -120,6 +125,7 @@ function extendStreak(streak: Streak | null, trackId: number, atSec: number): St
 export class SubjectSelector {
   private subjectId: number | null = null;
   private subjectSinceSec = 0;
+  private provisionalUntilSec = -Infinity;
   private leaderStreak: Streak | null = null;
   private challengerStreak: Streak | null = null;
 
@@ -134,10 +140,17 @@ export class SubjectSelector {
       const lost = this.subjectId !== null;
       this.subjectId = null;
       this.challengerStreak = null;
-      return this.pickLeader(scored, atSec, pickNow || lost, factor);
+      const subjectId = this.pickLeader(scored, atSec, pickNow || lost, factor);
+      if (pickNow && subjectId !== null) this.provisionalUntilSec = atSec + PROVISIONAL_PICK_SEC;
+      return subjectId;
     }
 
     this.leaderStreak = null;
+    if (atSec < this.provisionalUntilSec - TIME_EPSILON_SEC) {
+      const leader = clearLeader(scored, factor);
+      if (leader !== null && leader.id !== this.subjectId) this.adopt(leader.id, atSec);
+      return this.subjectId;
+    }
     if (atSec - this.subjectSinceSec < SUBJECT_HOLD_SEC - TIME_EPSILON_SEC) return this.subjectId;
 
     let challenger: ScoredTrack | null = null;
@@ -156,6 +169,7 @@ export class SubjectSelector {
   /** Forgets the subject: a cut, a seek, or fewer than three foreground faces. */
   reset(): void {
     this.subjectId = null;
+    this.provisionalUntilSec = -Infinity;
     this.leaderStreak = null;
     this.challengerStreak = null;
   }
@@ -176,6 +190,7 @@ export class SubjectSelector {
   }
 
   private adopt(trackId: number, atSec: number): void {
+    this.provisionalUntilSec = -Infinity;
     this.subjectId = trackId;
     this.subjectSinceSec = atSec;
     this.leaderStreak = null;

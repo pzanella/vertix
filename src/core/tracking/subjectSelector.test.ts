@@ -81,13 +81,22 @@ describe("SubjectSelector", () => {
 
   it("holds the subject for 2.5s, then switches after a clear lead held for 1.0s", () => {
     const selector = new SubjectSelector();
-    selector.select(scored({ 1: 1, 2: 0.5, 3: 0.5 }), 0, true);
+    selector.select(scored({ 1: 1, 2: 0.5, 3: 0.5 }), 0, false);
+    selector.select(scored({ 1: 1, 2: 0.5, 3: 0.5 }), 0.8, false);
+    expect(selector.subjectTrackId).toBe(1);
     const switchedAt: number[] = [];
-    for (let t = 0.2; t <= 5; t = Math.round((t + 0.2) * 10) / 10) {
+    for (let t = 1; t <= 5; t = Math.round((t + 0.2) * 10) / 10) {
       if (selector.select(scored({ 1: 0.5, 2: 1, 3: 0.5 }), t, false) === 2) switchedAt.push(t);
     }
-    // Held until 2.5s; the lead counts from the next detection (2.6s) and must last 1.0s.
-    expect(switchedAt[0]).toBe(3.6);
+    // Held until 0.8 + 2.5 s; the lead counts from the next detection (3.4 s) and must last 1.0 s.
+    expect(switchedAt[0]).toBe(4.4);
+  });
+
+  it("lets a pick made at a cut change at once to a clear leader for 1.0s, then holds", () => {
+    const selector = new SubjectSelector();
+    expect(selector.select(scored({ 1: 1, 2: 0.5, 3: 0.5 }), 0, true)).toBe(1);
+    expect(selector.select(scored({ 1: 0.5, 2: 1, 3: 0.5 }), 0.4, false)).toBe(2);
+    expect(selector.select(scored({ 1: 1, 2: 0.5, 3: 0.5 }), 0.6, false)).toBe(2);
   });
 
   it("does not switch when the challenger's lead is not held", () => {
