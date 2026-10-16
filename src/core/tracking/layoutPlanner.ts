@@ -21,7 +21,7 @@ const SUBJECT_GRACE_BELOW_MIN_SEC = 0.4;
 // When the framing moves to a person at least this far away (fraction of
 // frame), it changes with a cross-dissolve instead of panning across the
 // room: about half the width of a 9:16 crop of a 16:9 frame.
-const SWITCH_DISSOLVE_DISTANCE = 0.15;
+export const SWITCH_DISSOLVE_DISTANCE = 0.15;
 // Stands for "the whole group" where a single-pane framing records whom it shows.
 const GROUP_FRAMING_ID = -1;
 // Fallback without a clear leader and a group too wide for 9:16: the
@@ -30,6 +30,21 @@ const EDGE_WEIGHT = 0.5;
 // A group already shown stays framed until it is this much wider than the
 // crop, so a group near the limit does not flip between group and subject.
 const GROUP_KEEP_TOLERANCE = 1.1;
+
+// Layout keys for the debounce: the pane count, plus this offset for the
+// single pane chosen among 3+ faces (main subject or group), so that a
+// short 3+ face reading never agrees with a plain one-face reading.
+const MANY_FACES_KEY_OFFSET = 100;
+
+/** The value the person-count debounce compares: what kind of layout `rule` is, and its pane count. */
+export function layoutKey(rule: LayoutRule, paneCount: number): number {
+  return rule === "subject" || rule === "group" ? MANY_FACES_KEY_OFFSET + paneCount : paneCount;
+}
+
+/** The pane count of a layout key. */
+export function paneCountOf(key: number): number {
+  return key % MANY_FACES_KEY_OFFSET;
+}
 
 export interface TrackSnapshot {
   id: number;

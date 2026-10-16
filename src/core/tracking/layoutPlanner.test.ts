@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { FaceBox } from "../layoutEngine";
-import { LayoutPlanner, type LayoutPlan } from "./layoutPlanner";
+import { LayoutPlanner, layoutKey, paneCountOf, type LayoutPlan } from "./layoutPlanner";
 import { detectionTimes, testFace } from "./testFaces";
 
 const FRAME = { srcW: 1280, srcH: 720, outW: 405, outH: 720 };
@@ -107,5 +107,15 @@ describe("LayoutPlanner synthetic sequences", () => {
       4
     );
     expect(plans.every(({ plan }) => plan.rule === "stacked")).toBe(true);
+  });
+});
+
+describe("layoutKey", () => {
+  it("tells a main-subject or group pane apart from a single face, with the same pane count", () => {
+    expect(layoutKey("subject", 1)).not.toBe(layoutKey("single", 1));
+    expect(layoutKey("group", 1)).toBe(layoutKey("subject", 1));
+    expect(layoutKey("stacked", 2)).toBe(2);
+    expect(paneCountOf(layoutKey("subject", 1))).toBe(1);
+    expect(paneCountOf(layoutKey("grid", 3))).toBe(3);
   });
 });

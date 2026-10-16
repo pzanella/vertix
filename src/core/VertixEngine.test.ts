@@ -431,9 +431,8 @@ describe("VertixEngine active-speaker switch", () => {
   }
 
   it("cross-dissolves to a speaker on the other side of the room instead of panning", () => {
-    const { engine, secondsUntil, resolved, isGliding, isDissolving, paneCenterX } = lockedOnMiddle();
-    secondsUntil([BIG_LEFT, MIDDLE, RIGHT], () => resolved()[0].cx === BIG_LEFT.cx);
-    expect(paneCenterX()).toBeLessThan(0.3);
+    const { engine, secondsUntil, isGliding, isDissolving, paneCenterX } = lockedOnMiddle();
+    secondsUntil([BIG_LEFT, MIDDLE, RIGHT], () => paneCenterX() < 0.3);
     expect(isDissolving()).toBe(true);
     expect(isGliding()).toBe(false);
     engine.destroy();

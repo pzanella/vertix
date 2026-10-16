@@ -1,6 +1,14 @@
 import { AudioActivityMonitor } from "./audioActivity";
 import { PersonCountDebouncer } from "./personCount";
-import { LayoutPlanner, type LayoutPlan, type LayoutRule, type TrackSnapshot } from "./tracking/layoutPlanner";
+import {
+  LayoutPlanner,
+  layoutKey,
+  paneCountOf,
+  SWITCH_DISSOLVE_DISTANCE,
+  type LayoutPlan,
+  type LayoutRule,
+  type TrackSnapshot,
+} from "./tracking/layoutPlanner";
 import type { PanelVariant } from "./tracking/panelDetector";
 import { displayedSourceSize, fittedOutputSize, isShownAsIs } from "./sourceAspect";
 import {
@@ -710,6 +718,7 @@ export class VertixEngine {
   // Decision side: what the latest detection decided, before it is shown.
   private decidedTargetPanes: PaneTarget[] = [];
   private decidedSpeakerCount = 0;
+  private decidedLayoutKey = 0;
   private decidedRule: LayoutRule = "broll";
   // True once a frame was rendered (or buffered) since the last reset: the
   // no-crop layout counts as committed from then on.
@@ -1174,6 +1183,7 @@ export class VertixEngine {
     this.lastSwitchedFar = false;
     this.decidedTargetPanes = [];
     this.decidedSpeakerCount = 0;
+    this.decidedLayoutKey = 0;
     this.decidedRule = "broll";
     this.hasFrameSinceReset = false;
     this.commitCountAtNextDetection = false;
@@ -1768,9 +1778,11 @@ export class VertixEngine {
     // A count committed at once after a seek or a mode switch replaces whatever was on screen: no dissolve from it.
     const snapWithoutCut = commitAtOnce && !sceneCut.isCut;
     this.commitCountAtNextDetection = false;
-    const stablePersonCount = commitAtOnce
-      ? this.personCount.commitNow(count, mediaTimeSec)
-      : this.personCount.observe(count, this.hasFrameSinceReset, mediaTimeSec);
+    // Debounced on the layout key, not only the pane count: see layoutKey.
+    const key = layoutKey(plan.rule, count);
+    const stableKey = commitAtOnce
+      ? this.personCount.commitNow(key, mediaTimeSec)
+      : this.personCount.observe(key, this.hasFrameSinceReset, mediaTimeSec);
     // With lookahead, a cut found here is shown from the frame where it
     // happened (the biggest per-frame jump since the previous detection),
     // not from this detection frame.
@@ -1785,7 +1797,7 @@ export class VertixEngine {
         : decisionSec < mediaTimeSec
           ? "localised"
           : "tick";
-    this.decideLayout(decisionSec, count, stablePersonCount, cutSource, snapWithoutCut, srcW, srcH, cropW, cropH, plan);
+    this.decideLayout(decisionSec, key, stableKey, cutSource, snapWithoutCut, srcW, srcH, cropW, cropH, plan);
     this.benchmarkProbe?.recordTracking(
       trackerMs,
       plan.foregroundCount,
@@ -1838,8 +1850,8 @@ export class VertixEngine {
   /** Turns one detection into a LayoutDecision for the frame at `mediaTimeSec`, and queues it for display. */
   private decideLayout(
     mediaTimeSec: number,
-    count: number,
-    stablePersonCount: number,
+    key: number,
+    stableKey: number,
     cutSource: CutSource | null,
     snap: boolean,
     srcW: number,
@@ -1849,19 +1861,20 @@ export class VertixEngine {
     plan: LayoutPlan
   ): void {
     const isCut = cutSource !== null;
-    const countChanged = stablePersonCount !== this.decidedSpeakerCount;
+    const stablePersonCount = paneCountOf(stableKey);
+    const countChanged = stableKey !== this.decidedLayoutKey;
     let reframe: Reframe | null = isCut || snap ? "snap" : null;
     if (stablePersonCount === 0) {
       this.decidedTargetPanes = [];
       this.decidedRule = "broll";
-    } else if (count === stablePersonCount) {
+    } else if (key === stableKey) {
       this.decidedRule = plan.rule;
       // Only refresh the target once the raw count matches the *committed*
       // layout — otherwise, mid-debounce, this could compute a different
       // pane count than what's actually on screen. The deadzone itself
       // lives inside computeSpeakerLayout. A reframe or a new layout aims
       // straight at the new faces, without the deadzone.
-      if (this.lastSwitchedFar) reframe ??= "dissolve";
+      if (this.lastSwitchedFar || this.movesSinglePaneFar(countChanged)) reframe ??= "dissolve";
       this.decidedTargetPanes =
         reframe !== null || countChanged
           ? computeSpeakerLayout(this.lastResolvedFaces, srcW, srcH, cropW, cropH)
@@ -1876,6 +1889,7 @@ export class VertixEngine {
             );
     }
     this.decidedSpeakerCount = stablePersonCount;
+    this.decidedLayoutKey = stableKey;
     this.decisions.push({
       mediaTimeSec,
       speakerCount: stablePersonCount,
@@ -1890,6 +1904,19 @@ export class VertixEngine {
       tracks: plan.tracks,
     });
     if (this.frameBuffer?.hasHeld) this.releaseHeldFrames();
+  }
+
+  /**
+   * A committed change between one-pane layouts of different kinds (one
+   * face, main subject, group) that moves the framing far away: dissolve
+   * instead of panning across the frame.
+   */
+  private movesSinglePaneFar(layoutChanged: boolean): boolean {
+    const previous = this.decidedTargetPanes;
+    const next = this.lastResolvedFaces;
+    if (!layoutChanged || previous.length !== 1 || next.length !== 1) return false;
+    const from = previous[0].face;
+    return Math.hypot(from.cx - next[0].cx, from.cy - next[0].cy) >= SWITCH_DISSOLVE_DISTANCE;
   }
 
   /** Applies the decisions due for the frame about to be drawn; with `onlyUpToSec` null, every queued one (no lookahead: they are already late). */
