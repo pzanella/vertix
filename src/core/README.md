@@ -11,11 +11,16 @@ Give it a `<video>` element and a `<canvas>` element. It:
 
 1. Detects faces in the video a few times a second (Rust/WASM, via a
    small pretrained model).
-2. Decides how many of those faces are real on-camera speakers (filters
-   out small/distant/partially-cropped ones).
-3. Picks a layout for that many speakers — one wide chest-up crop, a
-   stacked split for two, a grid for three or more, or no crop at all if
-   there are zero.
+2. Gives each face a stable track ID (`tracking/faceTracker.ts`) and keeps
+   only foreground faces for the layout: at least 35% of the largest
+   face's area, not cut off at an edge (`tracking/foregroundFilter.ts`).
+3. Picks a layout (`tracking/layoutPlanner.ts`): one wide chest-up crop,
+   a stacked split for two (panes follow track IDs, so they never swap),
+   no crop at all for zero. With three or more foreground faces it follows
+   one main subject (`tracking/subjectSelector.ts`), frames the whole
+   group when it fits in 9:16, or shows a grid only for a real panel
+   (`tracking/panelDetector.ts`). A source that is not landscape is shown
+   whole instead (`sourceAspect.ts`).
 4. Draws that layout to the canvas, every video frame, with a stable,
    gently-smoothed camera and a soft cross-dissolve whenever the layout
    itself changes.
@@ -135,7 +140,7 @@ crop state. This two-layer design, a stable layout plus independently-smoothed
 positions within it, came out of several rounds of tuning against real
 footage. If camera movement still feels off, look at the constants in
 `layoutEngine.ts` (`PANE_SMOOTHING_TAU_SEC`), `VertixEngine.ts`
-(`DEADZONE_FRACTION`) and `speakerTracking.ts` (`PERSON_COUNT_STABLE_SEC`),
+(`DEADZONE_FRACTION`) and `personCount.ts` (`PERSON_COUNT_STABLE_SEC`),
 not the layout math itself.
 
 ## Lookahead
