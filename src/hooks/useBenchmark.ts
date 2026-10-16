@@ -1,11 +1,14 @@
 import { useCallback, useRef, useState } from "react";
 import {
+  BenchmarkRunError,
   benchmarkReportToCsv,
   benchmarkSummaryRows,
   buildBenchmarkReport,
   buildSuitePlan,
   collectBenchmarkEnvironment,
   defaultWasmBuild,
+  describeError,
+  videoElementState,
   getActiveWasmBuild,
   isWasmSimdSupported,
   runBenchmarkClip,
@@ -13,6 +16,7 @@ import {
   switchWasmBuild,
   type BenchmarkClipResult,
   type BenchmarkConfig,
+  type BenchmarkFailure,
   type BenchmarkReport,
   type LookaheadComparison,
   type SuiteStep,
@@ -55,6 +59,35 @@ interface UseBenchmarkReturn {
   cancel: () => void;
   downloadJson: () => void;
   downloadCsv: () => void;
+}
+
+/** The step a run is on, so a failure can say where it happened. */
+interface StepContext {
+  step: BenchmarkFailure["step"];
+  clip: string | null;
+  build: string | null;
+  lookahead: boolean | null;
+  mode: BenchmarkFailure["mode"];
+}
+
+const NO_STEP: StepContext = { step: null, clip: null, build: null, lookahead: null, mode: null };
+
+/** One line for the UI: where and why the run stopped, and when the last detection came in. */
+function failureSummary(failure: BenchmarkFailure): string {
+  const where = [
+    failure.step ? `step ${failure.step.index + 1}/${failure.step.total} (${failure.step.kind})` : null,
+    failure.clip,
+    failure.build ? `${failure.build} build` : null,
+    failure.lookahead === null ? null : `lookahead ${failure.lookahead ? "on" : "off"}`,
+  ]
+    .filter(Boolean)
+    .join(", ");
+  const engine = failure.resources?.engine;
+  const lastDetection =
+    engine?.lastDetectionAtMs != null && failure.resources
+      ? ` Last detection ${((failure.resources.atMs - engine.lastDetectionAtMs) / 1000).toFixed(1)} s before (media ${engine.lastDetectionMediaTimeSec?.toFixed(2)} s).`
+      : " No detection since the last reset.";
+  return `${failure.name}: ${failure.message}${where ? ` — ${where}.` : "."}${lastDetection}`;
 }
 
 function delay(ms: number, signal: AbortSignal): Promise<void> {
@@ -130,7 +163,8 @@ export function useBenchmark({ config, getEngine, videoRef, load }: UseBenchmark
         engine: VertixEngine,
         video: HTMLVideoElement,
         signal: AbortSignal,
-        results: BenchmarkClipResult[]
+        results: BenchmarkClipResult[],
+        enterStep: (context: StepContext) => void
       ) => Promise<void>
     ) => {
       const engine = getEngine();
@@ -148,8 +182,12 @@ export function useBenchmark({ config, getEngine, videoRef, load }: UseBenchmark
       const results: BenchmarkClipResult[] = [];
       // The user's switch (or null: the build default), restored after the suite.
       const lookaheadPreference = engine.getLookaheadPreference();
+      let context = NO_STEP;
+      const enterStep = (next: StepContext) => {
+        context = next;
+      };
       try {
-        await plan(engine, video, controller.signal, results);
+        await plan(engine, video, controller.signal, results, enterStep);
         const finished = buildBenchmarkReport(config, environment, comparison, results, lookaheadComparison);
         setReport(finished);
         setStatus("done");
@@ -157,9 +195,26 @@ export function useBenchmark({ config, getEngine, videoRef, load }: UseBenchmark
       } catch (err) {
         const cancelled = err instanceof DOMException && err.name === "AbortError";
         setStatus(cancelled ? "cancelled" : "error");
-        if (!cancelled) setError(err instanceof Error ? err.message : String(err));
-        if (results.length > 0) {
-          setReport(buildBenchmarkReport(config, environment, comparison, results, lookaheadComparison));
+        let failure: BenchmarkFailure | null = null;
+        if (!cancelled) {
+          failure =
+            err instanceof BenchmarkRunError
+              ? { ...err.failure, step: context.step }
+              : {
+                  ...describeError(err),
+                  ...context,
+                  failedAt: new Date().toISOString(),
+                  resources: await engine.getResourceStats().catch(() => null),
+                  video: videoElementState(video),
+                };
+          if (err instanceof BenchmarkRunError && err.partial) results.push({ ...err.partial, failure });
+          console.error("[Vertix bench] run failed", failure);
+          setError(failureSummary(failure));
+        }
+        if (results.length > 0 || failure) {
+          const partial = buildBenchmarkReport(config, environment, comparison, results, lookaheadComparison, failure);
+          setReport(partial);
+          window.vertixBenchmarkReport = partial;
         }
       } finally {
         engine.setMode("9:16");
@@ -180,19 +235,21 @@ export function useBenchmark({ config, getEngine, videoRef, load }: UseBenchmark
       ? { builds: ["simd", "scalar"], order: "alternating-per-clip", simdSkippedReason: null }
       : { builds: ["scalar"], order: null, simdSkippedReason: "not-supported" };
 
-    void run(comparison, { order: "off-first-per-clip" }, async (engine, video, signal, results) => {
+    void run(comparison, { order: "off-first-per-clip" }, async (engine, video, signal, results, enterStep) => {
       for (const [index, step] of steps.entries()) {
         const clip = BENCHMARK_CLIPS[step.clipIndex];
         const loadSource = () => load(clip.url);
 
         if (step.kind === "warmup") {
-          setStage({
-            label: `Switch to the ${step.build.variant} build, warm-up (${config.wasmWarmupSec}s of ${clip.file}, not recorded)`,
-            index,
-            total: steps.length,
-            kinds,
-            stopAtSec: config.wasmWarmupSec,
+          const label = `Switch to the ${step.build.variant} build, warm-up (${config.wasmWarmupSec}s of ${clip.file}, not recorded)`;
+          enterStep({
+            step: { index, total: steps.length, kind: step.kind, label },
+            clip: clip.file,
+            build: step.build.variant,
+            lookahead: true,
+            mode: "9:16",
           });
+          setStage({ label, index, total: steps.length, kinds, stopAtSec: config.wasmWarmupSec });
           await switchWasmBuild(step.build);
           await runUnrecordedWarmup(engine, video, {
             mode: "9:16",
@@ -208,17 +265,19 @@ export function useBenchmark({ config, getEngine, videoRef, load }: UseBenchmark
         const reframed = step.kind === "clip";
         const runOrder = reframed ? step.build.runOrder : null;
         const lookahead = reframed ? step.lookahead : true;
-        setStage({
-          label: reframed
-            ? `Clip ${step.clipIndex + 1}/${BENCHMARK_CLIPS.length}: ${clip.file} (9:16, ${step.build.variant} build, lookahead ${
-                lookahead ? "on" : "off"
-              }${runOrder ? `, run ${runOrder.position}/${runOrder.sequence.length}` : ""})`
-            : `Baseline: ${clip.file} (16:9, no detection)`,
-          index,
-          total: steps.length,
-          kinds,
-          stopAtSec: null,
+        const label = reframed
+          ? `Clip ${step.clipIndex + 1}/${BENCHMARK_CLIPS.length}: ${clip.file} (9:16, ${step.build.variant} build, lookahead ${
+              lookahead ? "on" : "off"
+            }${runOrder ? `, run ${runOrder.position}/${runOrder.sequence.length}` : ""})`
+          : `Baseline: ${clip.file} (16:9, no detection)`;
+        enterStep({
+          step: { index, total: steps.length, kind: step.kind, label },
+          clip: clip.file,
+          build: reframed ? step.build.variant : getActiveWasmBuild().variant,
+          lookahead,
+          mode: reframed ? "9:16" : "16:9",
         });
+        setStage({ label, index, total: steps.length, kinds, stopAtSec: null });
         results.push(
           await runBenchmarkClip(engine, video, {
             clipName: clip.file,

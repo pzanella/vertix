@@ -13,6 +13,7 @@ import type { BenchmarkWasmBuild } from "./suitePlan";
 import type { CutSource } from "../lookahead/decisionTimeline";
 import type { LayoutRule, TrackSnapshot } from "../tracking/layoutPlanner";
 import { TrackingRecorder, type TrackingSummary } from "./trackingStats";
+import type { BenchmarkFailure, ResourceSnapshot } from "./resourceStats";
 
 export type DetectionPath = "worker" | "main-thread";
 
@@ -376,6 +377,10 @@ export interface BenchmarkClipResult {
   wasmBuild: BenchmarkWasmBuild;
   /** Schema v5. */
   lookahead: BenchmarkLookahead;
+  /** Schema v6: workers and memory when the run started and ended (null if not available). */
+  resources?: { start: ResourceSnapshot | null; end: ResourceSnapshot | null };
+  /** Schema v6: set when the run stopped with an error; the rest is what was recorded until then. */
+  failure?: BenchmarkFailure;
   summary: BenchmarkClipSummary;
   raw: BenchmarkClipRaw;
 }

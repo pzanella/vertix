@@ -24,6 +24,7 @@ import {
   type SceneCutScores,
 } from "./layoutEngine";
 import type { BenchmarkProbe } from "./bench/BenchmarkRecorder";
+import { jsHeapSnapshot, type ResourceSnapshot, type WorkerCount } from "./bench/resourceStats";
 import {
   DecisionTimeline,
   mergeDecisions,
@@ -340,6 +341,36 @@ let sharedWorkerLoadPromise: Promise<boolean> | null = null;
 let disposeSharedWorker: (() => void) | null = null;
 let nextDetectionRequestId = 0;
 
+// Benchmark diagnostics: workers created and still running, per kind.
+const workerCounts: Record<"detection" | "cutTrigger", WorkerCount> = {
+  detection: { created: 0, live: 0 },
+  cutTrigger: { created: 0, live: 0 },
+};
+// WASM memory of each build loaded on the main thread (the fallback).
+const mainThreadWasmMemory: Partial<Record<WasmBuildVariant, WebAssembly.Memory>> = {};
+let nextStatsRequestId = 0;
+const pendingStats = new Map<number, (wasmMemoryBytes: number | null) => void>();
+// The detection worker answers a stats request well within this, unless busy or gone.
+const WORKER_STATS_TIMEOUT_MS = 500;
+
+/** The detection worker's WASM memory size, or null when it does not answer in time. */
+function detectionWorkerWasmMemory(): Promise<number | null> {
+  const worker = sharedWorker;
+  if (!worker || !sharedWorkerReady) return Promise.resolve(null);
+  return new Promise((resolve) => {
+    const requestId = nextStatsRequestId++;
+    const timeout = setTimeout(() => {
+      pendingStats.delete(requestId);
+      resolve(null);
+    }, WORKER_STATS_TIMEOUT_MS);
+    pendingStats.set(requestId, (bytes) => {
+      clearTimeout(timeout);
+      resolve(bytes);
+    });
+    worker.postMessage({ type: "stats", requestId });
+  });
+}
+
 interface PendingDetection {
   onResult: (facesFlat: Float64Array, cutScoresFlat: Float64Array, tookMs: number, readbackMs: number) => void;
   /** Called instead of onResult when the worker is replaced before it answers. */
@@ -401,6 +432,8 @@ function getSharedDetectionWorker(): Promise<boolean> {
       // Pages). No `type: "module"` — the bundle is built classic, see
       // scripts/build-worker.mjs.
       worker = new Worker(`${import.meta.env.BASE_URL}workers/faceDetectionWorker.js`);
+      workerCounts.detection.created += 1;
+      workerCounts.detection.live += 1;
     } catch (err) {
       console.error(
         "[Vertix] Couldn't construct the detection worker; falling back to running WASM on the main thread.",
@@ -419,10 +452,13 @@ function getSharedDetectionWorker(): Promise<boolean> {
       clearTimeout(timeout);
       resolve(ok);
     };
+    let terminated = false;
     const release = () => {
       worker.onmessage = null;
       worker.onerror = null;
       worker.terminate();
+      if (!terminated) workerCounts.detection.live -= 1;
+      terminated = true;
       if (sharedWorker === worker) {
         sharedWorker = null;
         sharedWorkerReady = false;
@@ -454,7 +490,13 @@ function getSharedDetectionWorker(): Promise<boolean> {
         readbackMs?: number;
         message?: string;
         build?: WasmBuildVariant;
+        wasmMemoryBytes?: number | null;
       };
+      if (msg.type === "stats" && msg.requestId !== undefined) {
+        pendingStats.get(msg.requestId)?.(msg.wasmMemoryBytes ?? null);
+        pendingStats.delete(msg.requestId);
+        return;
+      }
       if (msg.type === "ready") {
         if (settled) return;
         if (msg.build !== build) {
@@ -678,6 +720,7 @@ export class VertixEngine {
   // FPS/frame-time measurement.
   private lastFrameTime: number | null = null;
   private lastDetectionMediaTime: number | null = null;
+  private lastDetectionAtMs: number | null = null;
   private detectionIntervalEma = 0;
   private fpsEma = 0;
   private frameTimeEma = 0;
@@ -925,8 +968,7 @@ export class VertixEngine {
     this.detach();
     this.audioMonitor.detach();
     this.taintProbeCtx = null;
-    this.cutTriggerWorker?.terminate();
-    this.cutTriggerWorker = null;
+    this.terminateCutTriggerWorker();
     this.longTaskObserver?.disconnect();
     this.engine?.free();
     this.engine = null;
@@ -1100,7 +1142,7 @@ export class VertixEngine {
     if (this.wasmReady || this.wasmLoading) return;
     this.engineBuild = build;
     this.wasmLoading = importWasmBindings(build).then(async (bindings) => {
-      await bindings.default();
+      mainThreadWasmMemory[build] = (await bindings.default()).memory;
       if (this.engineBuild !== build) return;
       this.engine = new bindings.ReframeEngine();
       this.wasmReady = true;
@@ -1812,6 +1854,7 @@ export class VertixEngine {
           : this.detectionIntervalEma + (interval - this.detectionIntervalEma) * 0.2;
     }
     this.lastDetectionMediaTime = mediaTimeSec;
+    this.lastDetectionAtMs = performance.now();
 
     const faces = this.lastFaces;
     const faceSizes = faces.map((f) => Math.round(Math.max(f.w, f.h) * 1000) / 10);
@@ -2264,15 +2307,51 @@ export class VertixEngine {
     );
   }
 
+  private terminateCutTriggerWorker(): void {
+    if (!this.cutTriggerWorker) return;
+    this.cutTriggerWorker.terminate();
+    this.cutTriggerWorker = null;
+    workerCounts.cutTrigger.live -= 1;
+  }
+
+  /** Benchmark diagnostics: workers, WASM and JS memory, and what this engine holds right now. */
+  async getResourceStats(): Promise<ResourceSnapshot> {
+    const detectionWorker = await detectionWorkerWasmMemory();
+    const mainThread: ResourceSnapshot["wasmMemoryBytes"]["mainThread"] = {};
+    for (const [build, memory] of Object.entries(mainThreadWasmMemory)) {
+      if (memory) mainThread[build as WasmBuildVariant] = memory.buffer.byteLength;
+    }
+    return {
+      atMs: performance.now(),
+      workers: {
+        detection: { ...workerCounts.detection },
+        cutTrigger: { ...workerCounts.cutTrigger },
+      },
+      wasmMemoryBytes: { detectionWorker, mainThread },
+      jsHeap: jsHeapSnapshot(),
+      engine: {
+        detectionInFlight: this.detectionInFlight,
+        pendingDetections: pendingDetections.size,
+        queuedDecisions: this.decisions.size,
+        tracks: this.planner.tracker.tracks.length,
+        frameBufferSlots: this.frameBuffer?.allocatedSlots ?? 0,
+        frameBufferBytes: this.frameBuffer?.allocatedBytes ?? 0,
+        lastDetectionMediaTimeSec: this.lastDetectionMediaTime,
+        lastDetectionAtMs: this.lastDetectionAtMs,
+      },
+    };
+  }
+
   private ensureCutTriggerWorker(): Worker | null {
     if (this.cutTriggerWorker || this.cutTriggerUnavailable) return this.cutTriggerWorker;
     try {
       const worker = new Worker(`${import.meta.env.BASE_URL}workers/cutTriggerWorker.js`);
+      workerCounts.cutTrigger.created += 1;
+      workerCounts.cutTrigger.live += 1;
       worker.onmessage = (e: MessageEvent) => this.onCutTriggerScore(e.data);
       worker.onerror = () => {
         console.error("[Vertix] Cut-trigger worker failed; cuts are applied at detection rate.");
-        worker.terminate();
-        this.cutTriggerWorker = null;
+        this.terminateCutTriggerWorker();
         this.cutTriggerUnavailable = true;
       };
       this.cutTriggerWorker = worker;

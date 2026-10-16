@@ -370,7 +370,20 @@ lookaheadComparison, precisionWarnings, results[] }`. Each result contains `summ
   - `schemaVersion` is 6. Every v5, v4 and v3 field is still there with
     the same meaning. Every v2 field is too, except
     `environment.wasmBuiltWithSimd` (see [Environment info](#environment-info)).
-  - New in v6: `summary.tracking` (see
+  - New in v6: `failure` at the top level (null when the suite completed)
+    and per result `failure` (only on a run that stopped with an error):
+    `{ name, message, stack, step: { index, total, kind, label }, clip,
+    build, lookahead, mode, failedAt, resources, video }`. `resources` is
+    a snapshot like the one below, with the last detection's media time and
+    wall time (`engine.lastDetectionMediaTimeSec`, `lastDetectionAtMs`);
+    `video` is the element's time, readyState, networkState and MediaError.
+    The run that failed is exported with what it recorded until then. Per
+    result, `resources: { start, end }`: live and created detection and
+    cut-trigger workers, the WASM memory of the detection worker and of each
+    build loaded on the main thread, `performance.memory` (Chromium), and
+    the engine's frame-buffer slots and bytes, queued decisions, pending
+    detections and tracks.
+  - Also new in v6: `summary.tracking` (see
     [Layout and main thread](#layout-and-main-thread)). `raw.detections`
     `keptFaces` now counts foreground faces (the tracker's foreground
     filter) instead of every speaker-sized face, and `resolvedFaces` /

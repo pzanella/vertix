@@ -1,6 +1,31 @@
 import type { VertixEngine, VertixMode } from "../VertixEngine";
 import { BenchmarkRecorder, type BenchmarkClipResult, type BenchmarkLookahead } from "./BenchmarkRecorder";
 import type { BenchmarkWasmBuild } from "./suitePlan";
+import { describeError, videoElementState, type BenchmarkFailure, type ResourceSnapshot } from "./resourceStats";
+
+/**
+ * A run that stopped with an error. `failure` says why; `partial` is what
+ * was recorded until then (null if recording had not started).
+ */
+export class BenchmarkRunError extends Error {
+  constructor(
+    readonly failure: BenchmarkFailure,
+    readonly partial: BenchmarkClipResult | null,
+    readonly original: unknown
+  ) {
+    super(failure.message);
+    this.name = failure.name;
+  }
+}
+
+/** Never lets a diagnostics failure become the run's failure. */
+async function resourceSnapshot(engine: VertixEngine): Promise<ResourceSnapshot | null> {
+  try {
+    return await engine.getResourceStats();
+  } catch {
+    return null;
+  }
+}
 
 export interface ClipPlaybackOptions {
   mode: VertixMode;
@@ -153,6 +178,7 @@ export async function runBenchmarkClip(
     if (document.visibilityState !== "visible") pageHidden = true;
   };
   document.addEventListener("visibilitychange", onVisibilityChange);
+  const start = await resourceSnapshot(engine);
   try {
     await playClip(engine, video, options, {
       onReady: () => {
@@ -170,19 +196,47 @@ export async function runBenchmarkClip(
     // Read before the next clip loads: buffer counters reset per source.
     lookahead = lookaheadSnapshot(engine);
   } catch (error) {
-    (recorder as BenchmarkRecorder | null)?.finish(options.mode);
-    throw error;
+    if (error instanceof DOMException && error.name === "AbortError") {
+      (recorder as BenchmarkRecorder | null)?.finish(options.mode);
+      throw error;
+    }
+    const end = await resourceSnapshot(engine);
+    const failure: BenchmarkFailure = {
+      ...describeError(error),
+      step: null,
+      clip: options.clipName,
+      build: options.wasmBuild.variant,
+      lookahead: options.lookahead ?? null,
+      mode: options.mode,
+      failedAt: new Date().toISOString(),
+      resources: end,
+      video: videoElementState(video),
+    };
+    const stopped = recorder as BenchmarkRecorder | null;
+    const partial: BenchmarkClipResult | null = stopped
+      ? {
+          ...stopped.finish(options.mode),
+          pageHiddenDuringRun: pageHidden,
+          wasmBuild: options.wasmBuild,
+          lookahead: lookaheadSnapshot(engine),
+          resources: { start, end },
+          failure,
+        }
+      : null;
+    throw new BenchmarkRunError(failure, partial, error);
   } finally {
     engine.setBenchmarkProbe(null);
     document.removeEventListener("visibilitychange", onVisibilityChange);
   }
   const finished = recorder as BenchmarkRecorder | null;
   if (!finished) throw new Error("Benchmark clip ended before it started");
+  const recording = finished.finish(options.mode);
   return {
-    ...finished.finish(options.mode),
+    ...recording,
     pageHiddenDuringRun: pageHidden,
     wasmBuild: options.wasmBuild,
     lookahead: lookahead ?? lookaheadSnapshot(engine),
+    resources: { start, end: await resourceSnapshot(engine) },
   };
 }
 

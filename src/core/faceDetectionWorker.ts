@@ -20,6 +20,7 @@ import { importWasmBindings, type WasmBindings, type WasmBuildVariant } from "./
 const ctx = self as unknown as Worker;
 
 let engine: InstanceType<WasmBindings["ReframeEngine"]> | null = null;
+let wasmMemory: WebAssembly.Memory | null = null;
 
 // The main thread picks the build (see wasmBuild.ts) and sends it in the
 // first message; nothing is fetched before that, so only one .wasm binary
@@ -33,7 +34,7 @@ function initEngine(build: WasmBuildVariant): void {
   const wasmUrl = new URL(`wasm_${build}_bg.wasm`, self.location.href);
   importWasmBindings(build)
     .then(async (bindings) => {
-      await bindings.default({ module_or_path: wasmUrl });
+      wasmMemory = (await bindings.default({ module_or_path: wasmUrl })).memory;
       engine = new bindings.ReframeEngine();
       ctx.postMessage({ type: "ready", build });
     })
@@ -58,6 +59,11 @@ interface DetectMessage {
 interface ResetMessage {
   type: "reset";
 }
+/** Benchmark diagnostics: the size of this worker's WASM memory. */
+interface StatsMessage {
+  type: "stats";
+  requestId: number;
+}
 
 // Pixel extraction (draw the frame, read its bytes back) happens here, not
 // on the main thread — the caller already resizes the frame down to the
@@ -67,8 +73,16 @@ interface ResetMessage {
 let detectCanvas: OffscreenCanvas | null = null;
 let detectCtx: OffscreenCanvasRenderingContext2D | null = null;
 
-ctx.onmessage = (e: MessageEvent<InitMessage | DetectMessage | ResetMessage>) => {
+ctx.onmessage = (e: MessageEvent<InitMessage | DetectMessage | ResetMessage | StatsMessage>) => {
   const msg = e.data;
+  if (msg.type === "stats") {
+    ctx.postMessage({
+      type: "stats",
+      requestId: msg.requestId,
+      wasmMemoryBytes: wasmMemory?.buffer.byteLength ?? null,
+    });
+    return;
+  }
   if (msg.type === "init") {
     initEngine(msg.build);
     return;

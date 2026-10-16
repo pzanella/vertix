@@ -1,5 +1,6 @@
 import type { BenchmarkClipResult, BenchmarkClipSummary } from "./BenchmarkRecorder";
 import type { BenchmarkEnvironment } from "./environment";
+import type { BenchmarkFailure } from "./resourceStats";
 import type { SampleSummary } from "./stats";
 import type { WasmBuildVariant } from "../wasmBuild";
 
@@ -44,6 +45,8 @@ export interface BenchmarkReport {
   lookaheadComparison: LookaheadComparison;
   /** Timing metrics whose median is within PRECISION_WARNING_FACTOR × the measured timer resolution. */
   precisionWarnings: PrecisionWarning[];
+  /** Schema v6: why the suite stopped early, null when it completed. */
+  failure: BenchmarkFailure | null;
   results: BenchmarkClipResult[];
 }
 
@@ -84,7 +87,8 @@ export function buildBenchmarkReport(
   environment: BenchmarkEnvironment,
   wasmBuildComparison: WasmBuildComparison,
   results: BenchmarkClipResult[],
-  lookaheadComparison: LookaheadComparison = { order: null }
+  lookaheadComparison: LookaheadComparison = { order: null },
+  failure: BenchmarkFailure | null = null
 ): BenchmarkReport {
   return {
     tool: "vertix-benchmark",
@@ -94,6 +98,7 @@ export function buildBenchmarkReport(
     wasmBuildComparison,
     lookaheadComparison,
     precisionWarnings: findPrecisionWarnings(results, environment.timerResolutionMs),
+    failure,
     results,
   };
 }
