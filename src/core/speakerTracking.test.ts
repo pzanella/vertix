@@ -3,7 +3,7 @@ import type { FaceBox } from "./layoutEngine";
 import { ActiveSpeakerResolver, PersonCountDebouncer } from "./speakerTracking";
 
 function face(cx: number, cy: number, size = 0.15): FaceBox {
-  return { cx, cy, w: size, h: size, motion: 0, confidence: 0.9 };
+  return { cx, cy, w: size, h: size, motion: 0, lowerFaceMotion: 0, confidence: 0.9 };
 }
 
 const LEFT = face(0.2, 0.5);

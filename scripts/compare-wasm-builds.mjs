@@ -22,7 +22,7 @@ const maxFramesPerClip = Number(process.argv[3] ?? 60);
 const FRAME_W = 320;
 const FRAME_H = 240;
 const FRAME_BYTES = FRAME_W * FRAME_H * 4;
-const STRIDE = 7;
+const STRIDE = 8;
 
 // Must match wasm/src/face.rs and src/core/VertixEngine.ts.
 const CONF_THRESHOLD = 0.8;

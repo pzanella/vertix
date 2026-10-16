@@ -4,7 +4,10 @@ export interface FaceBox {
   cy: number;
   w: number;
   h: number;
+  /** Mouth activity: lower-face change minus upper-face change since the previous detection, clamped at 0 (head and camera motion cancel out). */
   motion: number;
+  /** Lower-face change alone: the mouth-motion measure before head and camera motion were removed. For comparison only. */
+  lowerFaceMotion: number;
   /** The detector's own confidence (0..1) for this detection. Already thresholded server-side (Rust drops anything below its own cutoff), so in practice this stays in a fairly narrow high band. */
   confidence: number;
 }
@@ -24,7 +27,7 @@ export interface SpeakerPane {
 }
 
 // Values per face in the array returned by `ReframeEngine.update_faces`.
-const DETECTION_STRIDE = 7;
+const DETECTION_STRIDE = 8;
 
 export interface UnpackedDetections {
   faces: FaceBox[];
@@ -32,7 +35,7 @@ export interface UnpackedDetections {
   skinRejected: FaceBox[];
 }
 
-/** Unpacks the `[cx, cy, w, h, motion, score, skinRejected, ...]` array returned by `ReframeEngine.update_faces`. */
+/** Unpacks the `[cx, cy, w, h, motion, score, skinRejected, lowerFaceMotion, ...]` array returned by `ReframeEngine.update_faces`. */
 export function unpackDetections(flat: Float64Array): UnpackedDetections {
   const result: UnpackedDetections = { faces: [], skinRejected: [] };
   for (let i = 0; i + DETECTION_STRIDE - 1 < flat.length; i += DETECTION_STRIDE) {
@@ -43,6 +46,7 @@ export function unpackDetections(flat: Float64Array): UnpackedDetections {
       h: flat[i + 3],
       motion: flat[i + 4],
       confidence: flat[i + 5],
+      lowerFaceMotion: flat[i + 7],
     };
     (flat[i + 6] === 0 ? result.faces : result.skinRejected).push(face);
   }

@@ -251,7 +251,7 @@ function cutProbe() {
   return { probe, cuts };
 }
 
-const LEFT_FACE = new Float64Array([0.3, 0.5, 0.2, 0.2, 0, 0.9, 0]);
+const LEFT_FACE = new Float64Array([0.3, 0.5, 0.2, 0.2, 0, 0.9, 0, 0]);
 const CUT: SceneCutScores = { hist: 0.5, grid: 0.5, isCut: true };
 const NO_CUT: SceneCutScores = { hist: 0, grid: 0, isCut: false };
 
