@@ -286,22 +286,35 @@ describe.each([25, 50])("VertixEngine speaker tracking at %i fps", (fps) => {
     engine.destroy();
   });
 
-  it("shows the 3-face grid until a size-dominant face has won for 0.8s", () => {
-    const { engine, detect, secondsUntil, resolved } = setUpTracking(fps);
+  it("frames a large face alone: much smaller faces are background", () => {
+    const { engine, detect, resolved } = setUpTracking(fps);
     detect([LEFT, BIG_MIDDLE, RIGHT]);
-    expect(resolved()).toHaveLength(3);
-    expect(secondsUntil([LEFT, BIG_MIDDLE, RIGHT], () => resolved().length === 1)).toBeCloseTo(
-      0.8 - FRAMES_PER_DETECTION / fps,
-      6
-    );
     expect(resolved()).toEqual([expect.objectContaining({ cx: BIG_MIDDLE.cx })]);
     engine.destroy();
   });
 
-  it("frames nobody when 4+ faces have no clear winner", () => {
+  it("picks a clearly leading foreground face at once on the first detection", () => {
+    const { engine, detect, resolved } = setUpTracking(fps);
+    detect([LEFT, { ...MIDDLE, size: 0.2 }, RIGHT]);
+    expect(resolved()).toEqual([expect.objectContaining({ cx: MIDDLE.cx })]);
+    engine.destroy();
+  });
+
+  it("follows the largest face near the centre when 4 faces have no clear winner and do not fit in 9:16", () => {
     const { engine, detect, resolved } = setUpTracking(fps);
     detect([LEFT, MIDDLE, RIGHT, FAR_RIGHT]);
-    expect(resolved()).toEqual([]);
+    expect(resolved()).toEqual([expect.objectContaining({ cx: MIDDLE.cx })]);
+    engine.destroy();
+  });
+
+  it("shows the grid once 3 similar faces have been still for 1.0s", () => {
+    const { engine, detect, secondsUntil, resolved } = setUpTracking(fps);
+    detect([LEFT, MIDDLE, RIGHT]);
+    expect(resolved()).toHaveLength(1);
+    expect(secondsUntil([LEFT, MIDDLE, RIGHT], () => resolved().length === 3)).toBeCloseTo(
+      1.0 - FRAMES_PER_DETECTION / fps,
+      6
+    );
     engine.destroy();
   });
 
@@ -346,11 +359,11 @@ describe("VertixEngine skin-filter rejections", () => {
 });
 
 describe("VertixEngine scene cuts", () => {
-  it("resets the active-speaker lock and counts the cut", () => {
+  it("drops the tracks and the panel evidence, and counts the cut", () => {
     const { engine, detect, secondsUntil, resolved } = setUpTracking(25);
-    secondsUntil([LEFT, BIG_MIDDLE, RIGHT], () => resolved().length === 1);
+    secondsUntil([LEFT, MIDDLE, RIGHT], () => resolved().length === 3);
     detect([LEFT, MIDDLE, RIGHT], { cut: true });
-    expect(resolved()).toHaveLength(3);
+    expect(resolved()).toEqual([expect.objectContaining({ cx: MIDDLE.cx })]);
     expect(engine.getMetrics().sceneCutCount).toBe(1);
     engine.destroy();
   });
@@ -434,7 +447,7 @@ describe("VertixEngine active-speaker switch", () => {
       detect([LEFT, BIG_MIDDLE_MOVED, RIGHT]);
       expect(isDissolving()).toBe(false);
     }
-    expect(resolved()[0].cx).toBe(BIG_MIDDLE_MOVED.cx);
+    expect(resolved()[0].cx).toBeCloseTo(BIG_MIDDLE_MOVED.cx, 3);
     engine.destroy();
   });
 });

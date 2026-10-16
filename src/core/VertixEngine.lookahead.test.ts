@@ -243,6 +243,8 @@ function cutProbe() {
     recordDetection: noop,
     recordSkippedDetection: noop,
     recordLayoutChange: noop,
+    recordTracking: noop,
+    recordLayoutRule: noop,
     recordTriggerCost: noop,
     recordDisplay: noop,
     recordCutShown: (_now, cutMediaTimeSec, shownMediaTimeSec, source) =>
@@ -922,6 +924,10 @@ describe("VertixEngine lookahead", () => {
         isCut: false,
         cutSource: null,
         skinRejectedFaces: [],
+        rule: "broll",
+        subjectTrackId: null,
+        paneTrackIds: [],
+        tracks: [],
       });
       let blendedFrames = 0;
       for (let i = 0; i < delayFrames + 12; i++) {

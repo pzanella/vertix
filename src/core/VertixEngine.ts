@@ -1,5 +1,7 @@
 import { AudioActivityMonitor } from "./audioActivity";
-import { ActiveSpeakerResolver, PersonCountDebouncer } from "./speakerTracking";
+import { PersonCountDebouncer } from "./personCount";
+import { LayoutPlanner, type LayoutPlan, type LayoutRule, type TrackSnapshot } from "./tracking/layoutPlanner";
+import type { PanelVariant } from "./tracking/panelDetector";
 import {
   computeSpeakerLayout,
   faceVisibleFraction,
@@ -202,6 +204,8 @@ export interface VertixState {
   speakerCount: number;
   /** Whether a layout cross-dissolve is currently in progress. */
   isTransitioning: boolean;
+  /** The rule behind the layout on screen (9:16 only). */
+  layoutRule: LayoutRule;
 }
 
 // Exported so useWasmReframe.ts's own pre-attach placeholder state matches
@@ -511,6 +515,15 @@ const SKIN_REJECTED_STROKE = "#f97316";
 const SKIN_REJECTED_LINE_WIDTH = 3;
 const SKIN_REJECTED_DASH = [10, 6];
 
+// "Show tracks" overlay style: the main subject thicker and in another
+// colour, background tracks dimmed, unconfirmed tracks dashed.
+const TRACK_SUBJECT_STROKE = "#facc15";
+const TRACK_FOREGROUND_STROKE = "#22d3ee";
+const TRACK_BACKGROUND_STROKE = "rgba(148, 163, 184, 0.7)";
+const TRACK_LINE_WIDTH = 2;
+const TRACK_SUBJECT_LINE_WIDTH = 4;
+const TRACK_TENTATIVE_DASH = [6, 4];
+
 // How long a layout change (0 -> 2 speakers, 2 -> 3, etc.) takes to
 // cross-dissolve from the old framing into the new one, instead of cutting
 // instantly.
@@ -665,13 +678,18 @@ export class VertixEngine {
   private skinRejectionOverlayCtx: CanvasRenderingContext2D | null = null;
   private lastResolvedFaces: FaceBox[] = [];
   private personCount = new PersonCountDebouncer();
+  private planner = new LayoutPlanner();
+  private lastPlanRule: LayoutRule = "broll";
+  private lastSwitchedFar = false;
+  private tracksOverlay: HTMLCanvasElement | null = null;
+  private tracksOverlayCtx: CanvasRenderingContext2D | null = null;
 
   private audioMonitor = new AudioActivityMonitor();
-  private activeSpeaker = new ActiveSpeakerResolver();
 
   // Decision side: what the latest detection decided, before it is shown.
   private decidedTargetPanes: PaneTarget[] = [];
   private decidedSpeakerCount = 0;
+  private decidedRule: LayoutRule = "broll";
   // True once a frame was rendered (or buffered) since the last reset: the
   // no-crop layout counts as committed from then on.
   private hasFrameSinceReset = false;
@@ -683,6 +701,10 @@ export class VertixEngine {
   // Display side: what the frame on screen uses.
   private displayedSpeakerCount = 0;
   private displayedSkinRejectedFaces: FaceBox[] = [];
+  private displayedRule: LayoutRule = "broll";
+  private displayedSubjectTrackId: number | null = null;
+  private displayedTracks: TrackSnapshot[] = [];
+  private displayedPaneTrackIds: number[] = [];
   private targetPanes: PaneTarget[] = [];
   private smoothedPanes: PaneRect[] = [];
 
@@ -917,6 +939,20 @@ export class VertixEngine {
     this.skinRejectionOverlayCtx = null;
   }
 
+  /** Draws every face track (ID, main subject) on `canvas`, laid exactly over the output like the skin-rejection overlay. Pass null to stop. */
+  setTracksOverlay(canvas: HTMLCanvasElement | null): void {
+    if (!canvas)
+      this.tracksOverlayCtx?.clearRect(0, 0, this.tracksOverlay?.width ?? 0, this.tracksOverlay?.height ?? 0);
+    this.tracksOverlay = canvas;
+    this.tracksOverlayCtx = null;
+  }
+
+  /** Switches how a panel is recognised (see PanelVariant), for A/B measurement; resets tracking like a seek. */
+  setPanelVariant(variant: PanelVariant): void {
+    this.planner.setPanelVariant(variant);
+    this.resetTrackingState();
+  }
+
   /** Starts (or, with null, stops) reporting per-frame and per-detection timings to `probe`. Does not change rendering or detection. */
   setBenchmarkProbe(probe: BenchmarkProbe | null): void {
     this.benchmarkProbe = probe;
@@ -942,6 +978,11 @@ export class VertixEngine {
   /** The host's choice from setLookaheadEnabled, or null while lookahead follows the build default. */
   getLookaheadPreference(): boolean | null {
     return this.lookaheadPreference;
+  }
+
+  /** 9:16: the only mode with detection, crops and lookahead. */
+  private get reframing(): boolean {
+    return this.mode === "9:16";
   }
 
   private get lookaheadEnabled(): boolean {
@@ -985,6 +1026,7 @@ export class VertixEngine {
       meta: this.meta,
       speakerCount: this.displayedSpeakerCount,
       isTransitioning: this.transitionStart !== null,
+      layoutRule: this.displayedRule,
     };
   }
 
@@ -1105,14 +1147,21 @@ export class VertixEngine {
     this.resetCutTrigger();
     this.detectionIntervalEma = 0;
     this.personCount.reset();
-    this.activeSpeaker.reset();
+    this.planner.reset();
+    this.lastPlanRule = "broll";
+    this.lastSwitchedFar = false;
     this.decidedTargetPanes = [];
     this.decidedSpeakerCount = 0;
+    this.decidedRule = "broll";
     this.hasFrameSinceReset = false;
     this.commitCountAtNextDetection = false;
     this.decisions.clear();
     this.displayedSpeakerCount = 0;
     this.displayedSkinRejectedFaces = [];
+    this.displayedRule = "broll";
+    this.displayedSubjectTrackId = null;
+    this.displayedTracks = [];
+    this.displayedPaneTrackIds = [];
     this.smoothedPanes = [];
     this.targetPanes = [];
     this.layoutSignature = "";
@@ -1198,7 +1247,7 @@ export class VertixEngine {
           ? "silent-audio-path"
           : null;
     this.appliedLookaheadEnabled = this.lookaheadEnabled;
-    const active = this.appliedLookaheadEnabled && this.lookaheadUnavailable === null && this.mode === "9:16";
+    const active = this.appliedLookaheadEnabled && this.lookaheadUnavailable === null && this.reframing;
     if (!active) {
       if (this.lookaheadLengthMs > 0) this.applyLookaheadLength({ frames: 0, lengthMs: 0 });
     } else if (this.lookaheadLengthMs === 0 || how === "flush") {
@@ -1345,7 +1394,7 @@ export class VertixEngine {
       enabledByDefault: LOOKAHEAD_ON_BY_DEFAULT[getActiveWasmBuild().variant],
       setByHost: this.lookaheadPreference !== null,
       unavailableReason: this.lookaheadEnabled ? this.lookaheadUnavailable : null,
-      bypassed: this.lookaheadEnabled && this.lookaheadUnavailable === null && this.mode === "16:9",
+      bypassed: this.lookaheadEnabled && this.lookaheadUnavailable === null && !this.reframing,
       audioDelayMs: Math.round(this.audioMonitor.outputDelaySec * 1000),
       lengthMs: Math.round(this.lookaheadLengthMs),
       delayFrames: this.delayFrames,
@@ -1399,19 +1448,10 @@ export class VertixEngine {
     if (!ctx) return;
     ctx.clearRect(0, 0, outW, outH);
     const faces = this.displayedSkinRejectedFaces;
-    if (faces.length === 0 || this.mode === "16:9") return;
+    if (faces.length === 0 || !this.reframing) return;
 
     const { w: srcW, h: srcH } = this.srcDims;
-    const fittedHeight = Math.round(srcH * (outW / srcW));
-    const views: { source: PaneRect; dest: PaneRect }[] =
-      this.displayedSpeakerCount === 0
-        ? [
-            {
-              source: { x: 0, y: 0, w: srcW, h: srcH },
-              dest: { x: 0, y: Math.round((outH - fittedHeight) / 2), w: outW, h: fittedHeight },
-            },
-          ]
-        : this.targetPanes.map((p, i) => ({ source: this.smoothedPanes[i], dest: p.pane.dest }));
+    const views = this.overlayViews(outW, outH);
 
     ctx.strokeStyle = SKIN_REJECTED_STROKE;
     ctx.lineWidth = SKIN_REJECTED_LINE_WIDTH;
@@ -1430,6 +1470,67 @@ export class VertixEngine {
           f.w * srcW * scaleX,
           f.h * srcH * scaleY
         );
+      }
+      ctx.restore();
+    }
+  }
+
+  /** Where each part of the source is drawn on the output: the panes, or the whole fitted frame (B-roll, 16:9). */
+  private overlayViews(outW: number, outH: number): { source: PaneRect; dest: PaneRect }[] {
+    const { w: srcW, h: srcH } = this.srcDims;
+    if (this.mode === "16:9") {
+      return [{ source: { x: 0, y: 0, w: srcW, h: srcH }, dest: { x: 0, y: 0, w: outW, h: outH } }];
+    }
+    if (this.displayedSpeakerCount === 0) {
+      const fittedHeight = Math.round(srcH * (outW / srcW));
+      return [
+        {
+          source: { x: 0, y: 0, w: srcW, h: srcH },
+          dest: { x: 0, y: Math.round((outH - fittedHeight) / 2), w: outW, h: fittedHeight },
+        },
+      ];
+    }
+    return this.targetPanes.map((p, i) => ({ source: this.smoothedPanes[i], dest: p.pane.dest }));
+  }
+
+  /** Draws every track of the decision on screen (box and ID; the main subject highlighted) on the overlay canvas. */
+  private drawTracksOverlay(overlay: HTMLCanvasElement, outW: number, outH: number): void {
+    if (overlay.width !== outW || overlay.height !== outH) {
+      overlay.width = outW;
+      overlay.height = outH;
+      this.tracksOverlayCtx = null;
+    }
+    this.tracksOverlayCtx ??= overlay.getContext("2d");
+    const ctx = this.tracksOverlayCtx;
+    if (!ctx) return;
+    ctx.clearRect(0, 0, outW, outH);
+    if (!this.reframing || this.displayedTracks.length === 0) return;
+
+    const { w: srcW, h: srcH } = this.srcDims;
+    const fontPx = Math.max(14, Math.round(outH / 40));
+    ctx.font = `600 ${fontPx}px system-ui, sans-serif`;
+    ctx.textBaseline = "bottom";
+    for (const { source, dest } of this.overlayViews(outW, outH)) {
+      const scaleX = dest.w / source.w;
+      const scaleY = dest.h / source.h;
+      ctx.save();
+      ctx.beginPath();
+      ctx.rect(dest.x, dest.y, dest.w, dest.h);
+      ctx.clip();
+      for (const t of this.displayedTracks) {
+        const isSubject = t.id === this.displayedSubjectTrackId;
+        const x = dest.x + ((t.cx - t.w / 2) * srcW - source.x) * scaleX;
+        const y = dest.y + ((t.cy - t.h / 2) * srcH - source.y) * scaleY;
+        ctx.strokeStyle = isSubject
+          ? TRACK_SUBJECT_STROKE
+          : t.foreground
+            ? TRACK_FOREGROUND_STROKE
+            : TRACK_BACKGROUND_STROKE;
+        ctx.lineWidth = isSubject ? TRACK_SUBJECT_LINE_WIDTH : TRACK_LINE_WIDTH;
+        ctx.setLineDash(t.confirmed ? [] : TRACK_TENTATIVE_DASH);
+        ctx.strokeRect(x, y, t.w * srcW * scaleX, t.h * srcH * scaleY);
+        ctx.fillStyle = ctx.strokeStyle;
+        ctx.fillText(isSubject ? `#${t.id} ★` : `#${t.id}`, x, y - 2);
       }
       ctx.restore();
     }
@@ -1622,17 +1723,24 @@ export class VertixEngine {
     const detections = unpackDetections(facesFlat);
     this.lastSceneCut = sceneCut;
     this.lastDetectedFaceCount = detections.faces.length;
-    this.lastFaces = detections.faces.filter(isSpeakerSized);
     this.lastSkinRejectedFaces = detections.skinRejected;
     this.lastSkinRejectedSpeakerSizedCount = detections.skinRejected.filter(isSpeakerSized).length;
 
     // A hard cut makes everything learned from the previous shot stale:
-    // who holds the lock, the agreement streaks, the committed count.
-    if (sceneCut.isCut) {
-      this.sceneCutCount += 1;
-      this.activeSpeaker.reset();
-    }
-    this.lastResolvedFaces = this.activeSpeaker.resolve(this.lastFaces, audioEnergy, mediaTimeSec);
+    // the tracks, the subject, the agreement streaks, the committed count.
+    if (sceneCut.isCut) this.sceneCutCount += 1;
+    const planStart = performance.now();
+    const plan = this.planner.plan(detections.faces, audioEnergy, mediaTimeSec, sceneCut.isCut, {
+      srcW,
+      srcH,
+      outW: cropW,
+      outH: cropH,
+    });
+    const trackerMs = performance.now() - planStart;
+    this.lastFaces = this.planner.tracker.tracks.filter((t) => t.visible && t.foreground).map((t) => t.lastDetection);
+    this.lastResolvedFaces = plan.faces;
+    this.lastPlanRule = plan.rule;
+    this.lastSwitchedFar = plan.switchedFar;
     const count = this.lastResolvedFaces.length;
     const commitAtOnce = sceneCut.isCut || this.commitCountAtNextDetection;
     // A count committed at once after a seek or a mode switch replaces whatever was on screen: no dissolve from it.
@@ -1655,7 +1763,15 @@ export class VertixEngine {
         : decisionSec < mediaTimeSec
           ? "localised"
           : "tick";
-    this.decideLayout(decisionSec, count, stablePersonCount, cutSource, snapWithoutCut, srcW, srcH, cropW, cropH);
+    this.decideLayout(decisionSec, count, stablePersonCount, cutSource, snapWithoutCut, srcW, srcH, cropW, cropH, plan);
+    this.benchmarkProbe?.recordTracking(
+      trackerMs,
+      plan.foregroundCount,
+      plan.backgroundCount,
+      plan.paneSwap,
+      plan.leftToRightFlip
+    );
+    this.benchmarkProbe?.recordTrackSnapshot?.(mediaTimeSec, plan.tracks, plan.subjectTrackId, plan.rule);
 
     if (this.lastDetectionMediaTime !== null && mediaTimeSec > this.lastDetectionMediaTime) {
       const interval = mediaTimeSec - this.lastDetectionMediaTime;
@@ -1707,20 +1823,23 @@ export class VertixEngine {
     srcW: number,
     srcH: number,
     cropW: number,
-    cropH: number
+    cropH: number,
+    plan: LayoutPlan
   ): void {
     const isCut = cutSource !== null;
     const countChanged = stablePersonCount !== this.decidedSpeakerCount;
     let reframe: Reframe | null = isCut || snap ? "snap" : null;
     if (stablePersonCount === 0) {
       this.decidedTargetPanes = [];
+      this.decidedRule = "broll";
     } else if (count === stablePersonCount) {
+      this.decidedRule = plan.rule;
       // Only refresh the target once the raw count matches the *committed*
       // layout — otherwise, mid-debounce, this could compute a different
       // pane count than what's actually on screen. The deadzone itself
       // lives inside computeSpeakerLayout. A reframe or a new layout aims
       // straight at the new faces, without the deadzone.
-      if (this.activeSpeaker.switchedSpeaker) reframe ??= "dissolve";
+      if (this.lastSwitchedFar) reframe ??= "dissolve";
       this.decidedTargetPanes =
         reframe !== null || countChanged
           ? computeSpeakerLayout(this.lastResolvedFaces, srcW, srcH, cropW, cropH)
@@ -1743,6 +1862,10 @@ export class VertixEngine {
       isCut,
       cutSource,
       skinRejectedFaces: this.lastSkinRejectedFaces,
+      rule: this.decidedRule,
+      subjectTrackId: plan.subjectTrackId,
+      paneTrackIds: plan.paneTrackIds,
+      tracks: plan.tracks,
     });
     if (this.frameBuffer?.hasHeld) this.releaseHeldFrames();
   }
@@ -1756,9 +1879,14 @@ export class VertixEngine {
     const countChanged = decision.speakerCount !== this.displayedSpeakerCount;
     this.displayedSpeakerCount = decision.speakerCount;
     this.displayedSkinRejectedFaces = decision.skinRejectedFaces;
+    this.displayedSubjectTrackId = decision.subjectTrackId;
+    this.displayedTracks = decision.tracks;
+    this.displayedPaneTrackIds = decision.paneTrackIds;
+    const ruleChanged = decision.rule !== this.displayedRule;
+    this.displayedRule = decision.rule;
     this.targetPanes = decision.targetPanes;
     this.pendingReframe = decision.reframe;
-    if (countChanged) this.emitState();
+    if (countChanged || ruleChanged) this.emitState();
     return decision;
   }
 
@@ -1910,7 +2038,7 @@ export class VertixEngine {
     const { w: srcW, h: srcH, cropW, cropH } = this.srcDims;
     const renderStart = this.benchmarkProbe ? performance.now() : 0;
     let source: HTMLVideoElement | OffscreenCanvas = video;
-    if (this.mode === "9:16") {
+    if (this.reframing) {
       source = this.copyLiveFrame(video);
       this.hasFrameSinceReset = true;
       this.frameCounter += 1;
@@ -1967,7 +2095,7 @@ export class VertixEngine {
     const rate = video.playbackRate || 1;
     const intervalSec = this.knownIntervalSec() ?? DEFAULT_FRAME_INTERVAL_MS / 1000;
     const frame = this.bufferFrame(video, metadata.mediaTime, presentedAtMs, false);
-    if (this.mode === "9:16") {
+    if (this.reframing) {
       this.hasFrameSinceReset = true;
       if (frame.frameIndex >= this.nextDetectionFrameIndex) {
         this.nextDetectionFrameIndex = frame.frameIndex + FACE_DETECT_INTERVAL;
@@ -2154,7 +2282,7 @@ export class VertixEngine {
     this.triggerLatency.push(performance.now() - pending.capturedAt);
     if (this.scoredFrames.length === SCORED_FRAME_HISTORY) this.scoredFrames.shift();
     this.scoredFrames.push({ mediaTimeSec: pending.mediaTimeSec, score: Math.max(msg.hist, msg.grid) });
-    if (msg.triggered && this.mode === "9:16") this.requestCutDetection(pending.mediaTimeSec);
+    if (msg.triggered && this.reframing) this.requestCutDetection(pending.mediaTimeSec);
   }
 
   /** A detection on the likely cut frame now, instead of at the next regular tick (after the one in flight, if any). */
@@ -2195,7 +2323,7 @@ export class VertixEngine {
   private capturePausedFrame(video: HTMLVideoElement, metadata: VideoFrameCallbackMetadata): void {
     if (metadata.mediaTime === this.lastCapturedMediaTime) return;
     const frame = this.bufferFrame(video, metadata.mediaTime, metadata.expectedDisplayTime ?? performance.now(), true);
-    if (this.mode === "9:16" && !this.detectionInFlight) {
+    if (this.reframing && !this.detectionInFlight) {
       this.dispatchDetection(frame.slot.canvas, frame.mediaTimeSec, ...this.cropArgs());
     }
     clearTimeout(this.heldFrameTimeout);
@@ -2352,6 +2480,7 @@ export class VertixEngine {
       if (applied?.isCut) {
         probe?.recordCutShown(now, applied.mediaTimeSec, frameMediaTimeSec, applied.cutSource ?? "tick");
       }
+      if (applied) probe?.recordLayoutRule(now, this.displayedRule, this.displayedSubjectTrackId ?? -1, applied.isCut);
       const speakerCount = this.displayedSpeakerCount;
       const targetSignature = speakerCount === 0 ? "broll" : `speakers:${speakerCount}`;
 
@@ -2433,5 +2562,6 @@ export class VertixEngine {
     }
 
     if (this.skinRejectionOverlay) this.drawSkinRejectionOverlay(this.skinRejectionOverlay, targetW, targetH);
+    if (this.tracksOverlay) this.drawTracksOverlay(this.tracksOverlay, targetW, targetH);
   }
 }

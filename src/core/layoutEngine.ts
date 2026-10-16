@@ -198,7 +198,9 @@ export interface PaneTarget {
 
 /**
  * Composes a stable speaker layout: 1 face fills the whole frame, 2 stack
- * vertically, 3+ form a grid (as square as possible). Each pane is an
+ * vertically, 3+ form a grid (as square as possible). Panes are filled in
+ * the order of `faces` (the caller keeps that order fixed per track, so
+ * panes never swap). Each pane is an
  * independent cover-crop centered on its face, not a shared crop split in
  * half, so each person stays centered in their own pane regardless of where
  * they sit in the frame.
@@ -229,9 +231,7 @@ export function computeSpeakerLayout(
 
   const zoomFactor = faces.length === 1 ? SINGLE_SPEAKER_ZOOM_FACTOR : MULTI_SPEAKER_ZOOM_FACTOR;
 
-  // Stable left-to-right order so panes don't swap between frames just
-  // because detection happened to return faces in a different order.
-  const ordered = [...faces].sort((a, b) => a.cx - b.cx);
+  const ordered = faces;
   const rows = gridRows(ordered.length);
   const rowH = outH / rows.length;
 
@@ -256,4 +256,58 @@ export function computeSpeakerLayout(
   });
 
   return results;
+}
+
+// Room left on each side of a framed group, in widths of its widest face.
+const GROUP_SIDE_MARGIN_IN_FACES = 0.5;
+
+/** The box around `faces` with GROUP_SIDE_MARGIN_IN_FACES on each side, as fractions of the frame. */
+function groupBounds(faces: readonly FaceBox[]): { left: number; right: number; top: number; bottom: number } {
+  const margin = Math.max(...faces.map((f) => f.w)) * GROUP_SIDE_MARGIN_IN_FACES;
+  return {
+    left: Math.min(...faces.map((f) => f.cx - f.w / 2)) - margin,
+    right: Math.max(...faces.map((f) => f.cx + f.w / 2)) + margin,
+    top: Math.min(...faces.map((f) => f.cy - f.h / 2)),
+    bottom: Math.max(...faces.map((f) => f.cy + f.h / 2)),
+  };
+}
+
+/** Whether `faces`, with side margins, fit across a full-height crop of `outW`:`outH` taken from a `srcW` x `srcH` source, allowing `tolerance` times the crop width. */
+export function groupFitsInFrame(
+  faces: readonly FaceBox[],
+  srcW: number,
+  srcH: number,
+  outW: number,
+  outH: number,
+  tolerance = 1
+): boolean {
+  if (faces.length === 0) return false;
+  const bounds = groupBounds(faces);
+  return (bounds.right - bounds.left) * srcW <= ((srcH * outW) / outH) * tolerance;
+}
+
+/**
+ * A single face-like box that makes the single-speaker crop frame the
+ * whole group: centred on the group, and tall enough that the crop is at
+ * least as wide as the group (with margins) and no tighter than the
+ * single-speaker framing of its largest face.
+ */
+export function groupFrameFace(
+  faces: readonly FaceBox[],
+  srcW: number,
+  srcH: number,
+  outW: number,
+  outH: number
+): FaceBox {
+  const bounds = groupBounds(faces);
+  const largest = faces.reduce((a, b) => (b.h > a.h ? b : a));
+  const neededCropH = ((bounds.right - bounds.left) * srcW * outH) / outW;
+  const h = Math.max(largest.h, neededCropH / srcH / SINGLE_SPEAKER_ZOOM_FACTOR);
+  return {
+    ...largest,
+    cx: (bounds.left + bounds.right) / 2,
+    cy: (bounds.top + bounds.bottom) / 2,
+    w: bounds.right - bounds.left,
+    h,
+  };
 }
