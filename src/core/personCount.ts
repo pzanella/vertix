@@ -3,7 +3,7 @@
 // MIN_AGREEING_DETECTIONS must agree, so one stray reading never commits.
 const MIN_AGREEING_DETECTIONS = 2;
 // Absorbs float rounding in media timestamps (0.2 * 5 !== 1.0).
-const TIME_EPSILON_SEC = 1e-3;
+export const TIME_EPSILON_SEC = 1e-3;
 
 // A person-count change only takes effect once detections have agreed for
 // this long, so a single misdetection doesn't flip the layout and back.
@@ -19,7 +19,7 @@ const PERSON_COUNT_DROP_TO_ZERO_SEC = 0.2;
 const POST_CUT_SHORT_DEBOUNCE_SEC = 1.0;
 
 /** Tracks how long consecutive detections have agreed, in media time. */
-class AgreementStreak {
+export class AgreementStreak {
   private startSec = 0;
   private detections = 0;
 

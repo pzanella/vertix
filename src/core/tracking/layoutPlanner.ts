@@ -2,7 +2,20 @@ import { groupFitsInFrame, groupFrameFace, type FaceBox } from "../layoutEngine"
 import { FaceTracker, type FaceTrack } from "./faceTracker";
 import { trackArea, updateForeground } from "./foregroundFilter";
 import { PanelDetector, PANEL_VARIANT, type PanelVariant } from "./panelDetector";
+import { ActiveSpeakerResolver } from "./mainActiveSpeaker";
 import { CLEAR_LEAD_FACTOR, leadFactor, scoreContext, subjectScore, SubjectSelector } from "./subjectSelector";
+
+/**
+ * Which rules handle 3+ foreground faces:
+ * - "tracker": main subject, group, panel grid (tracking/subjectSelector.ts,
+ *   panelDetector.ts), with the debounce keyed on the layout kind.
+ * - "main": main's active-speaker resolution (mainActiveSpeaker.ts) on the
+ *   foreground faces, debounced on the pane count as on main.
+ * "main" is the default: on news-interview-2p "tracker" made 13-15 layout
+ * changes against main's 11 (see docs/benchmark.md).
+ */
+export type ManyFacesRules = "tracker" | "main";
+export const MANY_FACES_RULES: ManyFacesRules = "main";
 
 /**
  * What the layout shows: nobody ("broll"), one or two people ("single",
@@ -61,6 +74,8 @@ export interface TrackSnapshot {
 
 export interface LayoutPlan {
   rule: LayoutRule;
+  /** What the person-count debounce compares (see layoutKey). */
+  debounceKey: number;
   /** Faces for the panes, in pane order. */
   faces: FaceBox[];
   /** Track behind each pane (none for group framing). */
@@ -113,10 +128,14 @@ export class LayoutPlanner {
   private framedId: number | null = null;
   private framedPosition: { cx: number; cy: number } | null = null;
   private pickNow = true;
+  private readonly mainResolver = new ActiveSpeakerResolver();
   private groupShown = false;
   private leftToRightOrder: number[] = [];
 
-  constructor(variant: PanelVariant = PANEL_VARIANT) {
+  constructor(
+    variant: PanelVariant = PANEL_VARIANT,
+    private readonly manyFacesRules: ManyFacesRules = MANY_FACES_RULES
+  ) {
     this.panels = new PanelDetector(variant);
   }
 
@@ -151,8 +170,27 @@ export class LayoutPlanner {
     let groupFaces: FaceTrack[] = [];
     let subjectTrackId: number | null = null;
 
-    const keepSubject = this.subjectDuringGrace(presentForeground, atSec);
-    if (keepSubject !== null) {
+    let mainSwitchedFar = false;
+    const keepSubject = this.manyFacesRules === "tracker" ? this.subjectDuringGrace(presentForeground, atSec) : null;
+    if (this.manyFacesRules === "main") {
+      // main's rules read the raw detection box and the lower-face change.
+      const inputs = visibleForeground.map((t) => ({ ...t.lastDetection, motion: t.lastDetection.lowerFaceMotion }));
+      const resolved = this.mainResolver.resolve(inputs, audioEnergy, atSec);
+      mainSwitchedFar = this.mainResolver.switchedSpeaker;
+      const resolvedTracks = resolved.map((face) => visibleForeground[inputs.indexOf(face)]);
+      paneTracks = this.ordered(resolvedTracks);
+      rule =
+        resolved.length === 0
+          ? "broll"
+          : resolved.length === 1
+            ? visibleForeground.length >= SUBJECT_RULE_MIN_FACES
+              ? "subject"
+              : "single"
+            : resolved.length === 2
+              ? "stacked"
+              : "grid";
+      if (rule === "subject") subjectTrackId = paneTracks[0].id;
+    } else if (keepSubject !== null) {
       rule = "subject";
       paneTracks = [keepSubject];
       subjectTrackId = keepSubject.id;
@@ -217,10 +255,12 @@ export class LayoutPlanner {
       rule === "group"
         ? [groupFrameFace(groupFaces.map(faceOf), frame.srcW, frame.srcH, frame.outW, frame.outH)]
         : paneTracks.map(faceOf);
-    const switchedFar = this.noteFraming(rule, paneTrackIds, planFaces);
+    const switchedFar =
+      this.manyFacesRules === "main" ? mainSwitchedFar : this.noteFraming(rule, paneTrackIds, planFaces);
 
     return {
       rule,
+      debounceKey: this.manyFacesRules === "main" ? planFaces.length : layoutKey(rule, planFaces.length),
       faces: planFaces,
       paneTrackIds,
       subjectTrackId,
@@ -247,6 +287,7 @@ export class LayoutPlanner {
   reset(): void {
     this.tracker.reset();
     this.subjects.reset();
+    this.mainResolver.reset();
     this.panels.reset();
     this.paneOrder = [];
     this.leftToRightOrder = [];

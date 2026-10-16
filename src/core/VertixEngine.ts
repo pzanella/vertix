@@ -2,7 +2,6 @@ import { AudioActivityMonitor } from "./audioActivity";
 import { PersonCountDebouncer } from "./personCount";
 import {
   LayoutPlanner,
-  layoutKey,
   paneCountOf,
   SWITCH_DISSOLVE_DISTANCE,
   type LayoutPlan,
@@ -1773,13 +1772,11 @@ export class VertixEngine {
     this.lastResolvedFaces = plan.faces;
     this.lastPlanRule = plan.rule;
     this.lastSwitchedFar = plan.switchedFar;
-    const count = this.lastResolvedFaces.length;
     const commitAtOnce = sceneCut.isCut || this.commitCountAtNextDetection;
     // A count committed at once after a seek or a mode switch replaces whatever was on screen: no dissolve from it.
     const snapWithoutCut = commitAtOnce && !sceneCut.isCut;
     this.commitCountAtNextDetection = false;
-    // Debounced on the layout key, not only the pane count: see layoutKey.
-    const key = layoutKey(plan.rule, count);
+    const key = plan.debounceKey;
     const stableKey = commitAtOnce
       ? this.personCount.commitNow(key, mediaTimeSec)
       : this.personCount.observe(key, this.hasFrameSinceReset, mediaTimeSec);

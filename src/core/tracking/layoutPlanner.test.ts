@@ -9,7 +9,7 @@ const FRAME = { srcW: 1280, srcH: 720, outW: 405, outH: 720 };
 function run(
   facesAt: (t: number) => FaceBox[],
   durationSec: number,
-  { planner = new LayoutPlanner(), audioEnergy = null as number | null } = {}
+  { planner = new LayoutPlanner(undefined, "tracker"), audioEnergy = null as number | null } = {}
 ): { t: number; plan: LayoutPlan }[] {
   return [...detectionTimes(durationSec)].map((t) => ({
     t,
@@ -22,7 +22,7 @@ function changes<T>(values: T[]): number {
   return values.slice(1).filter((v, i) => v !== values[i]).length;
 }
 
-describe("LayoutPlanner synthetic sequences", () => {
+describe("LayoutPlanner synthetic sequences, tracker rules for 3+ faces", () => {
   it("two people crossing: the stacked panes keep their tracks (no ID swap)", () => {
     const plans = run((t) => [testFace(0.2 + 0.2 * t, 0.45, 0.15), testFace(0.8 - 0.2 * t, 0.55, 0.15)], 3);
     const stacked = plans.filter(({ plan }) => plan.rule === "stacked");
@@ -70,7 +70,7 @@ describe("LayoutPlanner synthetic sequences", () => {
   });
 
   it("on a cut, drops every track and picks again at once", () => {
-    const planner = new LayoutPlanner();
+    const planner = new LayoutPlanner(undefined, "tracker");
     run(() => [testFace(0.2, 0.5, 0.2), testFace(0.5, 0.5, 0.2), testFace(0.8, 0.5, 0.2)], 3, { planner });
     const before = planner.tracker.tracks.map((t) => t.id);
     const plan = planner.plan(
@@ -117,5 +117,30 @@ describe("layoutKey", () => {
     expect(layoutKey("stacked", 2)).toBe(2);
     expect(paneCountOf(layoutKey("subject", 1))).toBe(1);
     expect(paneCountOf(layoutKey("grid", 3))).toBe(3);
+  });
+});
+
+describe("LayoutPlanner, main's rules for 3+ faces (default)", () => {
+  it("keeps the tracker and the foreground filter: a large face plus small ones stays single", () => {
+    const crowd = [0.1, 0.2, 0.3, 0.7, 0.8, 0.9].map((cx) => testFace(cx, 0.3, 0.13));
+    const plans = run(() => [testFace(0.5, 0.5, 0.3), ...crowd], 2, { planner: new LayoutPlanner() });
+    expect(plans.every(({ plan }) => plan.rule === "single")).toBe(true);
+  });
+
+  it("shows three similar faces as a grid, debounced on the pane count", () => {
+    const plans = run(() => [testFace(0.2, 0.5, 0.2), testFace(0.5, 0.5, 0.2), testFace(0.8, 0.5, 0.2)], 1, {
+      planner: new LayoutPlanner(),
+    });
+    expect(plans.every(({ plan }) => plan.rule === "grid" && plan.debounceKey === 3)).toBe(true);
+  });
+
+  it("locks onto a size-dominant face after 0.8s", () => {
+    const plans = run(() => [testFace(0.2, 0.5, 0.15), testFace(0.5, 0.5, 0.22), testFace(0.8, 0.5, 0.15)], 1.2, {
+      planner: new LayoutPlanner(),
+    });
+    expect(plans[0].plan.rule).toBe("grid");
+    expect(plans.at(-1)!.plan.rule).toBe("subject");
+    expect(plans.at(-1)!.plan.faces[0].cx).toBeCloseTo(0.5, 6);
+    expect(plans.at(-1)!.plan.debounceKey).toBe(1);
   });
 });
