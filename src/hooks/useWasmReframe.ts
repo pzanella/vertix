@@ -1,6 +1,13 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type Shaka from "shaka-player";
-import { INITIAL_METRICS, VertixEngine, type VertixMeta, type VertixMetrics, type VertixMode } from "../core";
+import {
+  INITIAL_METRICS,
+  VertixEngine,
+  type LayoutRule,
+  type VertixMeta,
+  type VertixMetrics,
+  type VertixMode,
+} from "../core";
 
 export type ReframeMode = VertixMode;
 export type ReframeMeta = VertixMeta;
@@ -192,6 +199,8 @@ interface UseWasmReframeReturn {
   canvasRef: React.RefObject<HTMLCanvasElement | null>;
   /** Callback ref for a canvas laid over the output canvas, where the engine draws skin-rejected detections. */
   skinRejectionOverlayRef: (canvas: HTMLCanvasElement | null) => void;
+  /** Callback ref for a canvas laid over the output canvas, where the engine draws the face tracks ("Show tracks"). */
+  tracksOverlayRef: (canvas: HTMLCanvasElement | null) => void;
   videoRef: React.RefObject<HTMLVideoElement | null>;
   state: PlayerState;
   meta: VertixMeta | null;
@@ -210,6 +219,10 @@ interface UseWasmReframeReturn {
   speakerCount: number;
   /** Whether a layout cross-dissolve is currently in progress. */
   isTransitioning: boolean;
+  /** The rule behind the layout on screen. */
+  layoutRule: LayoutRule;
+  /** The source is not landscape and is shown whole, without crop. */
+  sourceShownAsIs: boolean;
   /** Live telemetry for the analytics dashboard. */
   metrics: VertixMetrics;
   /** Turns the engine's lookahead (delayed output, crop changes on the exact frame) on or off. */
@@ -238,6 +251,7 @@ export function useWasmReframe(): UseWasmReframeReturn {
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const attachedCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const skinRejectionOverlayElementRef = useRef<HTMLCanvasElement | null>(null);
+  const tracksOverlayElementRef = useRef<HTMLCanvasElement | null>(null);
   const shakaAttachedRef = useRef(false);
   const currentSrcRef = useRef<string | null>(null);
   const loadGenerationRef = useRef(0);
@@ -258,6 +272,8 @@ export function useWasmReframe(): UseWasmReframeReturn {
   const [muted, setMuted] = useState(false);
   const [speakerCount, setSpeakerCount] = useState(0);
   const [isTransitioning, setIsTransitioning] = useState(false);
+  const [layoutRule, setLayoutRule] = useState<LayoutRule>("broll");
+  const [sourceShownAsIs, setSourceShownAsIs] = useState(false);
   const [metrics, setMetrics] = useState<VertixMetrics>(INITIAL_METRICS);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [isBuffering, setIsBuffering] = useState(false);
@@ -272,11 +288,14 @@ export function useWasmReframe(): UseWasmReframeReturn {
     const engine = new VertixEngine();
     engineRef.current = engine;
     engine.setSkinRejectionOverlay(skinRejectionOverlayElementRef.current);
+    engine.setTracksOverlay(tracksOverlayElementRef.current);
     const unsubState = engine.onStateChange((s) => {
       setModeState(s.mode);
       setMeta(s.meta);
       setSpeakerCount(s.speakerCount);
       setIsTransitioning(s.isTransitioning);
+      setLayoutRule(s.layoutRule);
+      setSourceShownAsIs(s.sourceShownAsIs);
     });
     const unsubMetrics = engine.onMetricsUpdate(setMetrics);
     return () => {
@@ -580,9 +599,15 @@ export function useWasmReframe(): UseWasmReframeReturn {
     engineRef.current?.setSkinRejectionOverlay(canvas);
   }, []);
 
+  const tracksOverlayRef = useCallback((canvas: HTMLCanvasElement | null) => {
+    tracksOverlayElementRef.current = canvas;
+    engineRef.current?.setTracksOverlay(canvas);
+  }, []);
+
   return {
     canvasRef,
     skinRejectionOverlayRef,
+    tracksOverlayRef,
     videoRef,
     state,
     meta,
@@ -598,6 +623,8 @@ export function useWasmReframe(): UseWasmReframeReturn {
     toggleMute,
     speakerCount,
     isTransitioning,
+    layoutRule,
+    sourceShownAsIs,
     metrics,
     setLookaheadEnabled,
     errorMessage,
