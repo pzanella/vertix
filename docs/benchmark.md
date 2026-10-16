@@ -286,9 +286,10 @@ Further limits:
   its fallback; a framed group in between does not reset it, a hard cut
   does).
 - `timeInRulePct`: share of measured playback per rule, in percent:
-  `broll`, `single`, `stacked`, `subject` (main subject among 3+
-  foreground faces, or the largest face near the centre), `group` (all
-  foreground faces in one crop) and `grid` (a recognised panel). Measured
+  `broll`, `single`, `stacked`, `subject` (one face chosen among 3+
+  foreground faces), `group` and `grid`. `group` only occurs with
+  `MANY_FACES_RULES = "tracker"`; with the default rules `grid` is any
+  unresolved 3-face scene, as on main. Measured
   on displayed frames, from the rule applied on each.
 - `foregroundTracks`, `backgroundTracks`: tracks matched per detection
   that count for the layout, and those that do not (small faces behind).

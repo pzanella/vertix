@@ -16,11 +16,12 @@ Give it a `<video>` element and a `<canvas>` element. It:
    face's area, not cut off at an edge (`tracking/foregroundFilter.ts`).
 3. Picks a layout (`tracking/layoutPlanner.ts`): one wide chest-up crop,
    a stacked split for two (panes follow track IDs, so they never swap),
-   no crop at all for zero. With three or more foreground faces it follows
-   one main subject (`tracking/subjectSelector.ts`), frames the whole
-   group when it fits in 9:16, or shows a grid only for a real panel
-   (`tracking/panelDetector.ts`). A source that is not landscape is shown
-   whole instead (`sourceAspect.ts`).
+   no crop at all for zero. With three or more foreground faces it locks
+   onto one active speaker by size, then mouth motion
+   (`tracking/mainActiveSpeaker.ts`), else a grid. `MANY_FACES_RULES =
+   "tracker"` switches to the main-subject, group and panel rules
+   (`tracking/subjectSelector.ts`, `tracking/panelDetector.ts`) instead. A
+   source that is not landscape is shown whole (`sourceAspect.ts`).
 4. Draws that layout to the canvas, every video frame, with a stable,
    gently-smoothed camera and a soft cross-dissolve whenever the layout
    itself changes.
