@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { lerpPaneRectInto, paneSmoothingAlpha, unpackDetections } from "./layoutEngine";
+import { lerpPaneRectInto, mouthActivity, paneSmoothingAlpha, unpackDetections } from "./layoutEngine";
 
 /** Glides a pane from x=0 toward x=100 for `seconds` at `fps`, one blend per rendered frame. */
 function glideX(fps: number, seconds: number): number {
@@ -34,9 +34,11 @@ describe("paneSmoothingAlpha", () => {
 
 describe("unpackDetections", () => {
   it("splits skin-rejected detections from faces", () => {
-    const flat = new Float64Array([0.2, 0.5, 0.1, 0.1, 3, 0.9, 0, 5, 0.7, 0.5, 0.2, 0.2, 0, 0.85, 1, 0]);
+    const flat = new Float64Array([0.2, 0.5, 0.1, 0.1, 5, 0.9, 0, 2, 0.7, 0.5, 0.2, 0.2, 0, 0.85, 1, 0]);
     const { faces, skinRejected } = unpackDetections(flat);
-    expect(faces).toEqual([{ cx: 0.2, cy: 0.5, w: 0.1, h: 0.1, motion: 3, lowerFaceMotion: 5, confidence: 0.9 }]);
+    expect(faces).toEqual([
+      { cx: 0.2, cy: 0.5, w: 0.1, h: 0.1, motion: mouthActivity(5, 2), lowerFaceMotion: 5, confidence: 0.9 },
+    ]);
     expect(skinRejected).toEqual([
       { cx: 0.7, cy: 0.5, w: 0.2, h: 0.2, motion: 0, lowerFaceMotion: 0, confidence: 0.85 },
     ]);

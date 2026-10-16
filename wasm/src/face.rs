@@ -185,12 +185,12 @@ pub struct FaceObservation {
     pub w: f32,
     pub h: f32,
     pub score: f32,
-    /// Mouth activity: lower-face change minus upper-face change since the
-    /// previous frame, clamped at 0, so head and camera motion cancel out.
+    /// Change of the lower face (mouth and chin) since the previous frame:
+    /// the mouth-motion measure. Head and camera motion raise it too; the
+    /// caller removes them with `upper_face_motion`.
     pub motion: f64,
-    /// Lower-face change alone (the mouth-motion measure before head and
-    /// camera motion were removed), for comparison only.
-    pub lower_face_motion: f64,
+    /// Change of the upper face (forehead and eyes) since the previous frame.
+    pub upper_face_motion: f64,
     /// Failed only the skin-tone check. Reported (not dropped) so the caller
     /// can measure how often the skin filter rejects a detection; it must
     /// not be used for the layout.
@@ -237,12 +237,13 @@ impl FaceTracker {
             }
             let skin_rejected = skin_ratio(rgba, c) < MIN_SKIN_RATIO;
 
-            let (motion, lower_face_motion) = if skin_rejected || !self.has_prev || self.last_cut.is_cut {
+            let (motion, upper_face_motion) = if skin_rejected || !self.has_prev || self.last_cut.is_cut {
                 (0.0, 0.0)
             } else {
-                let lower = band_difference(rgba, &self.prev_frame, c, LOWER_FACE_BAND);
-                let upper = band_difference(rgba, &self.prev_frame, c, UPPER_FACE_BAND);
-                ((lower - upper).max(0.0), lower)
+                (
+                    band_difference(rgba, &self.prev_frame, c, LOWER_FACE_BAND),
+                    band_difference(rgba, &self.prev_frame, c, UPPER_FACE_BAND),
+                )
             };
 
             obs.push(FaceObservation {
@@ -252,7 +253,7 @@ impl FaceTracker {
                 h,
                 score: c.score,
                 motion,
-                lower_face_motion,
+                upper_face_motion,
                 skin_rejected,
             });
         }

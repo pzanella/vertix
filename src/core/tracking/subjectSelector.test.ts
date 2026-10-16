@@ -1,6 +1,13 @@
 import { describe, expect, it } from "vitest";
 import type { FaceTrack } from "./faceTracker";
-import { clearLeader, scoreContext, SubjectSelector, subjectScore, type ScoredTrack } from "./subjectSelector";
+import {
+  clearLeader,
+  leadFactor,
+  scoreContext,
+  SubjectSelector,
+  subjectScore,
+  type ScoredTrack,
+} from "./subjectSelector";
 
 function track(id: number, overrides: Partial<FaceTrack> = {}): FaceTrack {
   return {
@@ -41,11 +48,10 @@ describe("subjectScore", () => {
     expect(clearLeader(tracks.map((t) => ({ track: t, score: subjectScore(t, context) })))).toBeNull();
   });
 
-  it("counts mouth activity less without audio confirming speech", () => {
-    const talking = track(1, { mouthActivity: 5 });
-    const withAudio = subjectScore(talking, scoreContext([talking], 0.1, 5));
-    const withoutAudio = subjectScore(talking, scoreContext([talking], null, 5));
-    expect(withAudio).toBeGreaterThan(withoutAudio);
+  it("needs a larger lead without audio confirming speech", () => {
+    expect(leadFactor(false)).toBeGreaterThan(leadFactor(true));
+    expect(clearLeader(scored({ 1: 1.3, 2: 1 }), leadFactor(true))?.id).toBe(1);
+    expect(clearLeader(scored({ 1: 1.3, 2: 1 }), leadFactor(false))).toBeNull();
   });
 
   it("ignores mouth activity when every face is below the noise floor", () => {

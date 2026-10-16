@@ -2,7 +2,7 @@ import { groupFitsInFrame, groupFrameFace, type FaceBox } from "../layoutEngine"
 import { FaceTracker, type FaceTrack } from "./faceTracker";
 import { trackArea, updateForeground } from "./foregroundFilter";
 import { PanelDetector, PANEL_VARIANT, type PanelVariant } from "./panelDetector";
-import { CLEAR_LEAD_FACTOR, scoreContext, subjectScore, SubjectSelector } from "./subjectSelector";
+import { CLEAR_LEAD_FACTOR, leadFactor, scoreContext, subjectScore, SubjectSelector } from "./subjectSelector";
 
 /**
  * What the layout shows: nobody ("broll"), one or two people ("single",
@@ -39,6 +39,9 @@ export interface TrackSnapshot {
   h: number;
   foreground: boolean;
   confirmed: boolean;
+  /** Smoothed mouth activity, and the lower-face change alone (the old measure). */
+  mouthActivity: number;
+  lowerFaceMotion: number;
 }
 
 export interface LayoutPlan {
@@ -144,7 +147,7 @@ export class LayoutPlanner {
       this.belowMinSinceSec = null;
       const context = scoreContext(presentForeground, audioEnergy, atSec);
       const scored = presentForeground.map((track) => ({ track, score: subjectScore(track, context) }));
-      const subjectId = this.subjects.select(scored, atSec, this.pickNow);
+      const subjectId = this.subjects.select(scored, atSec, this.pickNow, leadFactor(context.audioConfirmed));
       const isPanel = this.panels.observe(presentForeground, atSec);
       const groupFits = groupFitsInFrame(
         presentForeground.map(faceOf),
@@ -209,6 +212,8 @@ export class LayoutPlanner {
         h: t.box.h,
         foreground: t.foreground,
         confirmed: t.confirmed,
+        mouthActivity: t.mouthActivity,
+        lowerFaceMotion: t.lowerFaceMotion,
       })),
       foregroundCount,
       backgroundCount: tracks.filter((t) => t.visible && !t.foreground).length,

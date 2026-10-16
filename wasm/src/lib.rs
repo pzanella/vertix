@@ -42,10 +42,10 @@ impl ReframeEngine {
 
     /// Runs face detection on a 320x240 frame (the source stretched to fit,
     /// not letterboxed; see `face.rs`) and returns every detected face,
-    /// flattened as `[cx, cy, w, h, motion, score, skin_rejected, lower_face_motion, ...]`
+    /// flattened as `[cx, cy, w, h, motion, score, skin_rejected, upper_face_motion, ...]`
     /// (fractions 0..1 of the source frame; `skin_rejected` is 1.0 for a face
-    /// that failed only the skin-tone check, else 0.0; `motion` is mouth activity,
-    /// `lower_face_motion` the lower-face change alone). Meant to be called
+    /// that failed only the skin-tone check, else 0.0; `motion` is the lower-face
+    /// change, `upper_face_motion` the upper-face change). Meant to be called
     /// less often than every frame — it's much more expensive than the rest
     /// of the render loop. `media_time_sec` is the frame's media time, used
     /// for the minimum gap between scene cuts.
@@ -61,7 +61,7 @@ impl ReframeEngine {
             flat.push(f.motion);
             flat.push(f.score as f64);
             flat.push(if f.skin_rejected { 1.0 } else { 0.0 });
-            flat.push(f.lower_face_motion);
+            flat.push(f.upper_face_motion);
         }
         flat
     }

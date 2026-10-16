@@ -4,14 +4,11 @@ import { trackArea } from "./foregroundFilter";
 // Weights of the main-subject score (each part is 0..1). Size and mouth
 // activity carry the most. Centre and stability only break ties: with
 // three people of equal size in a row, the centre part alone must not give
-// the middle one a clear lead (0.2 did: 0.55 vs 0.43). Without audio
-// confirming speech the mouth part counts half, the same idea as the
-// stricter motion margin used before.
+// the middle one a clear lead (0.2 did: 0.55 vs 0.43).
 const SIZE_WEIGHT = 0.4;
 const CENTRE_WEIGHT = 0.1;
 const STABILITY_WEIGHT = 0.15;
 const MOUTH_WEIGHT = 0.35;
-const MOUTH_WEIGHT_NO_AUDIO = 0.175;
 // RMS energy below which the audio track counts as silence, not speech.
 export const AUDIO_ACTIVE_ENERGY = 0.02;
 // Age at which a track gets the full stability part, and the centre
@@ -22,15 +19,20 @@ const STABILITY_MAX_JITTER = 0.05;
 // mouth part counts when the most active face is below it.
 const MIN_MOUTH_ACTIVITY = 0.5;
 
-// A track is clearly ahead when its score beats the runner-up by this factor.
+// A track is clearly ahead when its score beats the runner-up by this
+// factor. The audio gate, as before: when audio does not confirm that
+// someone is speaking (no audio track, muted, silent, or too quiet), mouth
+// activity still counts but the lead must be larger (it was a 2.2x instead
+// of 1.5x motion margin).
 export const CLEAR_LEAD_FACTOR = 1.25;
+export const CLEAR_LEAD_FACTOR_NO_AUDIO = 1.35;
 // A clear leader must hold this long before it is first picked, unless the
 // pick is immediate (after a cut, or after the subject was lost).
 const INITIAL_PICK_SEC = 0.8;
 // Minimum time on a subject before any switch: a news speaking turn is
 // usually longer than 3 s, and faster switches look nervous.
 export const SUBJECT_HOLD_SEC = 2.5;
-// A challenger must beat the subject by CLEAR_LEAD_FACTOR for this long
+// A challenger must beat the subject by the lead factor for this long
 // (about 5 detections) to take over.
 export const SUBJECT_SWITCH_SUSTAIN_SEC = 1.0;
 // Absorbs float rounding in media timestamps.
@@ -66,8 +68,7 @@ export function subjectScore(track: FaceTrack, context: ScoreContext): number {
   const stability = age * Math.max(0, 1 - track.jitter / STABILITY_MAX_JITTER);
   const mouth =
     context.highestMouthActivity >= MIN_MOUTH_ACTIVITY ? track.mouthActivity / context.highestMouthActivity : 0;
-  const mouthWeight = context.audioConfirmed ? MOUTH_WEIGHT : MOUTH_WEIGHT_NO_AUDIO;
-  return SIZE_WEIGHT * size + CENTRE_WEIGHT * centre + STABILITY_WEIGHT * stability + mouthWeight * mouth;
+  return SIZE_WEIGHT * size + CENTRE_WEIGHT * centre + STABILITY_WEIGHT * stability + MOUTH_WEIGHT * mouth;
 }
 
 export interface ScoredTrack {
@@ -75,13 +76,18 @@ export interface ScoredTrack {
   score: number;
 }
 
-/** The best track when it beats the runner-up by CLEAR_LEAD_FACTOR, else null. */
-export function clearLeader(scored: readonly ScoredTrack[]): FaceTrack | null {
+/** The lead factor a track needs, given whether audio confirms speech. */
+export function leadFactor(audioConfirmed: boolean): number {
+  return audioConfirmed ? CLEAR_LEAD_FACTOR : CLEAR_LEAD_FACTOR_NO_AUDIO;
+}
+
+/** The best track when it beats the runner-up by `factor`, else null. */
+export function clearLeader(scored: readonly ScoredTrack[], factor = CLEAR_LEAD_FACTOR): FaceTrack | null {
   if (scored.length === 0) return null;
   const sorted = [...scored].sort((a, b) => b.score - a.score);
   const [top, runnerUp] = sorted;
   if (top.score <= 0) return null;
-  if (runnerUp !== undefined && top.score < runnerUp.score * CLEAR_LEAD_FACTOR) return null;
+  if (runnerUp !== undefined && top.score < runnerUp.score * factor) return null;
   return top.track;
 }
 
@@ -106,7 +112,7 @@ function extendStreak(streak: Streak | null, trackId: number, atSec: number): St
 /**
  * Chooses and holds the main subject among 3+ foreground tracks. A subject
  * is held for at least SUBJECT_HOLD_SEC, then replaced only by a track that
- * beats it by CLEAR_LEAD_FACTOR for SUBJECT_SWITCH_SUSTAIN_SEC. Without a
+ * beats it by the lead factor (see leadFactor) for SUBJECT_SWITCH_SUSTAIN_SEC. Without a
  * subject, a clear leader is picked once it has led for INITIAL_PICK_SEC,
  * or at once when `pickNow` (first detection after a cut, or the subject
  * was lost).
@@ -122,13 +128,13 @@ export class SubjectSelector {
   }
 
   /** Returns the subject track id, or null when nobody is clearly ahead. */
-  select(scored: readonly ScoredTrack[], atSec: number, pickNow: boolean): number | null {
+  select(scored: readonly ScoredTrack[], atSec: number, pickNow: boolean, factor = CLEAR_LEAD_FACTOR): number | null {
     const subject = this.subjectId === null ? undefined : scored.find((s) => s.track.id === this.subjectId);
     if (subject === undefined) {
       const lost = this.subjectId !== null;
       this.subjectId = null;
       this.challengerStreak = null;
-      return this.pickLeader(scored, atSec, pickNow || lost);
+      return this.pickLeader(scored, atSec, pickNow || lost, factor);
     }
 
     this.leaderStreak = null;
@@ -138,7 +144,7 @@ export class SubjectSelector {
     for (const s of scored) {
       if (s.track.id !== this.subjectId && (challenger === null || s.score > challenger.score)) challenger = s;
     }
-    if (challenger === null || challenger.score < subject.score * CLEAR_LEAD_FACTOR) {
+    if (challenger === null || challenger.score < subject.score * factor) {
       this.challengerStreak = null;
       return this.subjectId;
     }
@@ -154,8 +160,8 @@ export class SubjectSelector {
     this.challengerStreak = null;
   }
 
-  private pickLeader(scored: readonly ScoredTrack[], atSec: number, pickNow: boolean): number | null {
-    const leader = clearLeader(scored);
+  private pickLeader(scored: readonly ScoredTrack[], atSec: number, pickNow: boolean, factor: number): number | null {
+    const leader = clearLeader(scored, factor);
     if (leader === null) {
       this.leaderStreak = null;
       return null;

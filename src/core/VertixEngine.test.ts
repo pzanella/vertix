@@ -193,7 +193,7 @@ interface EngineInternals {
 
 function packFaces(faces: TestFace[]): Float64Array {
   return new Float64Array(
-    faces.flatMap((f) => [f.cx, f.cy, f.size, f.size, f.motion ?? 0, 0.9, f.skinRejected ? 1 : 0, f.motion ?? 0])
+    faces.flatMap((f) => [f.cx, f.cy, f.size, f.size, f.motion ?? 0, 0.9, f.skinRejected ? 1 : 0, 0])
   );
 }
 

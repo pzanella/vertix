@@ -4,7 +4,7 @@ export interface FaceBox {
   cy: number;
   w: number;
   h: number;
-  /** Mouth activity: lower-face change minus upper-face change since the previous detection, clamped at 0 (head and camera motion cancel out). */
+  /** Mouth activity: the lower-face change minus part of the upper-face change since the previous detection (see mouthActivity). */
   motion: number;
   /** Lower-face change alone: the mouth-motion measure before head and camera motion were removed. For comparison only. */
   lowerFaceMotion: number;
@@ -29,13 +29,23 @@ export interface SpeakerPane {
 // Values per face in the array returned by `ReframeEngine.update_faces`.
 const DETECTION_STRIDE = 8;
 
+// Share of the upper-face change (forehead, eyes) taken off the lower-face
+// change. Head and camera motion change both bands, speech mostly the
+// lower one.
+export const UPPER_FACE_MOTION_WEIGHT = 0.5;
+
+/** Mouth activity from the lower- and upper-face changes (mean RGB difference), clamped at 0. */
+export function mouthActivity(lowerFaceMotion: number, upperFaceMotion: number): number {
+  return Math.max(0, lowerFaceMotion - UPPER_FACE_MOTION_WEIGHT * upperFaceMotion);
+}
+
 export interface UnpackedDetections {
   faces: FaceBox[];
   /** Detections the WASM skin-tone filter rejected. For measuring that filter only — never for the layout. */
   skinRejected: FaceBox[];
 }
 
-/** Unpacks the `[cx, cy, w, h, motion, score, skinRejected, lowerFaceMotion, ...]` array returned by `ReframeEngine.update_faces`. */
+/** Unpacks the `[cx, cy, w, h, lowerFaceMotion, score, skinRejected, upperFaceMotion, ...]` array returned by `ReframeEngine.update_faces`. */
 export function unpackDetections(flat: Float64Array): UnpackedDetections {
   const result: UnpackedDetections = { faces: [], skinRejected: [] };
   for (let i = 0; i + DETECTION_STRIDE - 1 < flat.length; i += DETECTION_STRIDE) {
@@ -44,9 +54,9 @@ export function unpackDetections(flat: Float64Array): UnpackedDetections {
       cy: flat[i + 1],
       w: flat[i + 2],
       h: flat[i + 3],
-      motion: flat[i + 4],
+      motion: mouthActivity(flat[i + 4], flat[i + 7]),
       confidence: flat[i + 5],
-      lowerFaceMotion: flat[i + 7],
+      lowerFaceMotion: flat[i + 4],
     };
     (flat[i + 6] === 0 ? result.faces : result.skinRejected).push(face);
   }
