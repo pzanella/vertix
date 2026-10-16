@@ -225,6 +225,7 @@ export function useBenchmark({ config, getEngine, videoRef, load }: UseBenchmark
             mode: reframed ? "9:16" : "16:9",
             nominalFps: clip.nominalFps,
             knownCutsSec: clip.knownCutsSec,
+            stopAtSec: clip.stopAtSec,
             warmupSec: config.clipWarmupSec,
             lookahead,
             loadSource,

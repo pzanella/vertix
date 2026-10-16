@@ -20,12 +20,16 @@ export const sampleClipUrl = (file: string) => asset(`samples/${file}`);
 
 /** A clip the benchmark suite plays. */
 export interface BenchmarkClip {
+  /** Name in reports. For a local clip, its label: never its URL. */
   file: string;
   url: string;
-  nominalFps: number;
+  /** Null when unknown (local clips): the benchmark then measures it. */
+  nominalFps: number | null;
   durationSec: number;
   /** Media times of the clip's real hard cuts (test clips only). */
   knownCutsSec: readonly number[];
+  /** Playback stops here instead of at the end (long local streams). */
+  stopAtSec?: number;
 }
 
 /**
@@ -99,6 +103,20 @@ export const SAMPLE_CLIPS: SampleClip[] = [
   },
 ];
 
+/**
+ * Licensed clips listed in .env.local, for local measurements only: in the
+ * dev server, or a build made with VERTIX_LOCAL_CLIPS=1 (see
+ * vite.config.ts). Empty in every other build.
+ */
+export const LOCAL_CLIPS: BenchmarkClip[] = __VERTIX_LOCAL_CLIPS__.map((clip) => ({
+  file: clip.label,
+  url: clip.url,
+  nominalFps: null,
+  durationSec: clip.maxSeconds,
+  knownCutsSec: [],
+  stopAtSec: clip.maxSeconds,
+}));
+
 export const BENCHMARK_CLIPS: BenchmarkClip[] = [
   ...SAMPLE_CLIPS.map(({ file, nominalFps, durationSec }) => ({
     file,
@@ -108,4 +126,5 @@ export const BENCHMARK_CLIPS: BenchmarkClip[] = [
     knownCutsSec: [],
   })),
   ...CUT_TEST_CLIPS,
+  ...LOCAL_CLIPS,
 ];

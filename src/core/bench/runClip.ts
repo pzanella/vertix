@@ -22,6 +22,8 @@ export interface BenchmarkClipOptions extends ClipPlaybackOptions {
   wasmBuild: BenchmarkWasmBuild;
   /** Real hard cuts of the clip, when known (test clips), for frames-late per cut. */
   knownCutsSec?: readonly number[];
+  /** Stops playback at this media time instead of at the end (long streams). */
+  stopAtSec?: number;
 }
 
 // A clip that has not ended after duration × this (+ grace) is treated as stuck.
@@ -163,6 +165,7 @@ export async function runBenchmarkClip(
         });
         engine.setBenchmarkProbe(recorder);
       },
+      shouldStop: options.stopAtSec !== undefined ? () => video.currentTime >= options.stopAtSec! : undefined,
     });
     // Read before the next clip loads: buffer counters reset per source.
     lookahead = lookaheadSnapshot(engine);
