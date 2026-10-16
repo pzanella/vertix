@@ -37,7 +37,7 @@ export interface LookaheadComparison {
 
 export interface BenchmarkReport {
   tool: "vertix-benchmark";
-  schemaVersion: 5;
+  schemaVersion: 6;
   config: BenchmarkConfig;
   environment: BenchmarkEnvironment;
   wasmBuildComparison: WasmBuildComparison;
@@ -59,6 +59,7 @@ const TIMED_METRICS: { name: string; get: (s: BenchmarkClipSummary) => SampleSum
   { name: "detection.overheadMs", get: (s) => s.detection.overheadMs },
   { name: "detection.totalMs", get: (s) => s.detection.totalMs },
   { name: "trigger.mainThreadMs", get: (s) => s.trigger.mainThreadMs },
+  { name: "tracking.trackerMs", get: (s) => s.tracking.trackerMs },
 ];
 
 export function findPrecisionWarnings(
@@ -87,7 +88,7 @@ export function buildBenchmarkReport(
 ): BenchmarkReport {
   return {
     tool: "vertix-benchmark",
-    schemaVersion: 5,
+    schemaVersion: 6,
     config,
     environment,
     wasmBuildComparison,
@@ -311,6 +312,15 @@ export function benchmarkSummaryRows(report: BenchmarkReport): BenchmarkTableRow
     "skin rejected": summary.detection.skinRejected.total,
     "skin rejected (speaker-sized)": summary.detection.skinRejected.speakerSized,
     "layout changes": summary.layoutChanges,
+    "layout changes / min": round(summary.tracking.layoutChangesPerMin, 1),
+    "subject switches / min": round(summary.tracking.subjectSwitchesPerMin, 1),
+    "time per rule %": Object.entries(summary.tracking.timeInRulePct)
+      .filter(([, pct]) => pct > 0)
+      .map(([rule, pct]) => `${rule} ${pct.toFixed(0)}`)
+      .join(" "),
+    "tracks fg/bg (mean)": `${round(summary.tracking.foregroundTracks.mean, 1)}/${round(summary.tracking.backgroundTracks.mean, 1)}`,
+    "pane swaps": summary.tracking.paneSwaps,
+    "tracker p50/p95 ms": `${round(summary.tracking.trackerMs.p50, 3)}/${round(summary.tracking.trackerMs.p95, 3)}`,
     "scene cuts": summary.sceneCutCount,
     "known cuts frames late": summary.knownCuts.length
       ? summary.knownCuts.map((c) => (c.framesLate === null ? "missed" : `${c.framesLate} (${c.source})`)).join(" ")
