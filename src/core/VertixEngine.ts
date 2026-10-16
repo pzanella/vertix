@@ -2,6 +2,7 @@ import { AudioActivityMonitor } from "./audioActivity";
 import { PersonCountDebouncer } from "./personCount";
 import { LayoutPlanner, type LayoutPlan, type LayoutRule, type TrackSnapshot } from "./tracking/layoutPlanner";
 import type { PanelVariant } from "./tracking/panelDetector";
+import { displayedSourceSize, fittedOutputSize, isShownAsIs } from "./sourceAspect";
 import {
   computeSpeakerLayout,
   faceVisibleFraction,
@@ -206,6 +207,8 @@ export interface VertixState {
   isTransitioning: boolean;
   /** The rule behind the layout on screen (9:16 only). */
   layoutRule: LayoutRule;
+  /** True when the source is not landscape: shown whole, without crop or detection. */
+  sourceShownAsIs: boolean;
 }
 
 // Exported so useWasmReframe.ts's own pre-attach placeholder state matches
@@ -559,6 +562,23 @@ function drawCrop(
   );
 }
 
+/** The whole frame fitted inside the output, centred on black bars (letterbox or pillarbox). */
+function drawLetterboxed(
+  ctx: CanvasRenderingContext2D,
+  source: CanvasImageSource,
+  srcW: number,
+  srcH: number,
+  outW: number,
+  outH: number
+): void {
+  const scale = Math.min(outW / srcW, outH / srcH);
+  const w = Math.round(srcW * scale);
+  const h = Math.round(srcH * scale);
+  ctx.fillStyle = "#000";
+  ctx.fillRect(0, 0, outW, outH);
+  ctx.drawImage(source, Math.round((outW - w) / 2), Math.round((outH - h) / 2), w, h);
+}
+
 function drawFitFrame(
   ctx: CanvasRenderingContext2D,
   blurCanvas: OffscreenCanvas,
@@ -681,6 +701,7 @@ export class VertixEngine {
   private planner = new LayoutPlanner();
   private lastPlanRule: LayoutRule = "broll";
   private lastSwitchedFar = false;
+  private sourceShownAsIs = false;
   private tracksOverlay: HTMLCanvasElement | null = null;
   private tracksOverlayCtx: CanvasRenderingContext2D | null = null;
 
@@ -980,9 +1001,9 @@ export class VertixEngine {
     return this.lookaheadPreference;
   }
 
-  /** 9:16: the only mode with detection, crops and lookahead. */
+  /** 9:16 on a landscape source: the only case with detection, crops and lookahead. */
   private get reframing(): boolean {
-    return this.mode === "9:16";
+    return this.mode === "9:16" && !this.sourceShownAsIs;
   }
 
   private get lookaheadEnabled(): boolean {
@@ -1027,6 +1048,7 @@ export class VertixEngine {
       speakerCount: this.displayedSpeakerCount,
       isTransitioning: this.transitionStart !== null,
       layoutRule: this.displayedRule,
+      sourceShownAsIs: this.sourceShownAsIs,
     };
   }
 
@@ -1986,10 +2008,16 @@ export class VertixEngine {
     }
 
     if (!this.srcDimsInitialized) {
-      const w = metadata.width ?? video.videoWidth;
-      const h = metadata.height ?? video.videoHeight;
-      const cropH = h;
-      const cropW = Math.round((h * 9) / 16);
+      const { width: w, height: h } = displayedSourceSize(
+        metadata.width,
+        metadata.height,
+        video.videoWidth,
+        video.videoHeight
+      );
+      const shownAsIs = isShownAsIs(w, h);
+      const { width: cropW, height: cropH } = shownAsIs
+        ? fittedOutputSize(w, h, 9 / 16)
+        : { width: Math.round((h * 9) / 16), height: h };
 
       this.srcDims = { w, h, cropW, cropH };
       this.srcDimsInitialized = true;
@@ -1998,8 +2026,9 @@ export class VertixEngine {
       this.emitState();
 
       const tainted = !this.isFrameReadable(video);
-      if (tainted !== this.sourceTainted) {
+      if (tainted !== this.sourceTainted || shownAsIs !== this.sourceShownAsIs) {
         this.sourceTainted = tainted;
+        this.sourceShownAsIs = shownAsIs;
         this.refreshLookahead("flush");
       }
     }
@@ -2460,8 +2489,11 @@ export class VertixEngine {
     const scaleX = sourceW / srcW;
     const scaleY = sourceH / srcH;
 
-    const targetW = currentMode === "16:9" ? srcW : cropW;
-    const targetH = currentMode === "16:9" ? srcH : cropH;
+    const shownAsIsSize = this.sourceShownAsIs
+      ? fittedOutputSize(srcW, srcH, currentMode === "16:9" ? 16 / 9 : 9 / 16)
+      : null;
+    const targetW = shownAsIsSize?.width ?? (currentMode === "16:9" ? srcW : cropW);
+    const targetH = shownAsIsSize?.height ?? (currentMode === "16:9" ? srcH : cropH);
     if (canvas.width !== targetW || canvas.height !== targetH) {
       canvas.width = targetW;
       canvas.height = targetH;
@@ -2469,7 +2501,9 @@ export class VertixEngine {
     if (!this.outputCtx) this.outputCtx = canvas.getContext("2d");
     const ctx = this.outputCtx!;
 
-    if (currentMode === "16:9") {
+    if (shownAsIsSize) {
+      drawLetterboxed(ctx, source, srcW, srcH, targetW, targetH);
+    } else if (currentMode === "16:9") {
       ctx.drawImage(source, 0, 0, srcW, srcH);
     } else {
       // "9:16" mode: 0 faces -> full frame, no crop; N>=1 -> N panes, each a
