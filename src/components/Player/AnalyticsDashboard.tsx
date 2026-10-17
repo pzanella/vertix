@@ -208,19 +208,39 @@ export const AnalyticsDashboard = memo(function AnalyticsDashboard({
           />
         </MetricSection>
 
+        {metrics.detectionHealth.message && (
+          <div
+            role="status"
+            className={`md:col-span-2 rounded-md border px-2.5 py-1.5 text-xs ${
+              metrics.detectionHealth.state === "stopped"
+                ? "border-red-500/40 bg-red-500/10 text-red-300"
+                : "border-amber-500/40 bg-amber-500/10 text-amber-200"
+            }`}
+          >
+            {metrics.detectionHealth.message}
+          </div>
+        )}
+
         <MetricSection title="Performance">
           <MetricRow
             label="Detection"
             value={
-              metrics.detectionMode === "worker"
-                ? "Worker"
-                : metrics.detectionMode === "main-thread"
-                  ? "Main Thread"
-                  : "—"
+              metrics.detectionHealth.state === "stopped"
+                ? "Stopped"
+                : metrics.detectionMode === "worker"
+                  ? "Worker"
+                  : metrics.detectionMode === "main-thread"
+                    ? "Main Thread"
+                    : "—"
             }
             tone={
               metrics.detectionMode === "worker" ? "good" : metrics.detectionMode === "main-thread" ? "warn" : "default"
             }
+          />
+          <MetricRow
+            label="Worker Restarts"
+            value={String(metrics.detectionHealth.workerRestarts)}
+            tone={metrics.detectionHealth.workerRestarts > 0 ? "warn" : "default"}
           />
           <MetricRow
             label="Detect Rate"

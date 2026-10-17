@@ -1,3 +1,16 @@
+/**
+ * Where face detection runs: the shared worker, a worker starting up, the
+ * main thread (the worker is unavailable or was given up after repeated
+ * restarts), or nowhere ("stopped": the main-thread fallback failed too).
+ */
+export interface DetectionHealth {
+  state: "worker" | "starting" | "main-thread" | "stopped";
+  /** Detection-worker restarts after a detection got no result in time, since the page loaded. */
+  workerRestarts: number;
+  /** What the viewer should know, or null when all is well. */
+  message: string | null;
+}
+
 /** Workers of one kind: created since the page loaded, and still running. */
 export interface WorkerCount {
   created: number;
@@ -20,6 +33,7 @@ export interface ResourceSnapshot {
     detectionWorker: number | null;
     mainThread: Partial<Record<"simd" | "scalar", number>>;
   };
+  detection: DetectionHealth;
   /** performance.memory (Chromium only), else null. */
   jsHeap: { usedBytes: number; totalBytes: number; limitBytes: number } | null;
   engine: {

@@ -24,7 +24,7 @@ import {
   type SceneCutScores,
 } from "./layoutEngine";
 import type { BenchmarkProbe } from "./bench/BenchmarkRecorder";
-import { jsHeapSnapshot, type ResourceSnapshot, type WorkerCount } from "./bench/resourceStats";
+import { jsHeapSnapshot, type DetectionHealth, type ResourceSnapshot, type WorkerCount } from "./bench/resourceStats";
 import {
   DecisionTimeline,
   mergeDecisions,
@@ -130,6 +130,8 @@ export interface VertixMetrics {
   detectionRateHz: number | null;
   /** Whether the last detection tick ran in the shared worker or fell back to the main thread. Null before the first tick. */
   detectionMode: "worker" | "main-thread" | null;
+  /** Where detection runs now, worker restarts, and a message when the viewer should know (worker given up, detection stopped). */
+  detectionHealth: DetectionHealth;
   /** How long the last detection call itself took (WASM inference only, not the surrounding postMessage/bitmap overhead), in ms. Null before the first tick. */
   workerInferenceMs: number | null;
   workerInferenceHistory: number[];
@@ -243,6 +245,7 @@ export const INITIAL_METRICS: VertixMetrics = {
   skinRejectedSpeakerSized: 0,
   detectionRateHz: null,
   detectionMode: null,
+  detectionHealth: { state: "starting", workerRestarts: 0, message: null },
   workerInferenceMs: null,
   workerInferenceHistory: [],
   longTasksSupported: false,
@@ -341,6 +344,47 @@ let sharedWorkerLoadPromise: Promise<boolean> | null = null;
 let disposeSharedWorker: (() => void) | null = null;
 let nextDetectionRequestId = 0;
 
+// Bumped for every new detection worker: a result from an older one is ignored.
+let sharedWorkerGeneration = 0;
+// A detection that gets no result within max(this, DETECTION_TIMEOUT_P95_FACTOR
+// x the detection p95) means the worker is stuck or was killed without an
+// error event (Android does that under memory pressure): it is replaced.
+const MIN_DETECTION_TIMEOUT_MS = 2000;
+const DETECTION_TIMEOUT_P95_FACTOR = 10;
+// At most this many restarts within the window; after that the worker is
+// given up and detection falls back to the main thread.
+const WORKER_RESTART_LIMIT = 3;
+const WORKER_RESTART_WINDOW_MS = 60_000;
+let workerRestartTimes: number[] = [];
+let workerRestarts = 0;
+let workerGivenUpReason: string | null = null;
+// Engines to tell when detection moves (restart, fallback), so their metrics update.
+const detectionHealthListeners = new Set<() => void>();
+
+/**
+ * Replaces a detection worker that stopped answering. Pending requests are
+ * cancelled. After WORKER_RESTART_LIMIT restarts within
+ * WORKER_RESTART_WINDOW_MS the worker is given up instead: engines then run
+ * detection on the main thread until the next switchWasmBuild.
+ */
+function restartDetectionWorker(reason: string): void {
+  const now = performance.now();
+  workerRestartTimes = workerRestartTimes.filter((at) => now - at < WORKER_RESTART_WINDOW_MS);
+  disposeSharedWorker?.();
+  for (const pending of pendingDetections.values()) pending.onCancel();
+  pendingDetections.clear();
+  if (workerRestartTimes.length >= WORKER_RESTART_LIMIT) {
+    workerGivenUpReason = `${reason}; ${WORKER_RESTART_LIMIT} restarts within ${WORKER_RESTART_WINDOW_MS / 1000} s`;
+    console.error(`[Vertix] Detection worker given up (${workerGivenUpReason}); detecting on the main thread.`);
+  } else {
+    workerRestartTimes.push(now);
+    workerRestarts += 1;
+    console.warn(`[Vertix] Detection worker restarted (${reason}).`);
+    void getSharedDetectionWorker();
+  }
+  for (const listener of detectionHealthListeners) listener();
+}
+
 // Benchmark diagnostics: workers created and still running, per kind.
 const workerCounts: Record<"detection" | "cutTrigger", WorkerCount> = {
   detection: { created: 0, live: 0 },
@@ -403,6 +447,9 @@ export function getActiveWasmBuild(): WasmBuildSelection {
  */
 export function switchWasmBuild(selection: WasmBuildSelection): Promise<boolean> {
   activeWasmBuild = selection;
+  // A deliberate switch starts over: the worker may be tried again.
+  workerGivenUpReason = null;
+  workerRestartTimes = [];
   disposeSharedWorker?.();
   for (const pending of pendingDetections.values()) pending.onCancel();
   pendingDetections.clear();
@@ -422,6 +469,7 @@ export function switchWasmBuild(selection: WasmBuildSelection): Promise<boolean>
  */
 function getSharedDetectionWorker(): Promise<boolean> {
   if (sharedWorkerLoadPromise) return sharedWorkerLoadPromise;
+  if (workerGivenUpReason !== null) return Promise.resolve(false);
 
   const build = getActiveWasmBuild().variant;
   sharedWorkerLoading = true;
@@ -434,6 +482,7 @@ function getSharedDetectionWorker(): Promise<boolean> {
       worker = new Worker(`${import.meta.env.BASE_URL}workers/faceDetectionWorker.js`);
       workerCounts.detection.created += 1;
       workerCounts.detection.live += 1;
+      sharedWorkerGeneration += 1;
     } catch (err) {
       console.error(
         "[Vertix] Couldn't construct the detection worker; falling back to running WASM on the main thread.",
@@ -452,6 +501,7 @@ function getSharedDetectionWorker(): Promise<boolean> {
       clearTimeout(timeout);
       resolve(ok);
     };
+    const workerGeneration = sharedWorkerGeneration;
     let terminated = false;
     const release = () => {
       worker.onmessage = null;
@@ -513,6 +563,8 @@ function getSharedDetectionWorker(): Promise<boolean> {
         fail(msg.message ?? "unknown error");
         return;
       }
+      // A late answer from a worker that was replaced (restart, build switch).
+      if (workerGeneration !== sharedWorkerGeneration) return;
       if (msg.type === "result" && msg.requestId !== undefined) {
         const pending = pendingDetections.get(msg.requestId);
         pendingDetections.delete(msg.requestId);
@@ -851,6 +903,8 @@ export class VertixEngine {
   // Main-thread fallback detector: when it became ready, and its results since.
   private mainThreadReadyAt = 0;
   private mainThreadResults = 0;
+  // Why the main-thread WASM fallback could not load, or null.
+  private mainThreadWasmError: string | null = null;
   private triggerLatency = new RollingP95();
   private taintProbeCtx: OffscreenCanvasRenderingContext2D | null = null;
 
@@ -884,8 +938,14 @@ export class VertixEngine {
   private boundOnDisplayFrame = this.onDisplayFrame.bind(this);
   private boundOnLoadedMetadata = () => this.resetForNewSource();
 
+  private boundOnDetectionHealthChange = () => {
+    this.metrics = { ...this.metrics, detectionHealth: this.getDetectionHealth() };
+    this.emitMetrics();
+  };
+
   constructor() {
     wasmBuildListeners.add(this.boundOnWasmBuildChange);
+    detectionHealthListeners.add(this.boundOnDetectionHealthChange);
     const fc = new OffscreenCanvas(FACE_W, FACE_H);
     this.faceCanvas = fc;
     this.faceCtx = fc.getContext("2d", { willReadFrequently: true })!;
@@ -965,6 +1025,7 @@ export class VertixEngine {
    */
   destroy(): void {
     wasmBuildListeners.delete(this.boundOnWasmBuildChange);
+    detectionHealthListeners.delete(this.boundOnDetectionHealthChange);
     this.detach();
     this.audioMonitor.detach();
     this.taintProbeCtx = null;
@@ -1141,15 +1202,22 @@ export class VertixEngine {
     }
     if (this.wasmReady || this.wasmLoading) return;
     this.engineBuild = build;
-    this.wasmLoading = importWasmBindings(build).then(async (bindings) => {
-      mainThreadWasmMemory[build] = (await bindings.default()).memory;
-      if (this.engineBuild !== build) return;
-      this.engine = new bindings.ReframeEngine();
-      this.wasmReady = true;
-      this.mainThreadReadyAt = performance.now();
-      this.mainThreadResults = 0;
-      this.emitState();
-    });
+    this.wasmLoading = importWasmBindings(build)
+      .then(async (bindings) => {
+        mainThreadWasmMemory[build] = (await bindings.default()).memory;
+        if (this.engineBuild !== build) return;
+        this.engine = new bindings.ReframeEngine();
+        this.wasmReady = true;
+        this.mainThreadWasmError = null;
+        this.mainThreadReadyAt = performance.now();
+        this.mainThreadResults = 0;
+        this.emitState();
+      })
+      .catch((error: unknown) => {
+        this.mainThreadWasmError = error instanceof Error ? error.message : String(error);
+        console.error("[Vertix] Main-thread detection unavailable:", this.mainThreadWasmError);
+        this.boundOnDetectionHealthChange();
+      });
   }
 
   /**
@@ -1685,9 +1753,21 @@ export class VertixEngine {
         }
         this.dispatchPendingCutDetection();
       };
+      const timeoutMs = this.detectionTimeoutMs(build);
+      const watchdog = setTimeout(() => {
+        if (!pendingDetections.has(requestId)) return;
+        pendingDetections.delete(requestId);
+        this.detectionInFlight = false;
+        this.pendingCutDetectionSec = null;
+        restartDetectionWorker(`a detection got no result within ${Math.round(timeoutMs)} ms`);
+      }, timeoutMs);
       pendingDetections.set(requestId, {
-        onResult,
+        onResult: (...result) => {
+          clearTimeout(watchdog);
+          onResult(...result);
+        },
         onCancel: () => {
+          clearTimeout(watchdog);
           this.detectionInFlight = false;
           this.pendingCutDetectionSec = null;
         },
@@ -2068,6 +2148,7 @@ export class VertixEngine {
         frameTimeHistory: appendCapped(this.metrics.frameTimeHistory, this.frameTimeEma),
         longTaskMs,
         longTaskHistory: appendCapped(this.metrics.longTaskHistory, longTaskMs),
+        detectionHealth: this.getDetectionHealth(),
         displayedMediaTimeSec: this.displayedMediaTimeSec,
         lookahead: this.lookaheadStatus(),
       };
@@ -2307,6 +2388,32 @@ export class VertixEngine {
     );
   }
 
+  /** How long a worker detection may take before the worker counts as stuck: max(2 s, 10x this build's detection p95). */
+  private detectionTimeoutMs(build: WasmBuildVariant): number {
+    const p95 = this.detectionLatency.p95(build) ?? DEFAULT_DETECTION_P95_MS[this.deviceClass][build];
+    return Math.max(MIN_DETECTION_TIMEOUT_MS, DETECTION_TIMEOUT_P95_FACTOR * p95);
+  }
+
+  /** Where detection runs now, and what the viewer should know about it. */
+  getDetectionHealth(): DetectionHealth {
+    const restarted = workerRestarts > 0 ? ` The detection worker was restarted ${workerRestarts} time(s).` : "";
+    if (sharedWorkerReady && sharedWorker) {
+      return { state: "worker", workerRestarts, message: restarted ? restarted.trim() : null };
+    }
+    if (sharedWorkerLoading) return { state: "starting", workerRestarts, message: restarted ? restarted.trim() : null };
+    const why = workerGivenUpReason
+      ? `The detection worker stopped responding (${workerGivenUpReason}).`
+      : "The detection worker is unavailable.";
+    if (this.mainThreadWasmError !== null) {
+      return {
+        state: "stopped",
+        workerRestarts,
+        message: `Face detection stopped. ${why} The main-thread fallback failed: ${this.mainThreadWasmError}`,
+      };
+    }
+    return { state: "main-thread", workerRestarts, message: `${why} Detection runs on the main thread (slower).` };
+  }
+
   private terminateCutTriggerWorker(): void {
     if (!this.cutTriggerWorker) return;
     this.cutTriggerWorker.terminate();
@@ -2328,6 +2435,7 @@ export class VertixEngine {
         cutTrigger: { ...workerCounts.cutTrigger },
       },
       wasmMemoryBytes: { detectionWorker, mainThread },
+      detection: this.getDetectionHealth(),
       jsHeap: jsHeapSnapshot(),
       engine: {
         detectionInFlight: this.detectionInFlight,

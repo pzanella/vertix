@@ -37,7 +37,13 @@ export type {
 } from "./report";
 export { BenchmarkRunError, runBenchmarkClip, runUnrecordedWarmup } from "./runClip";
 export { describeError, jsHeapSnapshot, videoElementState } from "./resourceStats";
-export type { BenchmarkFailure, ResourceSnapshot, VideoElementState, WorkerCount } from "./resourceStats";
+export type {
+  BenchmarkFailure,
+  DetectionHealth,
+  ResourceSnapshot,
+  VideoElementState,
+  WorkerCount,
+} from "./resourceStats";
 export type { BenchmarkClipOptions, ClipPlaybackOptions } from "./runClip";
 export * from "./stats";
 export { buildSuitePlan, wasmBuildSequenceForClip } from "./suitePlan";

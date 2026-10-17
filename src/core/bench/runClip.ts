@@ -195,6 +195,9 @@ export async function runBenchmarkClip(
     });
     // Read before the next clip loads: buffer counters reset per source.
     lookahead = lookaheadSnapshot(engine);
+    const health = engine.getDetectionHealth();
+    if (options.mode === "9:16" && health.state === "stopped")
+      throw new Error(health.message ?? "Face detection stopped");
   } catch (error) {
     if (error instanceof DOMException && error.name === "AbortError") {
       (recorder as BenchmarkRecorder | null)?.finish(options.mode);
