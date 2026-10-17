@@ -4,7 +4,10 @@ export interface FaceBox {
   cy: number;
   w: number;
   h: number;
+  /** Mouth activity: the lower-face change minus part of the upper-face change since the previous detection (see mouthActivity). */
   motion: number;
+  /** Lower-face change alone: the mouth-motion measure before head and camera motion were removed. For comparison only. */
+  lowerFaceMotion: number;
   /** The detector's own confidence (0..1) for this detection. Already thresholded server-side (Rust drops anything below its own cutoff), so in practice this stays in a fairly narrow high band. */
   confidence: number;
 }
@@ -24,7 +27,17 @@ export interface SpeakerPane {
 }
 
 // Values per face in the array returned by `ReframeEngine.update_faces`.
-const DETECTION_STRIDE = 7;
+const DETECTION_STRIDE = 8;
+
+// Share of the upper-face change (forehead, eyes) taken off the lower-face
+// change. Head and camera motion change both bands, speech mostly the
+// lower one.
+export const UPPER_FACE_MOTION_WEIGHT = 0.5;
+
+/** Mouth activity from the lower- and upper-face changes (mean RGB difference), clamped at 0. */
+export function mouthActivity(lowerFaceMotion: number, upperFaceMotion: number): number {
+  return Math.max(0, lowerFaceMotion - UPPER_FACE_MOTION_WEIGHT * upperFaceMotion);
+}
 
 export interface UnpackedDetections {
   faces: FaceBox[];
@@ -32,7 +45,7 @@ export interface UnpackedDetections {
   skinRejected: FaceBox[];
 }
 
-/** Unpacks the `[cx, cy, w, h, motion, score, skinRejected, ...]` array returned by `ReframeEngine.update_faces`. */
+/** Unpacks the `[cx, cy, w, h, lowerFaceMotion, score, skinRejected, upperFaceMotion, ...]` array returned by `ReframeEngine.update_faces`. */
 export function unpackDetections(flat: Float64Array): UnpackedDetections {
   const result: UnpackedDetections = { faces: [], skinRejected: [] };
   for (let i = 0; i + DETECTION_STRIDE - 1 < flat.length; i += DETECTION_STRIDE) {
@@ -41,8 +54,9 @@ export function unpackDetections(flat: Float64Array): UnpackedDetections {
       cy: flat[i + 1],
       w: flat[i + 2],
       h: flat[i + 3],
-      motion: flat[i + 4],
+      motion: mouthActivity(flat[i + 4], flat[i + 7]),
       confidence: flat[i + 5],
+      lowerFaceMotion: flat[i + 4],
     };
     (flat[i + 6] === 0 ? result.faces : result.skinRejected).push(face);
   }
@@ -194,7 +208,9 @@ export interface PaneTarget {
 
 /**
  * Composes a stable speaker layout: 1 face fills the whole frame, 2 stack
- * vertically, 3+ form a grid (as square as possible). Each pane is an
+ * vertically, 3+ form a grid (as square as possible). Panes are filled in
+ * the order of `faces` (the caller keeps that order fixed per track, so
+ * panes never swap). Each pane is an
  * independent cover-crop centered on its face, not a shared crop split in
  * half, so each person stays centered in their own pane regardless of where
  * they sit in the frame.
@@ -225,9 +241,7 @@ export function computeSpeakerLayout(
 
   const zoomFactor = faces.length === 1 ? SINGLE_SPEAKER_ZOOM_FACTOR : MULTI_SPEAKER_ZOOM_FACTOR;
 
-  // Stable left-to-right order so panes don't swap between frames just
-  // because detection happened to return faces in a different order.
-  const ordered = [...faces].sort((a, b) => a.cx - b.cx);
+  const ordered = faces;
   const rows = gridRows(ordered.length);
   const rowH = outH / rows.length;
 
@@ -252,4 +266,58 @@ export function computeSpeakerLayout(
   });
 
   return results;
+}
+
+// Room left on each side of a framed group, in widths of its widest face.
+const GROUP_SIDE_MARGIN_IN_FACES = 0.5;
+
+/** The box around `faces` with GROUP_SIDE_MARGIN_IN_FACES on each side, as fractions of the frame. */
+function groupBounds(faces: readonly FaceBox[]): { left: number; right: number; top: number; bottom: number } {
+  const margin = Math.max(...faces.map((f) => f.w)) * GROUP_SIDE_MARGIN_IN_FACES;
+  return {
+    left: Math.min(...faces.map((f) => f.cx - f.w / 2)) - margin,
+    right: Math.max(...faces.map((f) => f.cx + f.w / 2)) + margin,
+    top: Math.min(...faces.map((f) => f.cy - f.h / 2)),
+    bottom: Math.max(...faces.map((f) => f.cy + f.h / 2)),
+  };
+}
+
+/** Whether `faces`, with side margins, fit across a full-height crop of `outW`:`outH` taken from a `srcW` x `srcH` source, allowing `tolerance` times the crop width. */
+export function groupFitsInFrame(
+  faces: readonly FaceBox[],
+  srcW: number,
+  srcH: number,
+  outW: number,
+  outH: number,
+  tolerance = 1
+): boolean {
+  if (faces.length === 0) return false;
+  const bounds = groupBounds(faces);
+  return (bounds.right - bounds.left) * srcW <= ((srcH * outW) / outH) * tolerance;
+}
+
+/**
+ * A single face-like box that makes the single-speaker crop frame the
+ * whole group: centred on the group, and tall enough that the crop is at
+ * least as wide as the group (with margins) and no tighter than the
+ * single-speaker framing of its largest face.
+ */
+export function groupFrameFace(
+  faces: readonly FaceBox[],
+  srcW: number,
+  srcH: number,
+  outW: number,
+  outH: number
+): FaceBox {
+  const bounds = groupBounds(faces);
+  const largest = faces.reduce((a, b) => (b.h > a.h ? b : a));
+  const neededCropH = ((bounds.right - bounds.left) * srcW * outH) / outW;
+  const h = Math.max(largest.h, neededCropH / srcH / SINGLE_SPEAKER_ZOOM_FACTOR);
+  return {
+    ...largest,
+    cx: (bounds.left + bounds.right) / 2,
+    cy: (bounds.top + bounds.bottom) / 2,
+    w: bounds.right - bounds.left,
+    h,
+  };
 }

@@ -34,6 +34,26 @@ The engine's benchmark hooks only do work while a run is in progress: outside
 a run no recorder is attached and each hook is a single `null` check, so
 normal playback is unaffected by the button being there.
 
+### Local licensed clips
+
+Clips you may only use locally (for example licensed news streams) can join
+the suite without ever being committed or deployed. List them in `.env.local`
+(gitignored):
+
+```
+VERTIX_E2E_HLS_URLS=rally|https://…/master.m3u8|120,interview|https://…/master.m3u8
+```
+
+Each comma-separated entry is `url`, `label|url` or `label|url|maxSeconds`
+(default 120 s: playback stops there). The suite plays them after the test
+clips, named `local-<n>-<label>` in reports; the URL is never written to a
+report or a log. They are included in the dev server (`npm run dev`), and in
+a production build only with `VERTIX_LOCAL_CLIPS=1 npm run build` (then
+`npm run preview`). A build with that flag fails in CI, and the deploy
+workflow runs `scripts/check-no-local-clips.mjs`, which fails if a bundle
+carries the list. `node scripts/check-lookahead.mjs --licensed` runs the same
+clips headless.
+
 ### Settings
 
 | Setting       | Default | Range      | Meaning                                                                                  |
@@ -258,6 +278,30 @@ Further limits:
   speaker → 2-speaker split) after warm-up.
 - **Limits:** the first layout commit of a clip is not counted.
 
+**Face tracks and layout rules (`tracking`, schema v6)**
+
+- `layoutChangesPerMin`: `layoutChanges` per minute of measured playback.
+- `subjectSwitches`, `subjectSwitchesPerMin`: times the framing moved to
+  another tracked person within a shot (main subject, single person, or
+  its fallback; a framed group in between does not reset it, a hard cut
+  does).
+- `timeInRulePct`: share of measured playback per rule, in percent:
+  `broll`, `single`, `stacked`, `subject` (one face chosen among 3+
+  foreground faces), `group` and `grid`. `group` only occurs with
+  `MANY_FACES_RULES = "tracker"`; with the default rules `grid` is any
+  unresolved 3-face scene, as on main. Measured
+  on displayed frames, from the rule applied on each.
+- `foregroundTracks`, `backgroundTracks`: tracks matched per detection
+  that count for the layout, and those that do not (small faces behind).
+- `paneSwaps`: ID switches, detections where the panes kept the same
+  tracks in another order. Panes follow track IDs, so this should be 0.
+- `leftToRightFlips`: detections where the left-to-right order of the pane
+  tracks changed: the panel swaps the old x-sorted layout would have made.
+- `trackerMs`: main-thread time of the tracker plus the layout rules per
+  detection.
+- **Limits:** times are wall time on displayed frames, so a stalled
+  display stretches the rule on screen. Track IDs restart after every cut.
+
 **Long tasks (`longTasks`)**
 
 - **What it is:** main-thread tasks longer than 50 ms, reported by
@@ -323,9 +367,38 @@ Each clip result adds:
 - **JSON**: `{ tool, schemaVersion, config, environment, wasmBuildComparison,
 lookaheadComparison, precisionWarnings, results[] }`. Each result contains `summary` and `raw`,
   and `raw` holds column arrays of every sample.
-  - `schemaVersion` is 5. Every v4 and v3 field is still there with the
-    same meaning. Every v2 field is too, except
+  - `schemaVersion` is 6. Every v5, v4 and v3 field is still there with
+    the same meaning. Every v2 field is too, except
     `environment.wasmBuiltWithSimd` (see [Environment info](#environment-info)).
+  - New in v6: `failures` at the top level, one entry per run or step that
+    failed (empty when all completed). A failed step is recorded and the
+    suite moves on to the next one; only Stop ends it early. Each entry:
+    `{ name, message, stack, step: { index, total, kind, label }, clip,
+    build, lookahead, mode, failedAt, resources, video }`. `resources` is a
+    snapshot like the one below, with the last detection's media time and
+    wall time (`engine.lastDetectionMediaTimeSec`, `lastDetectionAtMs`);
+    `video` is the element's time, readyState, networkState and MediaError.
+    A run that failed is also kept in `results` with what it recorded until
+    then and its own `failure`. A source that has not loaded within 30 s
+    fails its run ("Source did not load within 30 s"), and a 9:16 run fails
+    when detection has stopped (see `detection` below). Per result,
+    `resources: { start, end }`: live and created detection and
+    cut-trigger workers, the WASM memory of the detection worker and of each
+    build loaded on the main thread, `detection` (`state`: worker, starting,
+    main-thread or stopped; `workerRestarts`; `message`),
+    `performance.memory` (Chromium), and the engine's frame-buffer slots and
+    bytes, queued decisions, pending detections and tracks.
+  - Detection watchdog: a worker detection with no result after
+    max(2 s, 10 × the build's detection p95) restarts the worker (a late
+    answer from the old one is ignored). After 3 restarts within 60 s the
+    worker is given up until the next build switch: detection runs on the
+    main thread, or stops if that cannot load, with a message in the
+    dashboard and in the failure.
+  - Also new in v6: `summary.tracking` (see
+    [Layout and main thread](#layout-and-main-thread)). `raw.detections`
+    `keptFaces` now counts foreground faces (the tracker's foreground
+    filter) instead of every speaker-sized face, and `resolvedFaces` /
+    `resolvedCx` describe the layout planner's panes.
   - New in v5:
     - `lookaheadComparison.order`: `off-first-per-clip` for the suite.
     - Per result, `lookahead`: `{ enabled, unavailableReason, lengthMs,

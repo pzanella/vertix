@@ -58,6 +58,9 @@ jobs:
       # domain root. `npm run build --` still runs `tsc -b` first, same
       # as the verify workflow, so a type error fails this too.
       - run: npm run build -- --base=/vertix/
+      # The licensed clip list (.env.local, VERTIX_LOCAL_CLIPS=1) is for
+      # local builds only: fail if it ever ends up in the deployed bundle.
+      - run: node scripts/check-no-local-clips.mjs dist
 
       - uses: actions/upload-pages-artifact@v3
         with:

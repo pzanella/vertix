@@ -1,5 +1,15 @@
 import { AudioActivityMonitor } from "./audioActivity";
-import { ActiveSpeakerResolver, PersonCountDebouncer } from "./speakerTracking";
+import { PersonCountDebouncer } from "./personCount";
+import {
+  LayoutPlanner,
+  paneCountOf,
+  SWITCH_DISSOLVE_DISTANCE,
+  type LayoutPlan,
+  type LayoutRule,
+  type TrackSnapshot,
+} from "./tracking/layoutPlanner";
+import type { PanelVariant } from "./tracking/panelDetector";
+import { displayedSourceSize, fittedOutputSize, isShownAsIs } from "./sourceAspect";
 import {
   computeSpeakerLayout,
   faceVisibleFraction,
@@ -14,6 +24,7 @@ import {
   type SceneCutScores,
 } from "./layoutEngine";
 import type { BenchmarkProbe } from "./bench/BenchmarkRecorder";
+import { jsHeapSnapshot, type DetectionHealth, type ResourceSnapshot, type WorkerCount } from "./bench/resourceStats";
 import {
   DecisionTimeline,
   mergeDecisions,
@@ -119,6 +130,8 @@ export interface VertixMetrics {
   detectionRateHz: number | null;
   /** Whether the last detection tick ran in the shared worker or fell back to the main thread. Null before the first tick. */
   detectionMode: "worker" | "main-thread" | null;
+  /** Where detection runs now, worker restarts, and a message when the viewer should know (worker given up, detection stopped). */
+  detectionHealth: DetectionHealth;
   /** How long the last detection call itself took (WASM inference only, not the surrounding postMessage/bitmap overhead), in ms. Null before the first tick. */
   workerInferenceMs: number | null;
   workerInferenceHistory: number[];
@@ -202,6 +215,10 @@ export interface VertixState {
   speakerCount: number;
   /** Whether a layout cross-dissolve is currently in progress. */
   isTransitioning: boolean;
+  /** The rule behind the layout on screen (9:16 only). */
+  layoutRule: LayoutRule;
+  /** True when the source is not landscape: shown whole, without crop or detection. */
+  sourceShownAsIs: boolean;
 }
 
 // Exported so useWasmReframe.ts's own pre-attach placeholder state matches
@@ -228,6 +245,7 @@ export const INITIAL_METRICS: VertixMetrics = {
   skinRejectedSpeakerSized: 0,
   detectionRateHz: null,
   detectionMode: null,
+  detectionHealth: { state: "starting", workerRestarts: 0, message: null },
   workerInferenceMs: null,
   workerInferenceHistory: [],
   longTasksSupported: false,
@@ -326,6 +344,77 @@ let sharedWorkerLoadPromise: Promise<boolean> | null = null;
 let disposeSharedWorker: (() => void) | null = null;
 let nextDetectionRequestId = 0;
 
+// Bumped for every new detection worker: a result from an older one is ignored.
+let sharedWorkerGeneration = 0;
+// A detection that gets no result within max(this, DETECTION_TIMEOUT_P95_FACTOR
+// x the detection p95) means the worker is stuck or was killed without an
+// error event (Android does that under memory pressure): it is replaced.
+const MIN_DETECTION_TIMEOUT_MS = 2000;
+const DETECTION_TIMEOUT_P95_FACTOR = 10;
+// At most this many restarts within the window; after that the worker is
+// given up and detection falls back to the main thread.
+const WORKER_RESTART_LIMIT = 3;
+const WORKER_RESTART_WINDOW_MS = 60_000;
+let workerRestartTimes: number[] = [];
+let workerRestarts = 0;
+let workerGivenUpReason: string | null = null;
+// Engines to tell when detection moves (restart, fallback), so their metrics update.
+const detectionHealthListeners = new Set<() => void>();
+
+/**
+ * Replaces a detection worker that stopped answering. Pending requests are
+ * cancelled. After WORKER_RESTART_LIMIT restarts within
+ * WORKER_RESTART_WINDOW_MS the worker is given up instead: engines then run
+ * detection on the main thread until the next switchWasmBuild.
+ */
+function restartDetectionWorker(reason: string): void {
+  const now = performance.now();
+  workerRestartTimes = workerRestartTimes.filter((at) => now - at < WORKER_RESTART_WINDOW_MS);
+  disposeSharedWorker?.();
+  for (const pending of pendingDetections.values()) pending.onCancel();
+  pendingDetections.clear();
+  if (workerRestartTimes.length >= WORKER_RESTART_LIMIT) {
+    workerGivenUpReason = `${reason}; ${WORKER_RESTART_LIMIT} restarts within ${WORKER_RESTART_WINDOW_MS / 1000} s`;
+    console.error(`[Vertix] Detection worker given up (${workerGivenUpReason}); detecting on the main thread.`);
+  } else {
+    workerRestartTimes.push(now);
+    workerRestarts += 1;
+    console.warn(`[Vertix] Detection worker restarted (${reason}).`);
+    void getSharedDetectionWorker();
+  }
+  for (const listener of detectionHealthListeners) listener();
+}
+
+// Benchmark diagnostics: workers created and still running, per kind.
+const workerCounts: Record<"detection" | "cutTrigger", WorkerCount> = {
+  detection: { created: 0, live: 0 },
+  cutTrigger: { created: 0, live: 0 },
+};
+// WASM memory of each build loaded on the main thread (the fallback).
+const mainThreadWasmMemory: Partial<Record<WasmBuildVariant, WebAssembly.Memory>> = {};
+let nextStatsRequestId = 0;
+const pendingStats = new Map<number, (wasmMemoryBytes: number | null) => void>();
+// The detection worker answers a stats request well within this, unless busy or gone.
+const WORKER_STATS_TIMEOUT_MS = 500;
+
+/** The detection worker's WASM memory size, or null when it does not answer in time. */
+function detectionWorkerWasmMemory(): Promise<number | null> {
+  const worker = sharedWorker;
+  if (!worker || !sharedWorkerReady) return Promise.resolve(null);
+  return new Promise((resolve) => {
+    const requestId = nextStatsRequestId++;
+    const timeout = setTimeout(() => {
+      pendingStats.delete(requestId);
+      resolve(null);
+    }, WORKER_STATS_TIMEOUT_MS);
+    pendingStats.set(requestId, (bytes) => {
+      clearTimeout(timeout);
+      resolve(bytes);
+    });
+    worker.postMessage({ type: "stats", requestId });
+  });
+}
+
 interface PendingDetection {
   onResult: (facesFlat: Float64Array, cutScoresFlat: Float64Array, tookMs: number, readbackMs: number) => void;
   /** Called instead of onResult when the worker is replaced before it answers. */
@@ -358,6 +447,9 @@ export function getActiveWasmBuild(): WasmBuildSelection {
  */
 export function switchWasmBuild(selection: WasmBuildSelection): Promise<boolean> {
   activeWasmBuild = selection;
+  // A deliberate switch starts over: the worker may be tried again.
+  workerGivenUpReason = null;
+  workerRestartTimes = [];
   disposeSharedWorker?.();
   for (const pending of pendingDetections.values()) pending.onCancel();
   pendingDetections.clear();
@@ -377,6 +469,7 @@ export function switchWasmBuild(selection: WasmBuildSelection): Promise<boolean>
  */
 function getSharedDetectionWorker(): Promise<boolean> {
   if (sharedWorkerLoadPromise) return sharedWorkerLoadPromise;
+  if (workerGivenUpReason !== null) return Promise.resolve(false);
 
   const build = getActiveWasmBuild().variant;
   sharedWorkerLoading = true;
@@ -387,6 +480,9 @@ function getSharedDetectionWorker(): Promise<boolean> {
       // Pages). No `type: "module"` — the bundle is built classic, see
       // scripts/build-worker.mjs.
       worker = new Worker(`${import.meta.env.BASE_URL}workers/faceDetectionWorker.js`);
+      workerCounts.detection.created += 1;
+      workerCounts.detection.live += 1;
+      sharedWorkerGeneration += 1;
     } catch (err) {
       console.error(
         "[Vertix] Couldn't construct the detection worker; falling back to running WASM on the main thread.",
@@ -405,10 +501,14 @@ function getSharedDetectionWorker(): Promise<boolean> {
       clearTimeout(timeout);
       resolve(ok);
     };
+    const workerGeneration = sharedWorkerGeneration;
+    let terminated = false;
     const release = () => {
       worker.onmessage = null;
       worker.onerror = null;
       worker.terminate();
+      if (!terminated) workerCounts.detection.live -= 1;
+      terminated = true;
       if (sharedWorker === worker) {
         sharedWorker = null;
         sharedWorkerReady = false;
@@ -440,7 +540,13 @@ function getSharedDetectionWorker(): Promise<boolean> {
         readbackMs?: number;
         message?: string;
         build?: WasmBuildVariant;
+        wasmMemoryBytes?: number | null;
       };
+      if (msg.type === "stats" && msg.requestId !== undefined) {
+        pendingStats.get(msg.requestId)?.(msg.wasmMemoryBytes ?? null);
+        pendingStats.delete(msg.requestId);
+        return;
+      }
       if (msg.type === "ready") {
         if (settled) return;
         if (msg.build !== build) {
@@ -457,6 +563,8 @@ function getSharedDetectionWorker(): Promise<boolean> {
         fail(msg.message ?? "unknown error");
         return;
       }
+      // A late answer from a worker that was replaced (restart, build switch).
+      if (workerGeneration !== sharedWorkerGeneration) return;
       if (msg.type === "result" && msg.requestId !== undefined) {
         const pending = pendingDetections.get(msg.requestId);
         pendingDetections.delete(msg.requestId);
@@ -511,6 +619,15 @@ const SKIN_REJECTED_STROKE = "#f97316";
 const SKIN_REJECTED_LINE_WIDTH = 3;
 const SKIN_REJECTED_DASH = [10, 6];
 
+// "Show tracks" overlay style: the main subject thicker and in another
+// colour, background tracks dimmed, unconfirmed tracks dashed.
+const TRACK_SUBJECT_STROKE = "#facc15";
+const TRACK_FOREGROUND_STROKE = "#22d3ee";
+const TRACK_BACKGROUND_STROKE = "rgba(148, 163, 184, 0.7)";
+const TRACK_LINE_WIDTH = 2;
+const TRACK_SUBJECT_LINE_WIDTH = 4;
+const TRACK_TENTATIVE_DASH = [6, 4];
+
 // How long a layout change (0 -> 2 speakers, 2 -> 3, etc.) takes to
 // cross-dissolve from the old framing into the new one, instead of cutting
 // instantly.
@@ -544,6 +661,23 @@ function drawCrop(
     Math.round(dest.w),
     Math.round(dest.h)
   );
+}
+
+/** The whole frame fitted inside the output, centred on black bars (letterbox or pillarbox). */
+function drawLetterboxed(
+  ctx: CanvasRenderingContext2D,
+  source: CanvasImageSource,
+  srcW: number,
+  srcH: number,
+  outW: number,
+  outH: number
+): void {
+  const scale = Math.min(outW / srcW, outH / srcH);
+  const w = Math.round(srcW * scale);
+  const h = Math.round(srcH * scale);
+  ctx.fillStyle = "#000";
+  ctx.fillRect(0, 0, outW, outH);
+  ctx.drawImage(source, Math.round((outW - w) / 2), Math.round((outH - h) / 2), w, h);
 }
 
 function drawFitFrame(
@@ -638,6 +772,7 @@ export class VertixEngine {
   // FPS/frame-time measurement.
   private lastFrameTime: number | null = null;
   private lastDetectionMediaTime: number | null = null;
+  private lastDetectionAtMs: number | null = null;
   private detectionIntervalEma = 0;
   private fpsEma = 0;
   private frameTimeEma = 0;
@@ -665,13 +800,20 @@ export class VertixEngine {
   private skinRejectionOverlayCtx: CanvasRenderingContext2D | null = null;
   private lastResolvedFaces: FaceBox[] = [];
   private personCount = new PersonCountDebouncer();
+  private planner = new LayoutPlanner();
+  private lastPlanRule: LayoutRule = "broll";
+  private lastSwitchedFar = false;
+  private sourceShownAsIs = false;
+  private tracksOverlay: HTMLCanvasElement | null = null;
+  private tracksOverlayCtx: CanvasRenderingContext2D | null = null;
 
   private audioMonitor = new AudioActivityMonitor();
-  private activeSpeaker = new ActiveSpeakerResolver();
 
   // Decision side: what the latest detection decided, before it is shown.
   private decidedTargetPanes: PaneTarget[] = [];
   private decidedSpeakerCount = 0;
+  private decidedLayoutKey = 0;
+  private decidedRule: LayoutRule = "broll";
   // True once a frame was rendered (or buffered) since the last reset: the
   // no-crop layout counts as committed from then on.
   private hasFrameSinceReset = false;
@@ -683,6 +825,10 @@ export class VertixEngine {
   // Display side: what the frame on screen uses.
   private displayedSpeakerCount = 0;
   private displayedSkinRejectedFaces: FaceBox[] = [];
+  private displayedRule: LayoutRule = "broll";
+  private displayedSubjectTrackId: number | null = null;
+  private displayedTracks: TrackSnapshot[] = [];
+  private displayedPaneTrackIds: number[] = [];
   private targetPanes: PaneTarget[] = [];
   private smoothedPanes: PaneRect[] = [];
 
@@ -757,6 +903,8 @@ export class VertixEngine {
   // Main-thread fallback detector: when it became ready, and its results since.
   private mainThreadReadyAt = 0;
   private mainThreadResults = 0;
+  // Why the main-thread WASM fallback could not load, or null.
+  private mainThreadWasmError: string | null = null;
   private triggerLatency = new RollingP95();
   private taintProbeCtx: OffscreenCanvasRenderingContext2D | null = null;
 
@@ -790,8 +938,14 @@ export class VertixEngine {
   private boundOnDisplayFrame = this.onDisplayFrame.bind(this);
   private boundOnLoadedMetadata = () => this.resetForNewSource();
 
+  private boundOnDetectionHealthChange = () => {
+    this.metrics = { ...this.metrics, detectionHealth: this.getDetectionHealth() };
+    this.emitMetrics();
+  };
+
   constructor() {
     wasmBuildListeners.add(this.boundOnWasmBuildChange);
+    detectionHealthListeners.add(this.boundOnDetectionHealthChange);
     const fc = new OffscreenCanvas(FACE_W, FACE_H);
     this.faceCanvas = fc;
     this.faceCtx = fc.getContext("2d", { willReadFrequently: true })!;
@@ -871,11 +1025,11 @@ export class VertixEngine {
    */
   destroy(): void {
     wasmBuildListeners.delete(this.boundOnWasmBuildChange);
+    detectionHealthListeners.delete(this.boundOnDetectionHealthChange);
     this.detach();
     this.audioMonitor.detach();
     this.taintProbeCtx = null;
-    this.cutTriggerWorker?.terminate();
-    this.cutTriggerWorker = null;
+    this.terminateCutTriggerWorker();
     this.longTaskObserver?.disconnect();
     this.engine?.free();
     this.engine = null;
@@ -917,6 +1071,20 @@ export class VertixEngine {
     this.skinRejectionOverlayCtx = null;
   }
 
+  /** Draws every face track (ID, main subject) on `canvas`, laid exactly over the output like the skin-rejection overlay. Pass null to stop. */
+  setTracksOverlay(canvas: HTMLCanvasElement | null): void {
+    if (!canvas)
+      this.tracksOverlayCtx?.clearRect(0, 0, this.tracksOverlay?.width ?? 0, this.tracksOverlay?.height ?? 0);
+    this.tracksOverlay = canvas;
+    this.tracksOverlayCtx = null;
+  }
+
+  /** Switches how a panel is recognised (see PanelVariant), for A/B measurement; resets tracking like a seek. */
+  setPanelVariant(variant: PanelVariant): void {
+    this.planner.setPanelVariant(variant);
+    this.resetTrackingState();
+  }
+
   /** Starts (or, with null, stops) reporting per-frame and per-detection timings to `probe`. Does not change rendering or detection. */
   setBenchmarkProbe(probe: BenchmarkProbe | null): void {
     this.benchmarkProbe = probe;
@@ -942,6 +1110,11 @@ export class VertixEngine {
   /** The host's choice from setLookaheadEnabled, or null while lookahead follows the build default. */
   getLookaheadPreference(): boolean | null {
     return this.lookaheadPreference;
+  }
+
+  /** 9:16 on a landscape source: the only case with detection, crops and lookahead. */
+  private get reframing(): boolean {
+    return this.mode === "9:16" && !this.sourceShownAsIs;
   }
 
   private get lookaheadEnabled(): boolean {
@@ -985,6 +1158,8 @@ export class VertixEngine {
       meta: this.meta,
       speakerCount: this.displayedSpeakerCount,
       isTransitioning: this.transitionStart !== null,
+      layoutRule: this.displayedRule,
+      sourceShownAsIs: this.sourceShownAsIs,
     };
   }
 
@@ -1027,15 +1202,22 @@ export class VertixEngine {
     }
     if (this.wasmReady || this.wasmLoading) return;
     this.engineBuild = build;
-    this.wasmLoading = importWasmBindings(build).then(async (bindings) => {
-      await bindings.default();
-      if (this.engineBuild !== build) return;
-      this.engine = new bindings.ReframeEngine();
-      this.wasmReady = true;
-      this.mainThreadReadyAt = performance.now();
-      this.mainThreadResults = 0;
-      this.emitState();
-    });
+    this.wasmLoading = importWasmBindings(build)
+      .then(async (bindings) => {
+        mainThreadWasmMemory[build] = (await bindings.default()).memory;
+        if (this.engineBuild !== build) return;
+        this.engine = new bindings.ReframeEngine();
+        this.wasmReady = true;
+        this.mainThreadWasmError = null;
+        this.mainThreadReadyAt = performance.now();
+        this.mainThreadResults = 0;
+        this.emitState();
+      })
+      .catch((error: unknown) => {
+        this.mainThreadWasmError = error instanceof Error ? error.message : String(error);
+        console.error("[Vertix] Main-thread detection unavailable:", this.mainThreadWasmError);
+        this.boundOnDetectionHealthChange();
+      });
   }
 
   /**
@@ -1105,14 +1287,22 @@ export class VertixEngine {
     this.resetCutTrigger();
     this.detectionIntervalEma = 0;
     this.personCount.reset();
-    this.activeSpeaker.reset();
+    this.planner.reset();
+    this.lastPlanRule = "broll";
+    this.lastSwitchedFar = false;
     this.decidedTargetPanes = [];
     this.decidedSpeakerCount = 0;
+    this.decidedLayoutKey = 0;
+    this.decidedRule = "broll";
     this.hasFrameSinceReset = false;
     this.commitCountAtNextDetection = false;
     this.decisions.clear();
     this.displayedSpeakerCount = 0;
     this.displayedSkinRejectedFaces = [];
+    this.displayedRule = "broll";
+    this.displayedSubjectTrackId = null;
+    this.displayedTracks = [];
+    this.displayedPaneTrackIds = [];
     this.smoothedPanes = [];
     this.targetPanes = [];
     this.layoutSignature = "";
@@ -1198,7 +1388,7 @@ export class VertixEngine {
           ? "silent-audio-path"
           : null;
     this.appliedLookaheadEnabled = this.lookaheadEnabled;
-    const active = this.appliedLookaheadEnabled && this.lookaheadUnavailable === null && this.mode === "9:16";
+    const active = this.appliedLookaheadEnabled && this.lookaheadUnavailable === null && this.reframing;
     if (!active) {
       if (this.lookaheadLengthMs > 0) this.applyLookaheadLength({ frames: 0, lengthMs: 0 });
     } else if (this.lookaheadLengthMs === 0 || how === "flush") {
@@ -1345,7 +1535,7 @@ export class VertixEngine {
       enabledByDefault: LOOKAHEAD_ON_BY_DEFAULT[getActiveWasmBuild().variant],
       setByHost: this.lookaheadPreference !== null,
       unavailableReason: this.lookaheadEnabled ? this.lookaheadUnavailable : null,
-      bypassed: this.lookaheadEnabled && this.lookaheadUnavailable === null && this.mode === "16:9",
+      bypassed: this.lookaheadEnabled && this.lookaheadUnavailable === null && !this.reframing,
       audioDelayMs: Math.round(this.audioMonitor.outputDelaySec * 1000),
       lengthMs: Math.round(this.lookaheadLengthMs),
       delayFrames: this.delayFrames,
@@ -1399,19 +1589,10 @@ export class VertixEngine {
     if (!ctx) return;
     ctx.clearRect(0, 0, outW, outH);
     const faces = this.displayedSkinRejectedFaces;
-    if (faces.length === 0 || this.mode === "16:9") return;
+    if (faces.length === 0 || !this.reframing) return;
 
     const { w: srcW, h: srcH } = this.srcDims;
-    const fittedHeight = Math.round(srcH * (outW / srcW));
-    const views: { source: PaneRect; dest: PaneRect }[] =
-      this.displayedSpeakerCount === 0
-        ? [
-            {
-              source: { x: 0, y: 0, w: srcW, h: srcH },
-              dest: { x: 0, y: Math.round((outH - fittedHeight) / 2), w: outW, h: fittedHeight },
-            },
-          ]
-        : this.targetPanes.map((p, i) => ({ source: this.smoothedPanes[i], dest: p.pane.dest }));
+    const views = this.overlayViews(outW, outH);
 
     ctx.strokeStyle = SKIN_REJECTED_STROKE;
     ctx.lineWidth = SKIN_REJECTED_LINE_WIDTH;
@@ -1430,6 +1611,67 @@ export class VertixEngine {
           f.w * srcW * scaleX,
           f.h * srcH * scaleY
         );
+      }
+      ctx.restore();
+    }
+  }
+
+  /** Where each part of the source is drawn on the output: the panes, or the whole fitted frame (B-roll, 16:9). */
+  private overlayViews(outW: number, outH: number): { source: PaneRect; dest: PaneRect }[] {
+    const { w: srcW, h: srcH } = this.srcDims;
+    if (this.mode === "16:9") {
+      return [{ source: { x: 0, y: 0, w: srcW, h: srcH }, dest: { x: 0, y: 0, w: outW, h: outH } }];
+    }
+    if (this.displayedSpeakerCount === 0) {
+      const fittedHeight = Math.round(srcH * (outW / srcW));
+      return [
+        {
+          source: { x: 0, y: 0, w: srcW, h: srcH },
+          dest: { x: 0, y: Math.round((outH - fittedHeight) / 2), w: outW, h: fittedHeight },
+        },
+      ];
+    }
+    return this.targetPanes.map((p, i) => ({ source: this.smoothedPanes[i], dest: p.pane.dest }));
+  }
+
+  /** Draws every track of the decision on screen (box and ID; the main subject highlighted) on the overlay canvas. */
+  private drawTracksOverlay(overlay: HTMLCanvasElement, outW: number, outH: number): void {
+    if (overlay.width !== outW || overlay.height !== outH) {
+      overlay.width = outW;
+      overlay.height = outH;
+      this.tracksOverlayCtx = null;
+    }
+    this.tracksOverlayCtx ??= overlay.getContext("2d");
+    const ctx = this.tracksOverlayCtx;
+    if (!ctx) return;
+    ctx.clearRect(0, 0, outW, outH);
+    if (!this.reframing || this.displayedTracks.length === 0) return;
+
+    const { w: srcW, h: srcH } = this.srcDims;
+    const fontPx = Math.max(14, Math.round(outH / 40));
+    ctx.font = `600 ${fontPx}px system-ui, sans-serif`;
+    ctx.textBaseline = "bottom";
+    for (const { source, dest } of this.overlayViews(outW, outH)) {
+      const scaleX = dest.w / source.w;
+      const scaleY = dest.h / source.h;
+      ctx.save();
+      ctx.beginPath();
+      ctx.rect(dest.x, dest.y, dest.w, dest.h);
+      ctx.clip();
+      for (const t of this.displayedTracks) {
+        const isSubject = t.id === this.displayedSubjectTrackId;
+        const x = dest.x + ((t.cx - t.w / 2) * srcW - source.x) * scaleX;
+        const y = dest.y + ((t.cy - t.h / 2) * srcH - source.y) * scaleY;
+        ctx.strokeStyle = isSubject
+          ? TRACK_SUBJECT_STROKE
+          : t.foreground
+            ? TRACK_FOREGROUND_STROKE
+            : TRACK_BACKGROUND_STROKE;
+        ctx.lineWidth = isSubject ? TRACK_SUBJECT_LINE_WIDTH : TRACK_LINE_WIDTH;
+        ctx.setLineDash(t.confirmed ? [] : TRACK_TENTATIVE_DASH);
+        ctx.strokeRect(x, y, t.w * srcW * scaleX, t.h * srcH * scaleY);
+        ctx.fillStyle = ctx.strokeStyle;
+        ctx.fillText(isSubject ? `#${t.id} ★` : `#${t.id}`, x, y - 2);
       }
       ctx.restore();
     }
@@ -1511,9 +1753,21 @@ export class VertixEngine {
         }
         this.dispatchPendingCutDetection();
       };
+      const timeoutMs = this.detectionTimeoutMs(build);
+      const watchdog = setTimeout(() => {
+        if (!pendingDetections.has(requestId)) return;
+        pendingDetections.delete(requestId);
+        this.detectionInFlight = false;
+        this.pendingCutDetectionSec = null;
+        restartDetectionWorker(`a detection got no result within ${Math.round(timeoutMs)} ms`);
+      }, timeoutMs);
       pendingDetections.set(requestId, {
-        onResult,
+        onResult: (...result) => {
+          clearTimeout(watchdog);
+          onResult(...result);
+        },
         onCancel: () => {
+          clearTimeout(watchdog);
           this.detectionInFlight = false;
           this.pendingCutDetectionSec = null;
         },
@@ -1622,25 +1876,32 @@ export class VertixEngine {
     const detections = unpackDetections(facesFlat);
     this.lastSceneCut = sceneCut;
     this.lastDetectedFaceCount = detections.faces.length;
-    this.lastFaces = detections.faces.filter(isSpeakerSized);
     this.lastSkinRejectedFaces = detections.skinRejected;
     this.lastSkinRejectedSpeakerSizedCount = detections.skinRejected.filter(isSpeakerSized).length;
 
     // A hard cut makes everything learned from the previous shot stale:
-    // who holds the lock, the agreement streaks, the committed count.
-    if (sceneCut.isCut) {
-      this.sceneCutCount += 1;
-      this.activeSpeaker.reset();
-    }
-    this.lastResolvedFaces = this.activeSpeaker.resolve(this.lastFaces, audioEnergy, mediaTimeSec);
-    const count = this.lastResolvedFaces.length;
+    // the tracks, the subject, the agreement streaks, the committed count.
+    if (sceneCut.isCut) this.sceneCutCount += 1;
+    const planStart = performance.now();
+    const plan = this.planner.plan(detections.faces, audioEnergy, mediaTimeSec, sceneCut.isCut, {
+      srcW,
+      srcH,
+      outW: cropW,
+      outH: cropH,
+    });
+    const trackerMs = performance.now() - planStart;
+    this.lastFaces = this.planner.tracker.tracks.filter((t) => t.visible && t.foreground).map((t) => t.lastDetection);
+    this.lastResolvedFaces = plan.faces;
+    this.lastPlanRule = plan.rule;
+    this.lastSwitchedFar = plan.switchedFar;
     const commitAtOnce = sceneCut.isCut || this.commitCountAtNextDetection;
     // A count committed at once after a seek or a mode switch replaces whatever was on screen: no dissolve from it.
     const snapWithoutCut = commitAtOnce && !sceneCut.isCut;
     this.commitCountAtNextDetection = false;
-    const stablePersonCount = commitAtOnce
-      ? this.personCount.commitNow(count, mediaTimeSec)
-      : this.personCount.observe(count, this.hasFrameSinceReset, mediaTimeSec);
+    const key = plan.debounceKey;
+    const stableKey = commitAtOnce
+      ? this.personCount.commitNow(key, mediaTimeSec)
+      : this.personCount.observe(key, this.hasFrameSinceReset, mediaTimeSec);
     // With lookahead, a cut found here is shown from the frame where it
     // happened (the biggest per-frame jump since the previous detection),
     // not from this detection frame.
@@ -1655,7 +1916,15 @@ export class VertixEngine {
         : decisionSec < mediaTimeSec
           ? "localised"
           : "tick";
-    this.decideLayout(decisionSec, count, stablePersonCount, cutSource, snapWithoutCut, srcW, srcH, cropW, cropH);
+    this.decideLayout(decisionSec, key, stableKey, cutSource, snapWithoutCut, srcW, srcH, cropW, cropH, plan);
+    this.benchmarkProbe?.recordTracking(
+      trackerMs,
+      plan.foregroundCount,
+      plan.backgroundCount,
+      plan.paneSwap,
+      plan.leftToRightFlip
+    );
+    this.benchmarkProbe?.recordTrackSnapshot?.(mediaTimeSec, plan.tracks, plan.subjectTrackId, plan.rule);
 
     if (this.lastDetectionMediaTime !== null && mediaTimeSec > this.lastDetectionMediaTime) {
       const interval = mediaTimeSec - this.lastDetectionMediaTime;
@@ -1665,6 +1934,7 @@ export class VertixEngine {
           : this.detectionIntervalEma + (interval - this.detectionIntervalEma) * 0.2;
     }
     this.lastDetectionMediaTime = mediaTimeSec;
+    this.lastDetectionAtMs = performance.now();
 
     const faces = this.lastFaces;
     const faceSizes = faces.map((f) => Math.round(Math.max(f.w, f.h) * 1000) / 10);
@@ -1700,27 +1970,31 @@ export class VertixEngine {
   /** Turns one detection into a LayoutDecision for the frame at `mediaTimeSec`, and queues it for display. */
   private decideLayout(
     mediaTimeSec: number,
-    count: number,
-    stablePersonCount: number,
+    key: number,
+    stableKey: number,
     cutSource: CutSource | null,
     snap: boolean,
     srcW: number,
     srcH: number,
     cropW: number,
-    cropH: number
+    cropH: number,
+    plan: LayoutPlan
   ): void {
     const isCut = cutSource !== null;
-    const countChanged = stablePersonCount !== this.decidedSpeakerCount;
+    const stablePersonCount = paneCountOf(stableKey);
+    const countChanged = stableKey !== this.decidedLayoutKey;
     let reframe: Reframe | null = isCut || snap ? "snap" : null;
     if (stablePersonCount === 0) {
       this.decidedTargetPanes = [];
-    } else if (count === stablePersonCount) {
+      this.decidedRule = "broll";
+    } else if (key === stableKey) {
+      this.decidedRule = plan.rule;
       // Only refresh the target once the raw count matches the *committed*
       // layout — otherwise, mid-debounce, this could compute a different
       // pane count than what's actually on screen. The deadzone itself
       // lives inside computeSpeakerLayout. A reframe or a new layout aims
       // straight at the new faces, without the deadzone.
-      if (this.activeSpeaker.switchedSpeaker) reframe ??= "dissolve";
+      if (this.lastSwitchedFar || this.movesSinglePaneFar(countChanged)) reframe ??= "dissolve";
       this.decidedTargetPanes =
         reframe !== null || countChanged
           ? computeSpeakerLayout(this.lastResolvedFaces, srcW, srcH, cropW, cropH)
@@ -1735,6 +2009,7 @@ export class VertixEngine {
             );
     }
     this.decidedSpeakerCount = stablePersonCount;
+    this.decidedLayoutKey = stableKey;
     this.decisions.push({
       mediaTimeSec,
       speakerCount: stablePersonCount,
@@ -1743,8 +2018,25 @@ export class VertixEngine {
       isCut,
       cutSource,
       skinRejectedFaces: this.lastSkinRejectedFaces,
+      rule: this.decidedRule,
+      subjectTrackId: plan.subjectTrackId,
+      paneTrackIds: plan.paneTrackIds,
+      tracks: plan.tracks,
     });
     if (this.frameBuffer?.hasHeld) this.releaseHeldFrames();
+  }
+
+  /**
+   * A committed change between one-pane layouts of different kinds (one
+   * face, main subject, group) that moves the framing far away: dissolve
+   * instead of panning across the frame.
+   */
+  private movesSinglePaneFar(layoutChanged: boolean): boolean {
+    const previous = this.decidedTargetPanes;
+    const next = this.lastResolvedFaces;
+    if (!layoutChanged || previous.length !== 1 || next.length !== 1) return false;
+    const from = previous[0].face;
+    return Math.hypot(from.cx - next[0].cx, from.cy - next[0].cy) >= SWITCH_DISSOLVE_DISTANCE;
   }
 
   /** Applies the decisions due for the frame about to be drawn; with `onlyUpToSec` null, every queued one (no lookahead: they are already late). */
@@ -1756,9 +2048,14 @@ export class VertixEngine {
     const countChanged = decision.speakerCount !== this.displayedSpeakerCount;
     this.displayedSpeakerCount = decision.speakerCount;
     this.displayedSkinRejectedFaces = decision.skinRejectedFaces;
+    this.displayedSubjectTrackId = decision.subjectTrackId;
+    this.displayedTracks = decision.tracks;
+    this.displayedPaneTrackIds = decision.paneTrackIds;
+    const ruleChanged = decision.rule !== this.displayedRule;
+    this.displayedRule = decision.rule;
     this.targetPanes = decision.targetPanes;
     this.pendingReframe = decision.reframe;
-    if (countChanged) this.emitState();
+    if (countChanged || ruleChanged) this.emitState();
     return decision;
   }
 
@@ -1851,6 +2148,7 @@ export class VertixEngine {
         frameTimeHistory: appendCapped(this.metrics.frameTimeHistory, this.frameTimeEma),
         longTaskMs,
         longTaskHistory: appendCapped(this.metrics.longTaskHistory, longTaskMs),
+        detectionHealth: this.getDetectionHealth(),
         displayedMediaTimeSec: this.displayedMediaTimeSec,
         lookahead: this.lookaheadStatus(),
       };
@@ -1858,10 +2156,16 @@ export class VertixEngine {
     }
 
     if (!this.srcDimsInitialized) {
-      const w = metadata.width ?? video.videoWidth;
-      const h = metadata.height ?? video.videoHeight;
-      const cropH = h;
-      const cropW = Math.round((h * 9) / 16);
+      const { width: w, height: h } = displayedSourceSize(
+        metadata.width,
+        metadata.height,
+        video.videoWidth,
+        video.videoHeight
+      );
+      const shownAsIs = isShownAsIs(w, h);
+      const { width: cropW, height: cropH } = shownAsIs
+        ? fittedOutputSize(w, h, 9 / 16)
+        : { width: Math.round((h * 9) / 16), height: h };
 
       this.srcDims = { w, h, cropW, cropH };
       this.srcDimsInitialized = true;
@@ -1870,8 +2174,9 @@ export class VertixEngine {
       this.emitState();
 
       const tainted = !this.isFrameReadable(video);
-      if (tainted !== this.sourceTainted) {
+      if (tainted !== this.sourceTainted || shownAsIs !== this.sourceShownAsIs) {
         this.sourceTainted = tainted;
+        this.sourceShownAsIs = shownAsIs;
         this.refreshLookahead("flush");
       }
     }
@@ -1910,7 +2215,7 @@ export class VertixEngine {
     const { w: srcW, h: srcH, cropW, cropH } = this.srcDims;
     const renderStart = this.benchmarkProbe ? performance.now() : 0;
     let source: HTMLVideoElement | OffscreenCanvas = video;
-    if (this.mode === "9:16") {
+    if (this.reframing) {
       source = this.copyLiveFrame(video);
       this.hasFrameSinceReset = true;
       this.frameCounter += 1;
@@ -1967,7 +2272,7 @@ export class VertixEngine {
     const rate = video.playbackRate || 1;
     const intervalSec = this.knownIntervalSec() ?? DEFAULT_FRAME_INTERVAL_MS / 1000;
     const frame = this.bufferFrame(video, metadata.mediaTime, presentedAtMs, false);
-    if (this.mode === "9:16") {
+    if (this.reframing) {
       this.hasFrameSinceReset = true;
       if (frame.frameIndex >= this.nextDetectionFrameIndex) {
         this.nextDetectionFrameIndex = frame.frameIndex + FACE_DETECT_INTERVAL;
@@ -2083,15 +2388,78 @@ export class VertixEngine {
     );
   }
 
+  /** How long a worker detection may take before the worker counts as stuck: max(2 s, 10x this build's detection p95). */
+  private detectionTimeoutMs(build: WasmBuildVariant): number {
+    const p95 = this.detectionLatency.p95(build) ?? DEFAULT_DETECTION_P95_MS[this.deviceClass][build];
+    return Math.max(MIN_DETECTION_TIMEOUT_MS, DETECTION_TIMEOUT_P95_FACTOR * p95);
+  }
+
+  /** Where detection runs now, and what the viewer should know about it. */
+  getDetectionHealth(): DetectionHealth {
+    const restarted = workerRestarts > 0 ? ` The detection worker was restarted ${workerRestarts} time(s).` : "";
+    if (sharedWorkerReady && sharedWorker) {
+      return { state: "worker", workerRestarts, message: restarted ? restarted.trim() : null };
+    }
+    if (sharedWorkerLoading) return { state: "starting", workerRestarts, message: restarted ? restarted.trim() : null };
+    const why = workerGivenUpReason
+      ? `The detection worker stopped responding (${workerGivenUpReason}).`
+      : "The detection worker is unavailable.";
+    if (this.mainThreadWasmError !== null) {
+      return {
+        state: "stopped",
+        workerRestarts,
+        message: `Face detection stopped. ${why} The main-thread fallback failed: ${this.mainThreadWasmError}`,
+      };
+    }
+    return { state: "main-thread", workerRestarts, message: `${why} Detection runs on the main thread (slower).` };
+  }
+
+  private terminateCutTriggerWorker(): void {
+    if (!this.cutTriggerWorker) return;
+    this.cutTriggerWorker.terminate();
+    this.cutTriggerWorker = null;
+    workerCounts.cutTrigger.live -= 1;
+  }
+
+  /** Benchmark diagnostics: workers, WASM and JS memory, and what this engine holds right now. */
+  async getResourceStats(): Promise<ResourceSnapshot> {
+    const detectionWorker = await detectionWorkerWasmMemory();
+    const mainThread: ResourceSnapshot["wasmMemoryBytes"]["mainThread"] = {};
+    for (const [build, memory] of Object.entries(mainThreadWasmMemory)) {
+      if (memory) mainThread[build as WasmBuildVariant] = memory.buffer.byteLength;
+    }
+    return {
+      atMs: performance.now(),
+      workers: {
+        detection: { ...workerCounts.detection },
+        cutTrigger: { ...workerCounts.cutTrigger },
+      },
+      wasmMemoryBytes: { detectionWorker, mainThread },
+      detection: this.getDetectionHealth(),
+      jsHeap: jsHeapSnapshot(),
+      engine: {
+        detectionInFlight: this.detectionInFlight,
+        pendingDetections: pendingDetections.size,
+        queuedDecisions: this.decisions.size,
+        tracks: this.planner.tracker.tracks.length,
+        frameBufferSlots: this.frameBuffer?.allocatedSlots ?? 0,
+        frameBufferBytes: this.frameBuffer?.allocatedBytes ?? 0,
+        lastDetectionMediaTimeSec: this.lastDetectionMediaTime,
+        lastDetectionAtMs: this.lastDetectionAtMs,
+      },
+    };
+  }
+
   private ensureCutTriggerWorker(): Worker | null {
     if (this.cutTriggerWorker || this.cutTriggerUnavailable) return this.cutTriggerWorker;
     try {
       const worker = new Worker(`${import.meta.env.BASE_URL}workers/cutTriggerWorker.js`);
+      workerCounts.cutTrigger.created += 1;
+      workerCounts.cutTrigger.live += 1;
       worker.onmessage = (e: MessageEvent) => this.onCutTriggerScore(e.data);
       worker.onerror = () => {
         console.error("[Vertix] Cut-trigger worker failed; cuts are applied at detection rate.");
-        worker.terminate();
-        this.cutTriggerWorker = null;
+        this.terminateCutTriggerWorker();
         this.cutTriggerUnavailable = true;
       };
       this.cutTriggerWorker = worker;
@@ -2154,7 +2522,7 @@ export class VertixEngine {
     this.triggerLatency.push(performance.now() - pending.capturedAt);
     if (this.scoredFrames.length === SCORED_FRAME_HISTORY) this.scoredFrames.shift();
     this.scoredFrames.push({ mediaTimeSec: pending.mediaTimeSec, score: Math.max(msg.hist, msg.grid) });
-    if (msg.triggered && this.mode === "9:16") this.requestCutDetection(pending.mediaTimeSec);
+    if (msg.triggered && this.reframing) this.requestCutDetection(pending.mediaTimeSec);
   }
 
   /** A detection on the likely cut frame now, instead of at the next regular tick (after the one in flight, if any). */
@@ -2195,7 +2563,7 @@ export class VertixEngine {
   private capturePausedFrame(video: HTMLVideoElement, metadata: VideoFrameCallbackMetadata): void {
     if (metadata.mediaTime === this.lastCapturedMediaTime) return;
     const frame = this.bufferFrame(video, metadata.mediaTime, metadata.expectedDisplayTime ?? performance.now(), true);
-    if (this.mode === "9:16" && !this.detectionInFlight) {
+    if (this.reframing && !this.detectionInFlight) {
       this.dispatchDetection(frame.slot.canvas, frame.mediaTimeSec, ...this.cropArgs());
     }
     clearTimeout(this.heldFrameTimeout);
@@ -2332,8 +2700,11 @@ export class VertixEngine {
     const scaleX = sourceW / srcW;
     const scaleY = sourceH / srcH;
 
-    const targetW = currentMode === "16:9" ? srcW : cropW;
-    const targetH = currentMode === "16:9" ? srcH : cropH;
+    const shownAsIsSize = this.sourceShownAsIs
+      ? fittedOutputSize(srcW, srcH, currentMode === "16:9" ? 16 / 9 : 9 / 16)
+      : null;
+    const targetW = shownAsIsSize?.width ?? (currentMode === "16:9" ? srcW : cropW);
+    const targetH = shownAsIsSize?.height ?? (currentMode === "16:9" ? srcH : cropH);
     if (canvas.width !== targetW || canvas.height !== targetH) {
       canvas.width = targetW;
       canvas.height = targetH;
@@ -2341,7 +2712,9 @@ export class VertixEngine {
     if (!this.outputCtx) this.outputCtx = canvas.getContext("2d");
     const ctx = this.outputCtx!;
 
-    if (currentMode === "16:9") {
+    if (shownAsIsSize) {
+      drawLetterboxed(ctx, source, srcW, srcH, targetW, targetH);
+    } else if (currentMode === "16:9") {
       ctx.drawImage(source, 0, 0, srcW, srcH);
     } else {
       // "9:16" mode: 0 faces -> full frame, no crop; N>=1 -> N panes, each a
@@ -2352,6 +2725,7 @@ export class VertixEngine {
       if (applied?.isCut) {
         probe?.recordCutShown(now, applied.mediaTimeSec, frameMediaTimeSec, applied.cutSource ?? "tick");
       }
+      if (applied) probe?.recordLayoutRule(now, this.displayedRule, this.displayedSubjectTrackId ?? -1, applied.isCut);
       const speakerCount = this.displayedSpeakerCount;
       const targetSignature = speakerCount === 0 ? "broll" : `speakers:${speakerCount}`;
 
@@ -2433,5 +2807,6 @@ export class VertixEngine {
     }
 
     if (this.skinRejectionOverlay) this.drawSkinRejectionOverlay(this.skinRejectionOverlay, targetW, targetH);
+    if (this.tracksOverlay) this.drawTracksOverlay(this.tracksOverlay, targetW, targetH);
   }
 }

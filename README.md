@@ -374,16 +374,25 @@ already-blended frame instead of a clean one, compounding into visibly
 torn panes. Fixed by cutting cleanly to the new layout instead of starting
 a second fade on top of an unfinished one.
 
-**Active-speaker resolution.** Once 3 or more faces are detected, a plain
-grid isn't trustworthy on its own — a press-scrum bystander or a reporter
-holding a mic into frame reads the same as a genuine multi-person
-conversation. The engine tries to lock onto a single active speaker: first
-by who's clearly the largest face in frame (works without audio), then by
-mouth motion if sizes are too close to call. Below `AMBIGUOUS_GRID_FALLBACK_FACES`
-(3), an unresolved scene falls back to the ordinary grid rather than
-guessing wrong; above it, to no crop at all. Neither signal is a trained
-model — framing size and mouth motion are proxies, not ground truth, and a
-large-but-silent bystander or an animated talker can still fool it.
+**Active-speaker resolution.** Faces get stable track IDs, and small faces
+behind (below 35% of the largest face's area) never count. Once 3 or more
+foreground faces are tracked, a plain grid isn't trustworthy on its own — a
+press-scrum bystander or a reporter holding a mic into frame reads the same
+as a genuine multi-person conversation. The engine tries to lock onto a
+single active speaker: first by who's clearly the largest face in frame
+(works without audio), then by mouth motion if sizes are too close to call.
+Below `AMBIGUOUS_GRID_FALLBACK_FACES` (3), an unresolved scene falls back to
+the ordinary grid rather than guessing wrong; above it, to no crop at all.
+Neither signal is a trained model — framing size and mouth motion are
+proxies, not ground truth, and a large-but-silent bystander or an animated
+talker can still fool it.
+
+A second set of rules for 3+ faces (follow one main subject scored from
+size, centre, stability and mouth activity; frame the group when it fits
+in 9:16; a grid only for a still panel) is in `src/core/tracking/` behind
+`MANY_FACES_RULES = "tracker"`. It is off by default: on a two-person news
+interview with a recurring false third detection it made more layout
+changes than the rules above.
 
 This was tried at 2 faces as well and reverted: on a real interview clip,
 the size check locked onto a reporter's mic-holding arm/shoulder (facing

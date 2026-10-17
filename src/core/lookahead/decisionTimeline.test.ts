@@ -10,6 +10,10 @@ function decision(mediaTimeSec: number, overrides: Partial<LayoutDecision> = {})
     isCut: false,
     cutSource: null,
     skinRejectedFaces: [],
+    rule: "broll",
+    subjectTrackId: null,
+    paneTrackIds: [],
+    tracks: [],
     ...overrides,
   };
 }

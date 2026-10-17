@@ -145,17 +145,24 @@ fn skin_ratio(rgba: &[u8], c: &Candidate) -> f64 {
     if total == 0 { 0.0 } else { skin as f64 / total as f64 }
 }
 
-/// How much the lower third of the box (mouth/chin) changed since the last
-/// update — a cheap stand-in for "is this person talking right now".
-fn mouth_motion(rgba: &[u8], prev: &[u8], c: &Candidate) -> f64 {
-    let (x1, _, x2, y2) = box_pixels(c);
-    let y1 = (y2 as f32 - (y2 as f32 - box_pixels(c).1 as f32) * 0.34) as usize;
-    if x2 <= x1 || y2 <= y1 {
+// Vertical bands of the face box, as fractions of its height from the top:
+// the mouth and chin, and the forehead and eyes. A head turn or a camera
+// move changes both bands; speech changes mostly the lower one.
+const LOWER_FACE_BAND: (f32, f32) = (0.66, 1.0);
+const UPPER_FACE_BAND: (f32, f32) = (0.1, 0.45);
+
+/// Mean absolute RGB difference from `prev` inside one vertical band of the box.
+fn band_difference(rgba: &[u8], prev: &[u8], c: &Candidate, band: (f32, f32)) -> f64 {
+    let (x1, y1, x2, y2) = box_pixels(c);
+    let height = y2 as f32 - y1 as f32;
+    let top = (y1 as f32 + height * band.0) as usize;
+    let bottom = (y1 as f32 + height * band.1) as usize;
+    if x2 <= x1 || bottom <= top {
         return 0.0;
     }
     let mut diff_sum = 0.0f64;
     let mut count = 0u32;
-    for y in y1..y2 {
+    for y in top..bottom {
         for x in x1..x2 {
             let idx = (y * MODEL_W + x) * 4;
             diff_sum += (rgba[idx] as f64 - prev[idx] as f64).abs()
@@ -178,7 +185,12 @@ pub struct FaceObservation {
     pub w: f32,
     pub h: f32,
     pub score: f32,
+    /// Change of the lower face (mouth and chin) since the previous frame:
+    /// the mouth-motion measure. Head and camera motion raise it too; the
+    /// caller removes them with `upper_face_motion`.
     pub motion: f64,
+    /// Change of the upper face (forehead and eyes) since the previous frame.
+    pub upper_face_motion: f64,
     /// Failed only the skin-tone check. Reported (not dropped) so the caller
     /// can measure how often the skin filter rejects a detection; it must
     /// not be used for the layout.
@@ -225,10 +237,13 @@ impl FaceTracker {
             }
             let skin_rejected = skin_ratio(rgba, c) < MIN_SKIN_RATIO;
 
-            let motion = if skin_rejected || !self.has_prev || self.last_cut.is_cut {
-                0.0
+            let (motion, upper_face_motion) = if skin_rejected || !self.has_prev || self.last_cut.is_cut {
+                (0.0, 0.0)
             } else {
-                mouth_motion(rgba, &self.prev_frame, c)
+                (
+                    band_difference(rgba, &self.prev_frame, c, LOWER_FACE_BAND),
+                    band_difference(rgba, &self.prev_frame, c, UPPER_FACE_BAND),
+                )
             };
 
             obs.push(FaceObservation {
@@ -238,6 +253,7 @@ impl FaceTracker {
                 h,
                 score: c.score,
                 motion,
+                upper_face_motion,
                 skin_rejected,
             });
         }

@@ -243,6 +243,8 @@ function cutProbe() {
     recordDetection: noop,
     recordSkippedDetection: noop,
     recordLayoutChange: noop,
+    recordTracking: noop,
+    recordLayoutRule: noop,
     recordTriggerCost: noop,
     recordDisplay: noop,
     recordCutShown: (_now, cutMediaTimeSec, shownMediaTimeSec, source) =>
@@ -251,7 +253,7 @@ function cutProbe() {
   return { probe, cuts };
 }
 
-const LEFT_FACE = new Float64Array([0.3, 0.5, 0.2, 0.2, 0, 0.9, 0]);
+const LEFT_FACE = new Float64Array([0.3, 0.5, 0.2, 0.2, 0, 0.9, 0, 0]);
 const CUT: SceneCutScores = { hist: 0.5, grid: 0.5, isCut: true };
 const NO_CUT: SceneCutScores = { hist: 0, grid: 0, isCut: false };
 
@@ -922,6 +924,10 @@ describe("VertixEngine lookahead", () => {
         isCut: false,
         cutSource: null,
         skinRejectedFaces: [],
+        rule: "broll",
+        subjectTrackId: null,
+        paneTrackIds: [],
+        tracks: [],
       });
       let blendedFrames = 0;
       for (let i = 0; i < delayFrames + 12; i++) {

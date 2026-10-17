@@ -114,9 +114,39 @@ describe("benchmarkSummaryRows", () => {
     expect(row["skin rejected"]).toBe(1);
     expect(row["skin rejected (speaker-sized)"]).toBe(0);
     expect(row["scene cuts"]).toBe(1);
-    expect(report.schemaVersion).toBe(5);
+    expect(report.schemaVersion).toBe(6);
+    expect(report.failures).toEqual([]);
     expect(row.lookahead).toBe("160 ms");
     expect(row["render fps"]).toBe(25);
     expect(report.precisionWarnings.length).toBeGreaterThan(0);
+  });
+});
+
+describe("buildBenchmarkReport with a failure", () => {
+  it("keeps the failure next to the runs recorded before it", () => {
+    const failure = {
+      name: "Error",
+      message: "Benchmark clip did not finish in time",
+      stack: null,
+      step: { index: 27, total: 32, kind: "clip", label: "cross-50fps.mp4" },
+      clip: "cross-50fps.mp4",
+      build: "scalar",
+      lookahead: true,
+      mode: "9:16" as const,
+      failedAt: "2026-10-17T10:00:00.000Z",
+      resources: null,
+      video: null,
+    };
+    const report = buildBenchmarkReport(
+      { wasmWarmupSec: 3, clipWarmupSec: 1, baseline: false },
+      environment,
+      comparison,
+      [sampleResult()],
+      { order: null },
+      [failure]
+    );
+    expect(report.failures).toEqual([failure]);
+    expect(report.results).toHaveLength(1);
+    expect(JSON.parse(JSON.stringify(report)).failures[0].step.index).toBe(27);
   });
 });

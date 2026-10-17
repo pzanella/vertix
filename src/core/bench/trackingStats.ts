@@ -1,0 +1,172 @@
+import { LAYOUT_RULES, type LayoutRule } from "../tracking/layoutPlanner";
+import { summarize, type SampleSummary } from "./stats";
+
+/** Face tracks and layout rules of one run (schema v6). */
+export interface TrackingSummary {
+  /** Layout changes (pane count changes, as `layoutChanges`) per minute of measured playback. */
+  layoutChangesPerMin: number | null;
+  /** Changes of the followed person to another track within a shot (cuts excluded). */
+  subjectSwitches: number;
+  subjectSwitchesPerMin: number | null;
+  /** Share of measured playback per rule, in percent (0 for rules never shown). */
+  timeInRulePct: Record<LayoutRule, number>;
+  /** Foreground / background tracks matched per detection. */
+  foregroundTracks: SampleSummary;
+  backgroundTracks: SampleSummary;
+  /** Panes whose track changed order while the same tracks stayed on screen (ID switches; should be 0). */
+  paneSwaps: number;
+  /** Times the left-to-right order of the pane tracks changed: the panel swaps the old x-sorted layout would have made. */
+  leftToRightFlips: number;
+  /** Tracker + layout rules, per detection (main thread). */
+  trackerMs: SampleSummary;
+}
+
+const RULE_EVENT_CAPACITY = 8192;
+const NO_SUBJECT = -1;
+
+/**
+ * Collects the tracker's per-detection numbers and the displayed rule
+ * changes into buffers allocated once, like BenchmarkRecorder.
+ */
+export class TrackingRecorder {
+  private readonly trackerMs: Float64Array;
+  private readonly foreground: Float64Array;
+  private readonly background: Float64Array;
+  private readonly paneSwap: Uint8Array;
+  private readonly leftToRightFlip: Uint8Array;
+  private readonly detectionWarmup: Uint8Array;
+  private detectionCount = 0;
+
+  private readonly ruleNow = new Float64Array(RULE_EVENT_CAPACITY);
+  private readonly ruleIndex = new Uint8Array(RULE_EVENT_CAPACITY);
+  private readonly ruleSubject = new Float64Array(RULE_EVENT_CAPACITY);
+  private readonly ruleCut = new Uint8Array(RULE_EVENT_CAPACITY);
+  private ruleCount = 0;
+  private lastRule = -1;
+  private lastSubject = NO_SUBJECT;
+  overflow = 0;
+
+  constructor(detectionCapacity: number) {
+    this.trackerMs = new Float64Array(detectionCapacity);
+    this.foreground = new Float64Array(detectionCapacity);
+    this.background = new Float64Array(detectionCapacity);
+    this.paneSwap = new Uint8Array(detectionCapacity);
+    this.leftToRightFlip = new Uint8Array(detectionCapacity);
+    this.detectionWarmup = new Uint8Array(detectionCapacity);
+  }
+
+  recordDetection(
+    trackerMs: number,
+    foreground: number,
+    background: number,
+    paneSwap: boolean,
+    leftToRightFlip: boolean,
+    warmup: boolean
+  ): void {
+    const i = this.detectionCount;
+    if (i >= this.trackerMs.length) {
+      this.overflow += 1;
+      return;
+    }
+    this.trackerMs[i] = trackerMs;
+    this.foreground[i] = foreground;
+    this.background[i] = background;
+    this.paneSwap[i] = paneSwap ? 1 : 0;
+    this.leftToRightFlip[i] = leftToRightFlip ? 1 : 0;
+    this.detectionWarmup[i] = warmup ? 1 : 0;
+    this.detectionCount = i + 1;
+  }
+
+  /** The rule and followed track (-1 for none) applied on a displayed frame; only changes are stored. */
+  recordRule(nowMs: number, rule: LayoutRule, subjectTrackId: number, isCut: boolean): void {
+    const index = LAYOUT_RULES.indexOf(rule);
+    if (index === this.lastRule && subjectTrackId === this.lastSubject && !isCut) return;
+    const i = this.ruleCount;
+    if (i >= RULE_EVENT_CAPACITY) {
+      this.overflow += 1;
+      return;
+    }
+    this.ruleNow[i] = nowMs;
+    this.ruleIndex[i] = index;
+    this.ruleSubject[i] = subjectTrackId;
+    this.ruleCut[i] = isCut ? 1 : 0;
+    this.ruleCount = i + 1;
+    this.lastRule = index;
+    this.lastSubject = subjectTrackId;
+  }
+
+  /** Summary over measured playback, wall time [`fromMs`, `toMs`], with `layoutChanges` counted by the caller. */
+  summarize(fromMs: number | null, toMs: number | null, layoutChanges: number): TrackingSummary {
+    const measured: number[] = [];
+    for (let i = 0; i < this.detectionCount; i++) if (this.detectionWarmup[i] === 0) measured.push(i);
+    const column = (values: Float64Array) => measured.map((i) => values[i]);
+    let paneSwaps = 0;
+    let leftToRightFlips = 0;
+    for (const i of measured) {
+      paneSwaps += this.paneSwap[i];
+      leftToRightFlips += this.leftToRightFlip[i];
+    }
+
+    const events = Array.from({ length: this.ruleCount }, (_, i) => ({
+      nowMs: this.ruleNow[i],
+      rule: LAYOUT_RULES[this.ruleIndex[i]],
+      subject: this.ruleSubject[i],
+      cut: this.ruleCut[i] === 1,
+    }));
+    const rules = ruleTimeAndSwitches(events, fromMs, toMs);
+    const minutes = fromMs !== null && toMs !== null && toMs > fromMs ? (toMs - fromMs) / 60000 : null;
+
+    return {
+      layoutChangesPerMin: minutes ? layoutChanges / minutes : null,
+      subjectSwitches: rules.subjectSwitches,
+      subjectSwitchesPerMin: minutes ? rules.subjectSwitches / minutes : null,
+      timeInRulePct: rules.timeInRulePct,
+      foregroundTracks: summarize(column(this.foreground)),
+      backgroundTracks: summarize(column(this.background)),
+      paneSwaps,
+      leftToRightFlips,
+      trackerMs: summarize(column(this.trackerMs)),
+    };
+  }
+}
+
+export interface RuleEvent {
+  nowMs: number;
+  rule: LayoutRule;
+  /** Followed track id, -1 for none. */
+  subject: number;
+  cut: boolean;
+}
+
+/**
+ * Time per rule within [fromMs, toMs] (the rule in force at fromMs is the
+ * last event before it), and subject switches inside the window: the
+ * followed track changing to another one without a cut in between.
+ */
+export function ruleTimeAndSwitches(
+  events: readonly RuleEvent[],
+  fromMs: number | null,
+  toMs: number | null
+): { timeInRulePct: Record<LayoutRule, number>; subjectSwitches: number } {
+  const timeMs = Object.fromEntries(LAYOUT_RULES.map((rule) => [rule, 0])) as Record<LayoutRule, number>;
+  let subjectSwitches = 0;
+  if (fromMs === null || toMs === null || toMs <= fromMs) return { timeInRulePct: timeMs, subjectSwitches };
+
+  let followed = NO_SUBJECT;
+  for (let i = 0; i < events.length; i++) {
+    const event = events[i];
+    if (event.cut) followed = NO_SUBJECT;
+    if (event.subject !== NO_SUBJECT) {
+      if (followed !== NO_SUBJECT && event.subject !== followed && event.nowMs >= fromMs && event.nowMs <= toMs) {
+        subjectSwitches += 1;
+      }
+      followed = event.subject;
+    }
+    const start = Math.max(event.nowMs, fromMs);
+    const end = Math.min(i + 1 < events.length ? events[i + 1].nowMs : toMs, toMs);
+    if (end > start) timeMs[event.rule] += end - start;
+  }
+  const total = toMs - fromMs;
+  for (const rule of LAYOUT_RULES) timeMs[rule] = (timeMs[rule] / total) * 100;
+  return { timeInRulePct: timeMs, subjectSwitches };
+}

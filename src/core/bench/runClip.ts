@@ -1,6 +1,31 @@
 import type { VertixEngine, VertixMode } from "../VertixEngine";
 import { BenchmarkRecorder, type BenchmarkClipResult, type BenchmarkLookahead } from "./BenchmarkRecorder";
 import type { BenchmarkWasmBuild } from "./suitePlan";
+import { describeError, videoElementState, type BenchmarkFailure, type ResourceSnapshot } from "./resourceStats";
+
+/**
+ * A run that stopped with an error. `failure` says why; `partial` is what
+ * was recorded until then (null if recording had not started).
+ */
+export class BenchmarkRunError extends Error {
+  constructor(
+    readonly failure: BenchmarkFailure,
+    readonly partial: BenchmarkClipResult | null,
+    readonly original: unknown
+  ) {
+    super(failure.message);
+    this.name = failure.name;
+  }
+}
+
+/** Never lets a diagnostics failure become the run's failure. */
+async function resourceSnapshot(engine: VertixEngine): Promise<ResourceSnapshot | null> {
+  try {
+    return await engine.getResourceStats();
+  } catch {
+    return null;
+  }
+}
 
 export interface ClipPlaybackOptions {
   mode: VertixMode;
@@ -22,12 +47,17 @@ export interface BenchmarkClipOptions extends ClipPlaybackOptions {
   wasmBuild: BenchmarkWasmBuild;
   /** Real hard cuts of the clip, when known (test clips), for frames-late per cut. */
   knownCutsSec?: readonly number[];
+  /** Stops playback at this media time instead of at the end (long streams). */
+  stopAtSec?: number;
 }
 
 // A clip that has not ended after duration × this (+ grace) is treated as stuck.
 const TIMEOUT_DURATION_FACTOR = 3;
 const TIMEOUT_GRACE_SEC = 30;
 const FALLBACK_DURATION_SEC = 600;
+// A source that has not loaded (no loadedmetadata, or no seek back to 0)
+// within this long fails the run instead of waiting forever.
+export const SOURCE_LOAD_TIMEOUT_MS = 30_000;
 
 function abortError(): DOMException {
   return new DOMException("Benchmark cancelled", "AbortError");
@@ -57,6 +87,7 @@ function playClip(
     let timeout: ReturnType<typeof setTimeout> | undefined;
     const cleanup = () => {
       clearTimeout(timeout);
+      clearTimeout(loadTimeout);
       video.removeEventListener("loadedmetadata", onSourceReady);
       video.removeEventListener("seeked", onRewound);
       video.removeEventListener("timeupdate", onTimeUpdate);
@@ -73,12 +104,17 @@ function playClip(
       video.pause();
       reject(error);
     };
+    const loadTimeout = setTimeout(
+      () => fail(new Error(`Source did not load within ${SOURCE_LOAD_TIMEOUT_MS / 1000} s`)),
+      SOURCE_LOAD_TIMEOUT_MS
+    );
     const armTimeout = () => {
       const durationSec = Number.isFinite(video.duration) ? video.duration : FALLBACK_DURATION_SEC;
       const timeoutMs = (durationSec * TIMEOUT_DURATION_FACTOR + TIMEOUT_GRACE_SEC) * 1000;
       timeout = setTimeout(() => fail(new Error("Benchmark clip did not finish in time")), timeoutMs);
     };
     const onSourceReady = () => {
+      clearTimeout(loadTimeout);
       handlers.onReady();
       armTimeout();
     };
@@ -104,6 +140,7 @@ function playClip(
 
     engine.setMode(options.mode);
     if (options.lookahead !== undefined) engine.setLookaheadEnabled(options.lookahead);
+
     video.addEventListener("timeupdate", onTimeUpdate);
     video.addEventListener("ended", onEnded);
     video.addEventListener("error", onError);
@@ -151,6 +188,7 @@ export async function runBenchmarkClip(
     if (document.visibilityState !== "visible") pageHidden = true;
   };
   document.addEventListener("visibilitychange", onVisibilityChange);
+  const start = await resourceSnapshot(engine);
   try {
     await playClip(engine, video, options, {
       onReady: () => {
@@ -163,23 +201,55 @@ export async function runBenchmarkClip(
         });
         engine.setBenchmarkProbe(recorder);
       },
+      shouldStop: options.stopAtSec !== undefined ? () => video.currentTime >= options.stopAtSec! : undefined,
     });
     // Read before the next clip loads: buffer counters reset per source.
     lookahead = lookaheadSnapshot(engine);
+    const health = engine.getDetectionHealth();
+    if (options.mode === "9:16" && health.state === "stopped")
+      throw new Error(health.message ?? "Face detection stopped");
   } catch (error) {
-    (recorder as BenchmarkRecorder | null)?.finish(options.mode);
-    throw error;
+    if (error instanceof DOMException && error.name === "AbortError") {
+      (recorder as BenchmarkRecorder | null)?.finish(options.mode);
+      throw error;
+    }
+    const end = await resourceSnapshot(engine);
+    const failure: BenchmarkFailure = {
+      ...describeError(error),
+      step: null,
+      clip: options.clipName,
+      build: options.wasmBuild.variant,
+      lookahead: options.lookahead ?? null,
+      mode: options.mode,
+      failedAt: new Date().toISOString(),
+      resources: end,
+      video: videoElementState(video),
+    };
+    const stopped = recorder as BenchmarkRecorder | null;
+    const partial: BenchmarkClipResult | null = stopped
+      ? {
+          ...stopped.finish(options.mode),
+          pageHiddenDuringRun: pageHidden,
+          wasmBuild: options.wasmBuild,
+          lookahead: lookaheadSnapshot(engine),
+          resources: { start, end },
+          failure,
+        }
+      : null;
+    throw new BenchmarkRunError(failure, partial, error);
   } finally {
     engine.setBenchmarkProbe(null);
     document.removeEventListener("visibilitychange", onVisibilityChange);
   }
   const finished = recorder as BenchmarkRecorder | null;
   if (!finished) throw new Error("Benchmark clip ended before it started");
+  const recording = finished.finish(options.mode);
   return {
-    ...finished.finish(options.mode),
+    ...recording,
     pageHiddenDuringRun: pageHidden,
     wasmBuild: options.wasmBuild,
     lookahead: lookahead ?? lookaheadSnapshot(engine),
+    resources: { start, end: await resourceSnapshot(engine) },
   };
 }
 

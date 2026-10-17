@@ -1,10 +1,12 @@
 import { memo, useEffect, useReducer } from "react";
 import type { ReframeMeta, ReframeMetrics, ReframeMode } from "../../hooks/useWasmReframe";
-import { classifyLayout } from "./layoutStatus";
+import type { LayoutRule } from "../../core";
+import { classifyLayout, type LayoutBucket } from "./layoutStatus";
 import { LiveAnalyticsCharts } from "./LiveAnalyticsCharts";
 import { TONE_CLASS, formatBytes } from "./dashboardFormat";
 import { MetricRow } from "./MetricRow";
 import { MetricSection } from "./MetricSection";
+import { ToggleSwitch } from "./ToggleSwitch";
 
 interface AnalyticsDashboardProps {
   mode: ReframeMode;
@@ -13,6 +15,10 @@ interface AnalyticsDashboardProps {
   duration: number;
   speakerCount: number;
   isTransitioning: boolean;
+  layoutRule: LayoutRule;
+  sourceShownAsIs: boolean;
+  showTracks: boolean;
+  onShowTracksChange: (show: boolean) => void;
   metrics: ReframeMetrics;
   /** Debug only (`?debug=skin`): how many detections the skin-tone filter threw away. */
   showSkinFilter?: boolean;
@@ -34,17 +40,29 @@ function lookaheadValue({
 }: ReframeMetrics["lookahead"]): string {
   if (!enabled) return "off";
   if (unavailableReason) return LOOKAHEAD_UNAVAILABLE_LABEL[unavailableReason];
-  if (bypassed) return "bypassed in 16:9";
+  if (bypassed) return "bypassed";
   return lengthMs > 0 ? `${lengthMs} ms (${delayFrames} frames)` : "—";
 }
 
-const LAYOUT_LABEL: Record<ReturnType<typeof classifyLayout>, (speakerCount: number) => string> = {
+const LAYOUT_LABEL: Record<LayoutBucket, (speakerCount: number) => string> = {
   original: () => "Original View",
+  "as-is": () => "Shown As Is",
   transition: () => "Transitioning...",
   broll: () => "No-Crop B-Roll",
   single: () => "Single Focus",
-  dual: () => "Dual Split",
-  grid: (n) => `Multi-Speaker Grid (${n})`,
+  stacked: () => "Dual Split",
+  subject: () => "Main Subject",
+  group: () => "Group",
+  grid: (n) => `Panel Grid (${n})`,
+};
+
+const RULE_LABEL: Record<LayoutRule, string> = {
+  broll: "b-roll",
+  single: "single",
+  stacked: "stacked",
+  subject: "main subject",
+  group: "group",
+  grid: "grid",
 };
 
 function formatTime(seconds: number): string {
@@ -67,6 +85,10 @@ export const AnalyticsDashboard = memo(function AnalyticsDashboard({
   duration,
   speakerCount,
   isTransitioning,
+  layoutRule,
+  sourceShownAsIs,
+  showTracks,
+  onShowTracksChange,
   metrics,
   showSkinFilter = false,
   onLookaheadChange,
@@ -81,7 +103,7 @@ export const AnalyticsDashboard = memo(function AnalyticsDashboard({
     return () => clearInterval(id);
   }, []);
 
-  const bucket = classifyLayout(mode, speakerCount, isTransitioning);
+  const bucket = classifyLayout(mode, layoutRule, isTransitioning, sourceShownAsIs);
   // Deliberately impure: this is a ticking clock readout, re-rendered every
   // 500ms by forceTick above specifically so this recomputes with a fresh time.
   const stableSeconds = metrics.layoutCommittedAt !== null ? (performance.now() - metrics.layoutCommittedAt) / 1000 : 0;
@@ -102,12 +124,15 @@ export const AnalyticsDashboard = memo(function AnalyticsDashboard({
         <MetricSection title="Video">
           <MetricRow label="Resolution" value={meta ? `${meta.width}×${meta.height}` : "—"} />
           <MetricRow label="Aspect" value={mode} />
+          {sourceShownAsIs && <MetricRow label="Source" value="Not landscape: shown as is" tone="warn" />}
           <MetricRow label="Time" value={`${formatTime(currentTime)} / ${formatTime(duration)}`} />
         </MetricSection>
 
         <MetricSection title="Detection">
           <MetricRow label="Speakers" value={String(speakerCount)} />
           <MetricRow label="Layout" value={LAYOUT_LABEL[bucket](speakerCount)} />
+          <MetricRow label="Rule" value={mode === "9:16" && !sourceShownAsIs ? RULE_LABEL[layoutRule] : "—"} />
+          <ToggleSwitch label="Show tracks" checked={showTracks} onChange={onShowTracksChange} />
           <MetricRow
             label="Crop Scale"
             value={metrics.cropScaleFactor !== null ? `${metrics.cropScaleFactor.toFixed(2)}×` : "—"}
@@ -147,25 +172,12 @@ export const AnalyticsDashboard = memo(function AnalyticsDashboard({
         </MetricSection>
 
         <MetricSection title="Lookahead">
-          <div className="flex items-baseline justify-between gap-3 text-xs">
-            <span className="text-neutral-500">Crop on cut frame</span>
-            <button
-              type="button"
-              role="switch"
-              aria-checked={lookahead.enabled}
-              aria-label="Lookahead"
-              onClick={() => onLookaheadChange(!lookahead.enabled)}
-              className={`relative h-4 w-7 shrink-0 self-center rounded-full transition-colors ${
-                lookahead.enabled ? "bg-brand-600" : "bg-neutral-700"
-              }`}
-            >
-              <span
-                className={`absolute top-0.5 left-0.5 h-3 w-3 rounded-full bg-white transition-transform ${
-                  lookahead.enabled ? "translate-x-3" : "translate-x-0"
-                }`}
-              />
-            </button>
-          </div>
+          <ToggleSwitch
+            label="Crop on cut frame"
+            ariaLabel="Lookahead"
+            checked={lookahead.enabled}
+            onChange={onLookaheadChange}
+          />
           <MetricRow
             label="Default"
             value={`${lookahead.enabledByDefault ? "On" : "Off"} with ${lookahead.enabledByDefault ? "SIMD" : "scalar"}${
@@ -196,19 +208,39 @@ export const AnalyticsDashboard = memo(function AnalyticsDashboard({
           />
         </MetricSection>
 
+        {metrics.detectionHealth.message && (
+          <div
+            role="status"
+            className={`md:col-span-2 rounded-md border px-2.5 py-1.5 text-xs ${
+              metrics.detectionHealth.state === "stopped"
+                ? "border-red-500/40 bg-red-500/10 text-red-300"
+                : "border-amber-500/40 bg-amber-500/10 text-amber-200"
+            }`}
+          >
+            {metrics.detectionHealth.message}
+          </div>
+        )}
+
         <MetricSection title="Performance">
           <MetricRow
             label="Detection"
             value={
-              metrics.detectionMode === "worker"
-                ? "Worker"
-                : metrics.detectionMode === "main-thread"
-                  ? "Main Thread"
-                  : "—"
+              metrics.detectionHealth.state === "stopped"
+                ? "Stopped"
+                : metrics.detectionMode === "worker"
+                  ? "Worker"
+                  : metrics.detectionMode === "main-thread"
+                    ? "Main Thread"
+                    : "—"
             }
             tone={
               metrics.detectionMode === "worker" ? "good" : metrics.detectionMode === "main-thread" ? "warn" : "default"
             }
+          />
+          <MetricRow
+            label="Worker Restarts"
+            value={String(metrics.detectionHealth.workerRestarts)}
+            tone={metrics.detectionHealth.workerRestarts > 0 ? "warn" : "default"}
           />
           <MetricRow
             label="Detect Rate"

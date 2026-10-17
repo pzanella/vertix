@@ -11,6 +11,9 @@ import {
 } from "./stats";
 import type { BenchmarkWasmBuild } from "./suitePlan";
 import type { CutSource } from "../lookahead/decisionTimeline";
+import type { LayoutRule, TrackSnapshot } from "../tracking/layoutPlanner";
+import { TrackingRecorder, type TrackingSummary } from "./trackingStats";
+import type { BenchmarkFailure, ResourceSnapshot } from "./resourceStats";
 
 export type DetectionPath = "worker" | "main-thread";
 
@@ -51,6 +54,23 @@ export interface BenchmarkProbe {
   /** A detection was due on this frame but skipped because the previous one had not returned yet. */
   recordSkippedDetection(): void;
   recordLayoutChange(nowMs: number): void;
+  /** Schema v6: one detection's tracker cost, matched foreground/background tracks, and whether the pane order swapped or the left-to-right order flipped. */
+  recordTracking(
+    trackerMs: number,
+    foregroundTracks: number,
+    backgroundTracks: number,
+    paneSwap: boolean,
+    leftToRightFlip: boolean
+  ): void;
+  /** Schema v6: the rule and followed track (-1 for none) applied on a displayed frame. */
+  recordLayoutRule(nowMs: number, rule: LayoutRule, subjectTrackId: number, isCut?: boolean): void;
+  /** Optional, for diagnostics (not used by BenchmarkRecorder): every track of one detection. */
+  recordTrackSnapshot?(
+    mediaTimeSec: number,
+    tracks: readonly TrackSnapshot[],
+    subjectTrackId: number | null,
+    rule: LayoutRule
+  ): void;
   /** Main-thread time spent sending one frame to the cut trigger (lookahead only): in total, scaling it (drawImage + transfer), and posting it. */
   recordTriggerCost(mainThreadMs: number, drawMs?: number, postMs?: number): void;
   /**
@@ -236,6 +256,8 @@ export interface BenchmarkClipSummary {
   frames: FrameAccounting;
   detection: DetectionSummary;
   layoutChanges: number;
+  /** Schema v6. */
+  tracking: TrackingSummary;
   /** Every detected cut, warm-up included (schema v4). */
   sceneCutCount: number;
   sceneCuts: SceneCutEvent[];
@@ -355,6 +377,10 @@ export interface BenchmarkClipResult {
   wasmBuild: BenchmarkWasmBuild;
   /** Schema v5. */
   lookahead: BenchmarkLookahead;
+  /** Schema v6: workers and memory when the run started and ended (null if not available). */
+  resources?: { start: ResourceSnapshot | null; end: ResourceSnapshot | null };
+  /** Schema v6: set when the run stopped with an error; the rest is what was recorded until then. */
+  failure?: BenchmarkFailure;
   summary: BenchmarkClipSummary;
   raw: BenchmarkClipRaw;
 }
@@ -452,6 +478,7 @@ export class BenchmarkRecorder implements BenchmarkProbe {
   private readonly layoutWarmup = new Uint8Array(LAYOUT_CHANGE_CAPACITY);
   private layoutCount = 0;
   private layoutOverflow = 0;
+  private readonly tracking: TrackingRecorder;
 
   private readonly longTaskStart = new Float64Array(LONG_TASK_CAPACITY);
   private readonly longTaskDuration = new Float64Array(LONG_TASK_CAPACITY);
@@ -517,6 +544,7 @@ export class BenchmarkRecorder implements BenchmarkProbe {
     this.detectionResolvedCx = new Float64Array(detectionCapacity);
     this.skippedMediaTime = new Float64Array(detectionCapacity);
     this.skippedWarmup = new Uint8Array(detectionCapacity);
+    this.tracking = new TrackingRecorder(detectionCapacity);
 
     try {
       this.longTaskObserver = new PerformanceObserver((list) => {
@@ -685,6 +713,29 @@ export class BenchmarkRecorder implements BenchmarkProbe {
     this.layoutCount = i + 1;
   }
 
+  recordTracking(
+    trackerMs: number,
+    foregroundTracks: number,
+    backgroundTracks: number,
+    paneSwap: boolean,
+    leftToRightFlip: boolean
+  ): void {
+    if (this.finished) return;
+    this.tracking.recordDetection(
+      trackerMs,
+      foregroundTracks,
+      backgroundTracks,
+      paneSwap,
+      leftToRightFlip,
+      this.inWarmup
+    );
+  }
+
+  recordLayoutRule(nowMs: number, rule: LayoutRule, subjectTrackId: number, isCut = false): void {
+    if (this.finished) return;
+    this.tracking.recordRule(nowMs, rule, subjectTrackId, isCut);
+  }
+
   /** Stops recording and builds the result. Recording calls after this are ignored. */
   finish(mode: "9:16" | "16:9"): BenchmarkClipRecording {
     if (!this.finished) {
@@ -807,6 +858,11 @@ export class BenchmarkRecorder implements BenchmarkProbe {
         },
       },
       layoutChanges,
+      tracking: this.tracking.summarize(
+        now.length >= 2 ? now[0] : null,
+        now.length >= 2 ? now[now.length - 1] : null,
+        layoutChanges
+      ),
       sceneCutCount: sceneCuts.length,
       sceneCuts,
       cutsShown: this.cutsShown(),
@@ -838,7 +894,7 @@ export class BenchmarkRecorder implements BenchmarkProbe {
       overflow: {
         frames: this.frameOverflow,
         detections: this.detectionOverflow,
-        layoutChanges: this.layoutOverflow,
+        layoutChanges: this.layoutOverflow + this.tracking.overflow,
         longTasks: this.longTaskOverflow,
       },
     };

@@ -11,16 +11,21 @@
 // runs this so they are on GitHub Pages). Their join times are also in
 // src/components/Player/sampleClips.ts.
 //
-// Usage (needs ffmpeg on PATH): node scripts/make-cut-clips.mjs [--bench]
+// With --aspect, writes instead the non-landscape test clips to public/bench/
+// (gitignored, never committed): portrait 9:16, square 1:1, and portrait
+// stored as a landscape frame plus rotation metadata (like a phone video).
+//
+// Usage (needs ffmpeg on PATH): node scripts/make-cut-clips.mjs [--bench | --aspect]
 import { spawnSync } from "node:child_process";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const samplesDir = join(root, "public/samples");
 const bench = process.argv.includes("--bench");
-const outDir = join(root, bench ? "public/bench" : ".eval/cut-clips");
+const aspect = process.argv.includes("--aspect");
+const outDir = join(root, bench || aspect ? "public/bench" : ".eval/cut-clips");
 
 const CLIPS = [
   {
@@ -79,7 +84,59 @@ const CLIPS = [
   },
 ];
 
+// Non-landscape clips from 1-speaker.mp4 (1280x720): `filter` makes the
+// frame; `rotation` is display rotation metadata (degrees counter-clockwise).
+const ASPECT_CLIPS = [
+  { name: "aspect-portrait", description: "portrait 9:16, 720x1280", filter: "crop=405:720,scale=720:1280" },
+  { name: "aspect-square", description: "square 1:1, 720x720", filter: "crop=720:720" },
+  {
+    name: "aspect-rotated",
+    description: "portrait 9:16 stored as a 1280x720 frame rotated by metadata (a phone video)",
+    filter: "crop=405:720,scale=720:1280,transpose=clock",
+    rotation: 90,
+  },
+];
+
+function ffmpeg(args, name) {
+  const result = spawnSync("ffmpeg", ["-v", "error", "-y", ...args], { encoding: "utf8" });
+  if (result.status !== 0) throw new Error(`ffmpeg failed on ${name}: ${result.stderr}`);
+}
+
 mkdirSync(outDir, { recursive: true });
+
+if (aspect) {
+  for (const clip of ASPECT_CLIPS) {
+    const output = join(outDir, `${clip.name}.mp4`);
+    const encoded = clip.rotation ? join(outDir, `${clip.name}.unrotated.mp4`) : output;
+    ffmpeg(
+      [
+        "-i",
+        join(samplesDir, "1-speaker.mp4"),
+        "-t",
+        "8",
+        "-vf",
+        `${clip.filter},setsar=1`,
+        "-an",
+        "-c:v",
+        "libx264",
+        "-crf",
+        "18",
+        "-pix_fmt",
+        "yuv420p",
+        encoded,
+      ],
+      clip.name
+    );
+    if (clip.rotation) {
+      // -display_rotation is an input option: remuxed without re-encoding,
+      // the rotation is written to the output as metadata.
+      ffmpeg(["-display_rotation", String(clip.rotation), "-i", encoded, "-c", "copy", output], clip.name);
+      rmSync(encoded);
+    }
+    console.log(`${clip.name}.mp4 (${clip.description})`);
+  }
+  process.exit(0);
+}
 
 for (const clip of CLIPS.filter((c) => !bench || c.benchmark)) {
   const inputs = clip.parts.flatMap(([file]) => ["-i", join(samplesDir, file)]);

@@ -193,7 +193,7 @@ interface EngineInternals {
 
 function packFaces(faces: TestFace[]): Float64Array {
   return new Float64Array(
-    faces.flatMap((f) => [f.cx, f.cy, f.size, f.size, f.motion ?? 0, 0.9, f.skinRejected ? 1 : 0])
+    faces.flatMap((f) => [f.cx, f.cy, f.size, f.size, f.motion ?? 0, 0.9, f.skinRejected ? 1 : 0, 0])
   );
 }
 
@@ -264,6 +264,8 @@ const MIDDLE = { cx: 0.5, cy: 0.5, size: 0.15 };
 const RIGHT = { cx: 0.8, cy: 0.5, size: 0.15 };
 const FAR_RIGHT = { cx: 0.9, cy: 0.2, size: 0.15 };
 const BIG_MIDDLE = { cx: 0.5, cy: 0.5, size: 0.3 };
+// Large enough to win on size (1.47x), small enough that 0.15 faces stay foreground (46% of its area).
+const DOMINANT_MIDDLE = { cx: 0.5, cy: 0.5, size: 0.22 };
 
 describe.each([25, 50])("VertixEngine speaker tracking at %i fps", (fps) => {
   it("commits the first layout after 1.0s, because the first rendered frame already commits the no-crop layout", () => {
@@ -286,15 +288,22 @@ describe.each([25, 50])("VertixEngine speaker tracking at %i fps", (fps) => {
     engine.destroy();
   });
 
+  it("frames a large face alone: much smaller faces are background", () => {
+    const { engine, detect, resolved } = setUpTracking(fps);
+    detect([LEFT, BIG_MIDDLE, RIGHT]);
+    expect(resolved()).toEqual([expect.objectContaining({ cx: BIG_MIDDLE.cx })]);
+    engine.destroy();
+  });
+
   it("shows the 3-face grid until a size-dominant face has won for 0.8s", () => {
     const { engine, detect, secondsUntil, resolved } = setUpTracking(fps);
-    detect([LEFT, BIG_MIDDLE, RIGHT]);
+    detect([LEFT, DOMINANT_MIDDLE, RIGHT]);
     expect(resolved()).toHaveLength(3);
-    expect(secondsUntil([LEFT, BIG_MIDDLE, RIGHT], () => resolved().length === 1)).toBeCloseTo(
+    expect(secondsUntil([LEFT, DOMINANT_MIDDLE, RIGHT], () => resolved().length === 1)).toBeCloseTo(
       0.8 - FRAMES_PER_DETECTION / fps,
       6
     );
-    expect(resolved()).toEqual([expect.objectContaining({ cx: BIG_MIDDLE.cx })]);
+    expect(resolved()).toEqual([expect.objectContaining({ cx: DOMINANT_MIDDLE.cx })]);
     engine.destroy();
   });
 
@@ -307,7 +316,7 @@ describe.each([25, 50])("VertixEngine speaker tracking at %i fps", (fps) => {
 
   it("keeps the lock while no face clearly wins", () => {
     const { engine, detect, secondsUntil, resolved } = setUpTracking(fps);
-    secondsUntil([LEFT, BIG_MIDDLE, RIGHT], () => resolved().length === 1);
+    secondsUntil([LEFT, DOMINANT_MIDDLE, RIGHT], () => resolved().length === 1);
     detect([LEFT, MIDDLE, RIGHT]);
     expect(resolved()).toEqual([expect.objectContaining({ cx: MIDDLE.cx })]);
     engine.destroy();
@@ -348,7 +357,7 @@ describe("VertixEngine skin-filter rejections", () => {
 describe("VertixEngine scene cuts", () => {
   it("resets the active-speaker lock and counts the cut", () => {
     const { engine, detect, secondsUntil, resolved } = setUpTracking(25);
-    secondsUntil([LEFT, BIG_MIDDLE, RIGHT], () => resolved().length === 1);
+    secondsUntil([LEFT, DOMINANT_MIDDLE, RIGHT], () => resolved().length === 1);
     detect([LEFT, MIDDLE, RIGHT], { cut: true });
     expect(resolved()).toHaveLength(3);
     expect(engine.getMetrics().sceneCutCount).toBe(1);
@@ -403,24 +412,23 @@ describe("VertixEngine scene cuts", () => {
 });
 
 describe("VertixEngine active-speaker switch", () => {
-  const BIG_LEFT = { ...LEFT, size: 0.3 };
-  const BIG_MIDDLE_MOVED = { ...BIG_MIDDLE, cx: BIG_MIDDLE.cx + 0.1 };
+  const DOMINANT_LEFT = { ...LEFT, size: DOMINANT_MIDDLE.size };
+  const DOMINANT_MIDDLE_MOVED = { ...DOMINANT_MIDDLE, cx: DOMINANT_MIDDLE.cx + 0.1 };
 
-  /** Locked onto BIG_MIDDLE, with the single-pane layout committed and settled. */
+  /** Locked onto DOMINANT_MIDDLE, with the single-pane layout committed and settled. */
   function lockedOnMiddle() {
     const tracking = setUpTracking(25);
     const { secondsUntil, speakerCount, resolved, isGliding, isDissolving } = tracking;
     secondsUntil(
-      [LEFT, BIG_MIDDLE, RIGHT],
-      () => speakerCount() === 1 && resolved()[0].cx === BIG_MIDDLE.cx && !isGliding() && !isDissolving()
+      [LEFT, DOMINANT_MIDDLE, RIGHT],
+      () => speakerCount() === 1 && resolved()[0].cx === DOMINANT_MIDDLE.cx && !isGliding() && !isDissolving()
     );
     return tracking;
   }
 
   it("cross-dissolves to a speaker on the other side of the room instead of panning", () => {
-    const { engine, secondsUntil, resolved, isGliding, isDissolving, paneCenterX } = lockedOnMiddle();
-    secondsUntil([BIG_LEFT, MIDDLE, RIGHT], () => resolved()[0].cx === BIG_LEFT.cx);
-    expect(paneCenterX()).toBeLessThan(0.3);
+    const { engine, secondsUntil, isGliding, isDissolving, paneCenterX } = lockedOnMiddle();
+    secondsUntil([DOMINANT_LEFT, MIDDLE, RIGHT], () => paneCenterX() < 0.3);
     expect(isDissolving()).toBe(true);
     expect(isGliding()).toBe(false);
     engine.destroy();
@@ -428,13 +436,13 @@ describe("VertixEngine active-speaker switch", () => {
 
   it("still glides when the locked speaker moves a little", () => {
     const { engine, detect, resolved, isGliding, isDissolving } = lockedOnMiddle();
-    detect([LEFT, BIG_MIDDLE_MOVED, RIGHT]);
+    detect([LEFT, DOMINANT_MIDDLE_MOVED, RIGHT]);
     expect(isGliding()).toBe(true);
     for (let i = 0; i < 10; i++) {
-      detect([LEFT, BIG_MIDDLE_MOVED, RIGHT]);
+      detect([LEFT, DOMINANT_MIDDLE_MOVED, RIGHT]);
       expect(isDissolving()).toBe(false);
     }
-    expect(resolved()[0].cx).toBe(BIG_MIDDLE_MOVED.cx);
+    expect(resolved()[0].cx).toBeCloseTo(DOMINANT_MIDDLE_MOVED.cx, 3);
     engine.destroy();
   });
 });

@@ -1,4 +1,5 @@
 import type { FaceBox, PaneTarget } from "../layoutEngine";
+import type { LayoutRule, TrackSnapshot } from "../tracking/layoutPlanner";
 
 /**
  * A framing change that must not glide: "snap" after a hard cut in the
@@ -26,6 +27,14 @@ export interface LayoutDecision {
   /** Set for a hard cut. */
   cutSource: CutSource | null;
   skinRejectedFaces: FaceBox[];
+  /** The rule behind `speakerCount` and `targetPanes`. */
+  rule: LayoutRule;
+  /** The followed person (main subject or its fallback), else null. */
+  subjectTrackId: number | null;
+  /** The track behind each pane of the latest plan. */
+  paneTrackIds: number[];
+  /** Every track at this detection, for the "Show tracks" overlay. */
+  tracks: TrackSnapshot[];
 }
 
 // Media times of one frame can differ in the last bits depending on where

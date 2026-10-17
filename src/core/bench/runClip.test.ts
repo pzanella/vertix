@@ -1,0 +1,58 @@
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { VertixEngine } from "../VertixEngine";
+import { BenchmarkRunError, runBenchmarkClip, SOURCE_LOAD_TIMEOUT_MS } from "./runClip";
+
+vi.stubGlobal("document", { visibilityState: "visible", addEventListener() {}, removeEventListener() {} });
+
+/** A video whose source never loads: no loadedmetadata, ever. */
+function stuckVideo(): HTMLVideoElement {
+  return {
+    currentTime: 0,
+    duration: NaN,
+    readyState: 0,
+    networkState: 2,
+    paused: true,
+    ended: false,
+    error: null,
+    addEventListener() {},
+    removeEventListener() {},
+    pause() {},
+  } as unknown as HTMLVideoElement;
+}
+
+function stubEngine(): VertixEngine {
+  return {
+    setMode() {},
+    setLookaheadEnabled() {},
+    setBenchmarkProbe() {},
+    getResourceStats: () => Promise.resolve(null),
+    getLookaheadStatus: () => ({ bufferedFrames: 0 }),
+    getDetectionHealth: () => ({ state: "worker", workerRestarts: 0, message: null }),
+  } as unknown as VertixEngine;
+}
+
+describe("runBenchmarkClip, source load timeout", () => {
+  beforeEach(() => vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] }));
+  afterEach(() => vi.useRealTimers());
+
+  it("fails with a recorded failure when the source does not load within 30 s", async () => {
+    const run = runBenchmarkClip(stubEngine(), stuckVideo(), {
+      clipName: "never-loads.mp4",
+      mode: "9:16",
+      nominalFps: 25,
+      warmupSec: 1,
+      lookahead: true,
+      loadSource: () => {},
+      wasmBuild: { variant: "scalar", reason: "benchmark-suite", runOrder: null },
+    });
+    const outcome = run.catch((error: unknown) => error);
+    await vi.advanceTimersByTimeAsync(SOURCE_LOAD_TIMEOUT_MS);
+    const error = await outcome;
+    expect(error).toBeInstanceOf(BenchmarkRunError);
+    const { failure, partial } = error as BenchmarkRunError;
+    expect(failure.message).toBe("Source did not load within 30 s");
+    expect(failure).toMatchObject({ clip: "never-loads.mp4", build: "scalar", lookahead: true, mode: "9:16" });
+    expect(failure.video).toMatchObject({ readyState: 0, currentTimeSec: 0 });
+    expect(partial).toBeNull();
+  });
+});

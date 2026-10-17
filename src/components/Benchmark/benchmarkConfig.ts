@@ -34,7 +34,9 @@ export function clampToRange(value: number, { min, max, step }: SecondsRange): n
  */
 export function baselineClipIndices(config: BenchmarkConfig): number[] {
   if (!config.baseline || BENCHMARK_CLIPS.length === 0) return [];
-  const highFrameRate = BENCHMARK_CLIPS.findIndex((clip) => clip.nominalFps > 30 && clip.knownCutsSec.length === 0);
+  const highFrameRate = BENCHMARK_CLIPS.findIndex(
+    (clip) => clip.nominalFps !== null && clip.nominalFps > 30 && clip.knownCutsSec.length === 0
+  );
   return highFrameRate > 0 ? [0, highFrameRate] : [0];
 }
 

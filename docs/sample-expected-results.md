@@ -10,9 +10,10 @@ Two facts that shape every row below:
   top/bottom. No active-speaker guessing at this count; a size-dominance version of that was
   tried and reverted (it locked onto a reporter's mic-holding arm instead of the actual speaker
   in real footage — see README's Known Limitations).
-- **3 or more faces**: the engine first tries to resolve a single active speaker (by face size
-  dominance, then by mouth motion if sizes are close) before falling back to the ordinary grid
-  if it can't tell.
+- **3 or more foreground faces**: the engine first tries to resolve a single active speaker (by face
+  size dominance, then by mouth motion if sizes are close) before falling back to the ordinary grid
+  if it can't tell. Faces under 35% of the largest face's area are background and never change the
+  layout. (With `MANY_FACES_RULES = "tracker"` the main-subject, group and panel rules apply instead.)
 
 | Clip | Faces | Expected framing |
 |---|---|---|
@@ -21,7 +22,7 @@ Two facts that shape every row below:
 | `2-speakers-b.mp4` — 2 speakers, no audio, example 2 (office corridor, facing each other) | 2 | Same vertical stack. Good clip for checking the crop stays locked on each face through profile turns. |
 | `2-speakers-c.mp4` — 2 speakers, no audio, example 3 (bar/counter) | 2 | Same vertical stack, tighter indoor framing. Crop shouldn't drift onto the countertop between the two faces. |
 | `2-speakers-d.mp4` — 2 speakers, no audio, example 4 (couch conversation) | 2 | Same vertical stack. Closer, more static shot — good baseline for confirming panes stay stable when neither person moves much. |
-| `3-speakers.mp4` — 3 speakers (meeting/interview, 3 at a table) | 3 | If one person is clearly closer to camera/larger in frame, expect a **single full-frame pane** on them, switching if someone else becomes dominant (with a short cross-dissolve, not a pan, when the new person is far from the old one). If no one's clearly foregrounded, expect the usual **3-pane grid** (2 top, 1 bottom). Has real audio — with audio on, check it locks onto whoever's actually talking when sizes are close. |
+| `3-speakers.mp4` — 3 speakers (meeting/interview, 3 at a table) | 3 | The **3-pane grid** (2 top, 1 bottom), then a **single full-frame pane** on the woman in the middle from about 6.8 s, when she talks (mouth motion; its audio track is silent, so the stricter no-audio margin applies). |
 
 ## What to flag as a real bug (not expected behavior)
 
@@ -31,9 +32,9 @@ Two facts that shape every row below:
 - Not a bug: the crop snapping to the new framing right after a hard cut in the source video
   (none of these samples has one; `node scripts/make-cut-clips.mjs` builds clips that do), or
   cross-dissolving to a new framing when the active speaker (3+ faces) switches to someone at
-  least 0.15 of the frame away (`SPEAKER_SWITCH_DISTANCE` in `speakerTracking.ts`).
+  least 0.15 of the frame away (`SPEAKER_SWITCH_DISTANCE` in `tracking/mainActiveSpeaker.ts`).
 - For `3-speakers.mp4`: rapid flickering between single-speaker and grid layouts within a
-  couple of seconds — the lock-in logic (`ACTIVE_SPEAKER_LOCK_SEC` in `speakerTracking.ts`) is meant to prevent this.
+  couple of seconds — the lock-in logic (`ACTIVE_SPEAKER_LOCK_SEC` in `tracking/mainActiveSpeaker.ts`) is meant to prevent this.
 - For `3-speakers.mp4`: the crop locking onto someone who isn't actually the speaker (a bystander,
   a mic-holder) and staying there — the exact failure that got the 2-face version of this reverted;
   watch for it here too since the same size-dominance check still runs at 3+.

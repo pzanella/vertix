@@ -18,6 +18,7 @@ export default function App() {
   const {
     canvasRef,
     skinRejectionOverlayRef,
+    tracksOverlayRef,
     videoRef,
     mode,
     setMode,
@@ -32,6 +33,8 @@ export default function App() {
     toggleMute,
     speakerCount,
     isTransitioning,
+    layoutRule,
+    sourceShownAsIs,
     meta,
     metrics,
     setLookaheadEnabled,
@@ -45,6 +48,7 @@ export default function App() {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const [dragging, setDragging] = useState(false);
   const [benchmarkRunning, setBenchmarkRunning] = useState(false);
+  const [showTracks, setShowTracks] = useState(false);
 
   const openFile = useCallback(
     (file: File | undefined) => {
@@ -188,11 +192,18 @@ export default function App() {
             <Canvas
               canvasRef={canvasRef}
               skinRejectionOverlayRef={SKIN_FILTER_DEBUG ? skinRejectionOverlayRef : undefined}
+              tracksOverlayRef={showTracks ? tracksOverlayRef : undefined}
               mode={mode}
               overlay={streamHealthOverlay}
             />
             <div className="w-full flex items-center gap-2">
-              <LiveStatusPanel mode={mode} speakerCount={speakerCount} isTransitioning={isTransitioning} />
+              <LiveStatusPanel
+                mode={mode}
+                speakerCount={speakerCount}
+                isTransitioning={isTransitioning}
+                layoutRule={layoutRule}
+                sourceShownAsIs={sourceShownAsIs}
+              />
               {isBuffering && (
                 <div className="flex items-center gap-2 px-2.5 py-1 rounded-full bg-neutral-900 border border-neutral-800 text-xs text-neutral-300">
                   <span className="w-3 h-3 rounded-full border-2 border-neutral-700 border-t-brand-400 animate-spin" />
@@ -222,6 +233,10 @@ export default function App() {
             duration={duration}
             speakerCount={speakerCount}
             isTransitioning={isTransitioning}
+            layoutRule={layoutRule}
+            sourceShownAsIs={sourceShownAsIs}
+            showTracks={showTracks}
+            onShowTracksChange={setShowTracks}
             metrics={metrics}
             showSkinFilter={SKIN_FILTER_DEBUG}
             onLookaheadChange={setLookaheadEnabled}

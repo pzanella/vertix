@@ -5,6 +5,8 @@ interface CanvasProps {
   canvasRef: React.RefObject<HTMLCanvasElement | null>;
   /** When set, a transparent canvas of the same size is laid exactly over the output, for the engine's skin-rejection boxes. */
   skinRejectionOverlayRef?: (canvas: HTMLCanvasElement | null) => void;
+  /** When set, a second transparent overlay canvas, for the engine's face tracks ("Show tracks"). */
+  tracksOverlayRef?: (canvas: HTMLCanvasElement | null) => void;
   mode: ReframeMode;
   /** Rendered absolutely-positioned on top of the video (e.g. StreamHealthOverlay) — a slot, like Controls' `middle`, so passing it in doesn't tie this component's re-render to state that has nothing to do with the canvas itself. */
   overlay?: ReactNode;
@@ -15,7 +17,13 @@ interface CanvasProps {
 // mode only changes on an explicit user toggle, so in practice this should
 // re-render essentially never during playback. The actual video frames are
 // painted imperatively by useWasmReframe, entirely outside React.
-export const Canvas = memo(function Canvas({ canvasRef, skinRejectionOverlayRef, mode, overlay }: CanvasProps) {
+export const Canvas = memo(function Canvas({
+  canvasRef,
+  skinRejectionOverlayRef,
+  tracksOverlayRef,
+  mode,
+  overlay,
+}: CanvasProps) {
   const sizing = `max-h-full max-w-full transition-[aspect-ratio] duration-300 ease-out ${
     mode === "16:9" ? "aspect-video" : "aspect-[9/16]"
   } object-contain`;
@@ -25,6 +33,13 @@ export const Canvas = memo(function Canvas({ canvasRef, skinRejectionOverlayRef,
       {skinRejectionOverlayRef && (
         <canvas
           ref={skinRejectionOverlayRef}
+          aria-hidden="true"
+          className={`absolute inset-0 m-auto pointer-events-none ${sizing}`}
+        />
+      )}
+      {tracksOverlayRef && (
+        <canvas
+          ref={tracksOverlayRef}
           aria-hidden="true"
           className={`absolute inset-0 m-auto pointer-events-none ${sizing}`}
         />
