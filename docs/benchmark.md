@@ -370,19 +370,30 @@ lookaheadComparison, precisionWarnings, results[] }`. Each result contains `summ
   - `schemaVersion` is 6. Every v5, v4 and v3 field is still there with
     the same meaning. Every v2 field is too, except
     `environment.wasmBuiltWithSimd` (see [Environment info](#environment-info)).
-  - New in v6: `failure` at the top level (null when the suite completed)
-    and per result `failure` (only on a run that stopped with an error):
+  - New in v6: `failures` at the top level, one entry per run or step that
+    failed (empty when all completed). A failed step is recorded and the
+    suite moves on to the next one; only Stop ends it early. Each entry:
     `{ name, message, stack, step: { index, total, kind, label }, clip,
-    build, lookahead, mode, failedAt, resources, video }`. `resources` is
-    a snapshot like the one below, with the last detection's media time and
+    build, lookahead, mode, failedAt, resources, video }`. `resources` is a
+    snapshot like the one below, with the last detection's media time and
     wall time (`engine.lastDetectionMediaTimeSec`, `lastDetectionAtMs`);
     `video` is the element's time, readyState, networkState and MediaError.
-    The run that failed is exported with what it recorded until then. Per
-    result, `resources: { start, end }`: live and created detection and
+    A run that failed is also kept in `results` with what it recorded until
+    then and its own `failure`. A source that has not loaded within 30 s
+    fails its run ("Source did not load within 30 s"), and a 9:16 run fails
+    when detection has stopped (see `detection` below). Per result,
+    `resources: { start, end }`: live and created detection and
     cut-trigger workers, the WASM memory of the detection worker and of each
-    build loaded on the main thread, `performance.memory` (Chromium), and
-    the engine's frame-buffer slots and bytes, queued decisions, pending
-    detections and tracks.
+    build loaded on the main thread, `detection` (`state`: worker, starting,
+    main-thread or stopped; `workerRestarts`; `message`),
+    `performance.memory` (Chromium), and the engine's frame-buffer slots and
+    bytes, queued decisions, pending detections and tracks.
+  - Detection watchdog: a worker detection with no result after
+    max(2 s, 10 × the build's detection p95) restarts the worker (a late
+    answer from the old one is ignored). After 3 restarts within 60 s the
+    worker is given up until the next build switch: detection runs on the
+    main thread, or stops if that cannot load, with a message in the
+    dashboard and in the failure.
   - Also new in v6: `summary.tracking` (see
     [Layout and main thread](#layout-and-main-thread)). `raw.detections`
     `keptFaces` now counts foreground faces (the tracker's foreground

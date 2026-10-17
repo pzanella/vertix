@@ -115,7 +115,7 @@ describe("benchmarkSummaryRows", () => {
     expect(row["skin rejected (speaker-sized)"]).toBe(0);
     expect(row["scene cuts"]).toBe(1);
     expect(report.schemaVersion).toBe(6);
-    expect(report.failure).toBeNull();
+    expect(report.failures).toEqual([]);
     expect(row.lookahead).toBe("160 ms");
     expect(row["render fps"]).toBe(25);
     expect(report.precisionWarnings.length).toBeGreaterThan(0);
@@ -143,10 +143,10 @@ describe("buildBenchmarkReport with a failure", () => {
       comparison,
       [sampleResult()],
       { order: null },
-      failure
+      [failure]
     );
-    expect(report.failure).toEqual(failure);
+    expect(report.failures).toEqual([failure]);
     expect(report.results).toHaveLength(1);
-    expect(JSON.parse(JSON.stringify(report)).failure.step.index).toBe(27);
+    expect(JSON.parse(JSON.stringify(report)).failures[0].step.index).toBe(27);
   });
 });

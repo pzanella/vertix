@@ -55,6 +55,9 @@ export interface BenchmarkClipOptions extends ClipPlaybackOptions {
 const TIMEOUT_DURATION_FACTOR = 3;
 const TIMEOUT_GRACE_SEC = 30;
 const FALLBACK_DURATION_SEC = 600;
+// A source that has not loaded (no loadedmetadata, or no seek back to 0)
+// within this long fails the run instead of waiting forever.
+export const SOURCE_LOAD_TIMEOUT_MS = 30_000;
 
 function abortError(): DOMException {
   return new DOMException("Benchmark cancelled", "AbortError");
@@ -84,6 +87,7 @@ function playClip(
     let timeout: ReturnType<typeof setTimeout> | undefined;
     const cleanup = () => {
       clearTimeout(timeout);
+      clearTimeout(loadTimeout);
       video.removeEventListener("loadedmetadata", onSourceReady);
       video.removeEventListener("seeked", onRewound);
       video.removeEventListener("timeupdate", onTimeUpdate);
@@ -100,12 +104,17 @@ function playClip(
       video.pause();
       reject(error);
     };
+    const loadTimeout = setTimeout(
+      () => fail(new Error(`Source did not load within ${SOURCE_LOAD_TIMEOUT_MS / 1000} s`)),
+      SOURCE_LOAD_TIMEOUT_MS
+    );
     const armTimeout = () => {
       const durationSec = Number.isFinite(video.duration) ? video.duration : FALLBACK_DURATION_SEC;
       const timeoutMs = (durationSec * TIMEOUT_DURATION_FACTOR + TIMEOUT_GRACE_SEC) * 1000;
       timeout = setTimeout(() => fail(new Error("Benchmark clip did not finish in time")), timeoutMs);
     };
     const onSourceReady = () => {
+      clearTimeout(loadTimeout);
       handlers.onReady();
       armTimeout();
     };
@@ -131,6 +140,7 @@ function playClip(
 
     engine.setMode(options.mode);
     if (options.lookahead !== undefined) engine.setLookaheadEnabled(options.lookahead);
+
     video.addEventListener("timeupdate", onTimeUpdate);
     video.addEventListener("ended", onEnded);
     video.addEventListener("error", onError);

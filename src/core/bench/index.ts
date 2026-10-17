@@ -35,7 +35,7 @@ export type {
   PrecisionWarning,
   WasmBuildComparison,
 } from "./report";
-export { BenchmarkRunError, runBenchmarkClip, runUnrecordedWarmup } from "./runClip";
+export { BenchmarkRunError, runBenchmarkClip, runUnrecordedWarmup, SOURCE_LOAD_TIMEOUT_MS } from "./runClip";
 export { describeError, jsHeapSnapshot, videoElementState } from "./resourceStats";
 export type {
   BenchmarkFailure,
@@ -44,6 +44,8 @@ export type {
   VideoElementState,
   WorkerCount,
 } from "./resourceStats";
+export { runSuiteSteps } from "./suiteRunner";
+export type { StepContext, SuiteOutcome, SuiteStepRunner } from "./suiteRunner";
 export type { BenchmarkClipOptions, ClipPlaybackOptions } from "./runClip";
 export * from "./stats";
 export { buildSuitePlan, wasmBuildSequenceForClip } from "./suitePlan";
