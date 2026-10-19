@@ -40,6 +40,19 @@ export interface ClipPlaybackOptions {
   signal?: AbortSignal;
 }
 
+/**
+ * Host measurements recorded alongside a run (e.g. a demo overlay). The
+ * engine knows nothing about them: the runner calls start() when recording
+ * starts and stores what finish() returns under `key` in the result's
+ * `extensions` (schema v7).
+ */
+export interface BenchmarkClipExtension {
+  key: string;
+  start(context: { warmupSec: number }): void;
+  /** The block for this run, or null to leave it out. */
+  finish(): Promise<unknown>;
+}
+
 export interface BenchmarkClipOptions extends ClipPlaybackOptions {
   clipName: string;
   nominalFps: number | null;
@@ -49,6 +62,7 @@ export interface BenchmarkClipOptions extends ClipPlaybackOptions {
   knownCutsSec?: readonly number[];
   /** Stops playback at this media time instead of at the end (long streams). */
   stopAtSec?: number;
+  extension?: BenchmarkClipExtension | null;
 }
 
 // A clip that has not ended after duration × this (+ grace) is treated as stuck.
@@ -200,6 +214,7 @@ export async function runBenchmarkClip(
           knownCutsSec: options.knownCutsSec,
         });
         engine.setBenchmarkProbe(recorder);
+        options.extension?.start({ warmupSec: options.warmupSec });
       },
       shouldStop: options.stopAtSec !== undefined ? () => video.currentTime >= options.stopAtSec! : undefined,
     });
@@ -244,13 +259,24 @@ export async function runBenchmarkClip(
   const finished = recorder as BenchmarkRecorder | null;
   if (!finished) throw new Error("Benchmark clip ended before it started");
   const recording = finished.finish(options.mode);
+  const extensionBlock = options.extension ? await extensionResult(options.extension) : null;
   return {
     ...recording,
     pageHiddenDuringRun: pageHidden,
     wasmBuild: options.wasmBuild,
     lookahead: lookahead ?? lookaheadSnapshot(engine),
     resources: { start, end: await resourceSnapshot(engine) },
+    ...(extensionBlock !== null ? { extensions: { [options.extension!.key]: extensionBlock } } : {}),
   };
+}
+
+/** Never lets a host extension's failure become the run's failure. */
+async function extensionResult(extension: BenchmarkClipExtension): Promise<unknown> {
+  try {
+    return (await extension.finish()) ?? null;
+  } catch (error) {
+    return { error: describeError(error).message };
+  }
 }
 
 function lookaheadSnapshot(engine: VertixEngine): BenchmarkLookahead {

@@ -114,7 +114,7 @@ describe("benchmarkSummaryRows", () => {
     expect(row["skin rejected"]).toBe(1);
     expect(row["skin rejected (speaker-sized)"]).toBe(0);
     expect(row["scene cuts"]).toBe(1);
-    expect(report.schemaVersion).toBe(6);
+    expect(report.schemaVersion).toBe(7);
     expect(report.failures).toEqual([]);
     expect(row.lookahead).toBe("160 ms");
     expect(row["render fps"]).toBe(25);

@@ -56,3 +56,62 @@ describe("runBenchmarkClip, source load timeout", () => {
     expect(partial).toBeNull();
   });
 });
+
+/** A video that loads at once and ends right after. */
+function shortVideo(): HTMLVideoElement & { fire(type: string): void } {
+  const listeners = new Map<string, Set<() => void>>();
+  return {
+    currentTime: 0,
+    duration: 1,
+    videoWidth: 1280,
+    videoHeight: 720,
+    readyState: 4,
+    paused: false,
+    ended: false,
+    muted: false,
+    error: null,
+    addEventListener(type: string, listener: () => void) {
+      if (!listeners.has(type)) listeners.set(type, new Set());
+      listeners.get(type)!.add(listener);
+    },
+    removeEventListener(type: string, listener: () => void) {
+      listeners.get(type)?.delete(listener);
+    },
+    pause() {},
+    fire(type: string) {
+      for (const listener of [...(listeners.get(type) ?? [])]) listener();
+    },
+  } as unknown as HTMLVideoElement & { fire(type: string): void };
+}
+
+describe("runBenchmarkClip, host extension", () => {
+  const run = (video: ReturnType<typeof shortVideo>, finish: () => Promise<unknown>) => {
+    const started: { warmupSec: number }[] = [];
+    const result = runBenchmarkClip(stubEngine(), video, {
+      clipName: "short.mp4",
+      mode: "9:16",
+      nominalFps: 25,
+      warmupSec: 2,
+      loadSource: () => {
+        video.fire("loadedmetadata");
+        queueMicrotask(() => video.fire("ended"));
+      },
+      wasmBuild: { variant: "simd", reason: "benchmark-suite", runOrder: null },
+      extension: { key: "overlay", start: (context) => started.push(context), finish },
+    });
+    return { result, started };
+  };
+
+  it("starts with the recording and stores its block under its key", async () => {
+    const { result, started } = run(shortVideo(), () => Promise.resolve({ drawn: 3 }));
+    const clip = await result;
+    expect(started).toEqual([{ warmupSec: 2 }]);
+    expect(clip.extensions).toEqual({ overlay: { drawn: 3 } });
+  });
+
+  it("leaves the field out for a null block, and records a failing extension without failing the run", async () => {
+    expect((await run(shortVideo(), () => Promise.resolve(null)).result).extensions).toBeUndefined();
+    const failed = await run(shortVideo(), () => Promise.reject(new Error("no worker"))).result;
+    expect(failed.extensions).toEqual({ overlay: { error: "no worker" } });
+  });
+});
