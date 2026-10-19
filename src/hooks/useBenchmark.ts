@@ -1,4 +1,4 @@
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   benchmarkReportToCsv,
   benchmarkSummaryRows,
@@ -14,6 +14,7 @@ import {
   runSuiteSteps,
   runUnrecordedWarmup,
   switchWasmBuild,
+  type BenchmarkClipExtension,
   type BenchmarkConfig,
   type BenchmarkFailure,
   type BenchmarkReport,
@@ -46,6 +47,8 @@ interface UseBenchmarkOptions {
   getEngine: () => VertixEngine | null;
   videoRef: React.RefObject<HTMLVideoElement | null>;
   load: (src: string) => void;
+  /** Host measurements recorded with each run while set (the face mesh demo's block). */
+  clipExtension?: BenchmarkClipExtension | null;
 }
 
 interface UseBenchmarkReturn {
@@ -138,7 +141,17 @@ function publishReport(report: BenchmarkReport) {
 }
 
 /** Runs benchmark suites against the app's engine and video element and keeps the last report. */
-export function useBenchmark({ config, getEngine, videoRef, load }: UseBenchmarkOptions): UseBenchmarkReturn {
+export function useBenchmark({
+  config,
+  getEngine,
+  videoRef,
+  load,
+  clipExtension = null,
+}: UseBenchmarkOptions): UseBenchmarkReturn {
+  const clipExtensionRef = useRef(clipExtension);
+  useEffect(() => {
+    clipExtensionRef.current = clipExtension;
+  }, [clipExtension]);
   const [status, setStatus] = useState<BenchmarkStatus>("idle");
   const [stage, setStage] = useState<BenchmarkStage | null>(null);
   const [report, setReport] = useState<BenchmarkReport | null>(null);
@@ -295,6 +308,7 @@ export function useBenchmark({ config, getEngine, videoRef, load }: UseBenchmark
           lookahead: context.lookahead ?? true,
           loadSource: () => load(clip.url),
           wasmBuild: step.kind === "clip" ? step.build : { ...getActiveWasmBuild(), runOrder: null },
+          extension: clipExtensionRef.current,
           signal,
         });
       },
@@ -336,6 +350,7 @@ export function useBenchmark({ config, getEngine, videoRef, load }: UseBenchmark
             knownCutsSec: sample?.knownCutsSec,
             warmupSec: config.clipWarmupSec,
             wasmBuild: { ...build, runOrder: null },
+            extension: clipExtensionRef.current,
             signal,
           }),
         failureDetails: async () => ({

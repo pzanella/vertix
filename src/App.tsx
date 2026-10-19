@@ -13,6 +13,9 @@ import {
 import { BenchmarkLauncher } from "./components/Benchmark";
 import { SKIN_FILTER_DEBUG } from "./lib/debugFlags";
 import { useWasmReframe } from "./hooks/useWasmReframe";
+import { FaceMeshPanel } from "./features/faceMesh/FaceMeshPanel";
+import { useFaceMesh } from "./features/faceMesh/useFaceMesh";
+import { DEFAULT_MESH_STYLE, type MeshStyleId } from "./features/faceMesh/meshStyles";
 
 export default function App() {
   const {
@@ -49,6 +52,17 @@ export default function App() {
   const [dragging, setDragging] = useState(false);
   const [benchmarkRunning, setBenchmarkRunning] = useState(false);
   const [showTracks, setShowTracks] = useState(false);
+  const [faceMeshOn, setFaceMeshOn] = useState(false);
+  const [faceMeshStyle, setFaceMeshStyle] = useState<MeshStyleId>(DEFAULT_MESH_STYLE);
+  const [faceMeshOverlay, setFaceMeshOverlay] = useState<HTMLCanvasElement | null>(null);
+  const faceMesh = useFaceMesh({
+    enabled: faceMeshOn,
+    getEngine,
+    videoRef,
+    overlay: faceMeshOverlay,
+    style: faceMeshStyle,
+    mode,
+  });
 
   const openFile = useCallback(
     (file: File | undefined) => {
@@ -124,6 +138,7 @@ export default function App() {
           load={load}
           hasSource={isActive}
           onRunningChange={setBenchmarkRunning}
+          clipExtension={faceMesh.benchExtension}
         />
       </header>
 
@@ -193,6 +208,7 @@ export default function App() {
               canvasRef={canvasRef}
               skinRejectionOverlayRef={SKIN_FILTER_DEBUG ? skinRejectionOverlayRef : undefined}
               tracksOverlayRef={showTracks ? tracksOverlayRef : undefined}
+              faceMeshOverlayRef={faceMeshOn ? setFaceMeshOverlay : undefined}
               mode={mode}
               overlay={streamHealthOverlay}
             />
@@ -240,6 +256,15 @@ export default function App() {
             metrics={metrics}
             showSkinFilter={SKIN_FILTER_DEBUG}
             onLookaheadChange={setLookaheadEnabled}
+            extraSections={
+              <FaceMeshPanel
+                enabled={faceMeshOn}
+                onEnabledChange={setFaceMeshOn}
+                style={faceMeshStyle}
+                onStyleChange={setFaceMeshStyle}
+                status={faceMesh.status}
+              />
+            }
           />
         </div>
       )}

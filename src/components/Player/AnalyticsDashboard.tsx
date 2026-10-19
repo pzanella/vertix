@@ -23,6 +23,8 @@ interface AnalyticsDashboardProps {
   /** Debug only (`?debug=skin`): how many detections the skin-tone filter threw away. */
   showSkinFilter?: boolean;
   onLookaheadChange: (enabled: boolean) => void;
+  /** Extra sections from the host app (the "Face mesh" demo panel). */
+  extraSections?: React.ReactNode;
 }
 
 const LOOKAHEAD_UNAVAILABLE_LABEL: Record<NonNullable<ReframeMetrics["lookahead"]["unavailableReason"]>, string> = {
@@ -92,6 +94,7 @@ export const AnalyticsDashboard = memo(function AnalyticsDashboard({
   metrics,
   showSkinFilter = false,
   onLookaheadChange,
+  extraSections,
 }: AnalyticsDashboardProps) {
   // "Stable Scene Duration" ticks up live between layout changes — the hook
   // only updates `layoutCommittedAt` at the moment a layout actually
@@ -170,6 +173,8 @@ export const AnalyticsDashboard = memo(function AnalyticsDashboard({
           <MetricRow label="Switch Count" value={String(metrics.sceneSwitchCount)} />
           <MetricRow label="Cuts Detected" value={String(metrics.sceneCutCount)} />
         </MetricSection>
+
+        {extraSections}
 
         <MetricSection title="Lookahead">
           <ToggleSwitch
