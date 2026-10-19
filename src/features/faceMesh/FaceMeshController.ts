@@ -53,6 +53,8 @@ export interface FaceMeshControllerOptions {
 // Readout windows.
 const RECENT_FRAMES_MS = 1000;
 const RECENT_TICKS_MS = 5000;
+// Tick-driven readout updates at most this often (each one re-renders the app).
+const STATUS_INTERVAL_MS = 500;
 const BEHIND_SKIPPED_SHARE = 0.2;
 const DEFAULT_FRAME_INTERVAL_MS = 40;
 
@@ -80,6 +82,7 @@ export class FaceMeshController {
   private recentTicks: { at: number; skipped: boolean }[] = [];
   private drawScratch = { points: new Float32Array(0) };
   private lastDrawnSec: number | null = null;
+  private lastStatusAt = -Infinity;
   private stopped = false;
 
   constructor(
@@ -173,7 +176,7 @@ export class FaceMeshController {
       this.appliedMinimumMs = minimum;
       this.engine.setMinimumLookaheadMs(minimum);
     }
-    this.emitStatus();
+    if (now - this.lastStatusAt >= STATUS_INTERVAL_MS) this.emitStatus();
   }
 
   private render(frame: OverlayFrame): void {
@@ -199,6 +202,7 @@ export class FaceMeshController {
 
   private emitStatus(): void {
     const now = performance.now();
+    this.lastStatusAt = now;
     this.recentFrames = this.recentFrames.filter((f) => now - f.at <= RECENT_FRAMES_MS);
     const interpolatedShare =
       this.recentFrames.length > 0
