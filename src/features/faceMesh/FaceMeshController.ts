@@ -79,6 +79,7 @@ export class FaceMeshController {
   private recentFrames: { at: number; interpolated: boolean }[] = [];
   private recentTicks: { at: number; skipped: boolean }[] = [];
   private drawScratch = { points: new Float32Array(0) };
+  private lastDrawnSec: number | null = null;
   private stopped = false;
 
   constructor(
@@ -181,11 +182,14 @@ export class FaceMeshController {
     drawMeshes(frame, meshes, this.edges, MESH_STYLES[this.style], this.drawScratch);
     const drawMs = performance.now() - start;
     const kinds: ShownMeshKind[] = meshes.map((m) => m.kind);
+    const afterCut = this.lastDrawnSec !== null && this.timeline.cutBetween(this.lastDrawnSec, frame.mediaTimeSec);
+    this.lastDrawnSec = frame.mediaTimeSec;
     this.bench.recordFrame(
       frame.mediaTimeSec,
       meshes.map((m) => m.trackId),
       kinds,
-      drawMs
+      drawMs,
+      afterCut
     );
     if (meshes.length > 0) {
       this.recentFrames.push({ at: start, interpolated: kinds.every((k) => k === "interpolated") });

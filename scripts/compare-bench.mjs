@@ -57,6 +57,7 @@ for (const { name, report } of reports) {
             .join("/")
         : "-",
       "flicker/min": mesh.length ? fixed(median(mesh.map((m) => m.flickerEventsPerMinute))) : "-",
+      "cut events/min": mesh.length ? fixed(median(mesh.map((m) => m.cutEventsPerMinute))) : "-",
       "L base ms": mesh.length ? fixed(median(mesh.map((m) => m.lookahead.baseLengthMs || null)), 0) : "-",
       "JS heap MB": fixed(heapMb, 0),
       "mesh WASM MB": mesh.length ? fixed(median(mesh.map((m) => m.wasmMemoryBytes)) / 1048576, 0) : "-",

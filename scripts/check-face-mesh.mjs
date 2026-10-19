@@ -9,6 +9,10 @@
 //                       MediaPipe's 60 s metrics interval) with the switch
 //                       on, through both modes; then two probes check the
 //                       worker's own CSP. 0 third-party requests expected.
+//   --scenario=suite    the switch on, then the whole benchmark suite
+//                       (build without VERTIX_LOCAL_CLIPS, so only the
+//                       sample and test clips play). 0 third-party requests
+//                       expected.
 //   --scenario=players  the switch on, then every kind of source: a sample,
 //                       an uploaded file, an MP4 URL, a public HLS stream
 //                       and a public DASH stream (Shaka), each in both modes.
@@ -168,6 +172,26 @@ async function runInPage({ scenario, seconds, publicHls, publicDash, probeUrl })
     return result;
   }
 
+  if (scenario === "suite") {
+    await loadSample("One speaker");
+    await faceMeshOn();
+    window.vertixBenchmarkReport = undefined;
+    (await waitFor(() => document.querySelector("button[aria-expanded]"), "the benchmark button")).click();
+    (await waitFor(() => buttonWithText("Run suite"), "Run suite")).click();
+    log("suite started");
+    const report = await waitFor(() => window.vertixBenchmarkReport, "the suite to finish", 90 * 60 * 1000);
+    const blocked = report.results.map((r) => r.extensions?.faceMesh?.blockedRequests?.count ?? 0);
+    result.steps.push({
+      step: "suite",
+      runs: report.results.length,
+      failures: report.failures.length,
+      runsWithFaceMesh: report.results.filter((r) => r.extensions?.faceMesh).length,
+      blockedInRuns: blocked.reduce((a, b) => a + b, 0),
+      readout: readout(),
+    });
+    return result;
+  }
+
   if (scenario === "players") {
     const sources = [
       ["sample", () => loadSample("2 speakers")],
@@ -220,7 +244,7 @@ try {
     headed: args.includes("--headed"),
     productionPreview: true,
     captureNetwork: true,
-    timeoutMs: 20 * 60 * 1000,
+    timeoutMs: 100 * 60 * 1000,
   });
   const appOrigin = capture.requests
     .map((r) => r.url)

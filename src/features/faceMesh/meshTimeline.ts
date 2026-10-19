@@ -58,6 +58,11 @@ export class MeshTimeline {
     this.cuts = [];
   }
 
+  /** Whether a cut is shown in (fromSec, toSec]. */
+  cutBetween(fromSec: number, toSec: number): boolean {
+    return this.cuts.some((c) => c > fromSec && c <= toSec);
+  }
+
   get latestCheckSec(): number | null {
     return this.checks.at(-1)?.mediaTimeSec ?? null;
   }

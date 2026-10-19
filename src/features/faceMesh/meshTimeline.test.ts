@@ -93,6 +93,13 @@ describe("MeshTimeline", () => {
     expect(timeline.meshesAt(2).map((m) => m.trackId)).toEqual([2]);
   });
 
+  it("tells whether a cut is shown between two frames", () => {
+    const timeline = new MeshTimeline();
+    timeline.addCut(1.12);
+    expect(timeline.cutBetween(1.08, 1.12)).toBe(true);
+    expect(timeline.cutBetween(1.12, 1.16)).toBe(false);
+  });
+
   it("does not hold a mesh across a cut", () => {
     const timeline = new MeshTimeline();
     timeline.addCheck(check(1, [[1, mesh(0.2)]]));

@@ -384,7 +384,9 @@ lookaheadComparison, precisionWarnings, results[] }`. Each result contains `summ
       smooth mesh was `interpolated`, `stepped` or `held`, or that showed
       none (`empty`).
     - `flickerEventsPerMinute`: a track's mesh appearing or disappearing on
-      screen, per minute of displayed media time.
+      screen, per minute of displayed media time, not counting scene cuts;
+      `cutEventsPerMinute`: the same on the frame a cut is shown (meshes end
+      with their shot by design).
     - `lookahead`: `{ lengthMs, baseLengthMs, minimumMs }` at the end of the
       run: the length with the mesh's minimum, without it, and the minimum.
     - `init`: `{ simd, downloadMs, loadMs, assets[] }` (assets with

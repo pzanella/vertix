@@ -37,8 +37,10 @@ export interface FaceMeshBenchBlock {
   drawMs: SampleSummary;
   /** Share of displayed frames by what they showed. */
   frames: { displayed: number } & Record<MeshFrameKind, number>;
-  /** A track's mesh appearing or disappearing on screen, per minute of displayed media time. */
+  /** A track's mesh appearing or disappearing on screen, per minute of displayed media time; not counting scene cuts. */
   flickerEventsPerMinute: number | null;
+  /** The same, on the frame a scene cut is shown (meshes end with their shot, as intended). */
+  cutEventsPerMinute: number | null;
   lookahead: LookaheadLengths;
   init: { simd: boolean; downloadMs: number; loadMs: number; assets: FaceMeshAssetTiming[] } | null;
   wasmMemoryBytes: number | null;
@@ -70,6 +72,7 @@ export class FaceMeshBenchRecorder implements BenchmarkClipExtension {
   private noMesh = 0;
   private kinds: Record<MeshFrameKind, number> = { interpolated: 0, stepped: 0, held: 0, empty: 0 };
   private flickerEvents = 0;
+  private cutEvents = 0;
   private visible = new Set<number>();
   private firstFrameSec: number | null = null;
   private lastFrameSec: number | null = null;
@@ -85,7 +88,7 @@ export class FaceMeshBenchRecorder implements BenchmarkClipExtension {
     this.perTick = [];
     this.resultAges = [];
     this.draws = [];
-    this.checked = this.skipped = this.mismatches = this.faces = this.noMesh = this.flickerEvents = 0;
+    this.checked = this.skipped = this.mismatches = this.faces = this.noMesh = this.flickerEvents = this.cutEvents = 0;
     this.kinds = { interpolated: 0, stepped: 0, held: 0, empty: 0 };
     this.visible = new Set();
     this.firstFrameSec = this.lastFrameSec = null;
@@ -110,7 +113,8 @@ export class FaceMeshBenchRecorder implements BenchmarkClipExtension {
     mediaTimeSec: number,
     trackIds: readonly number[],
     kinds: readonly ShownMeshKind[],
-    drawMs: number
+    drawMs: number,
+    afterCut = false
   ): void {
     if (!this.recording || mediaTimeSec < this.warmupSec) return;
     this.firstFrameSec ??= mediaTimeSec;
@@ -118,8 +122,11 @@ export class FaceMeshBenchRecorder implements BenchmarkClipExtension {
     this.draws.push(drawMs);
     this.kinds[frameKindOf(kinds)] += 1;
     const now = new Set(trackIds);
-    for (const id of now) if (!this.visible.has(id)) this.flickerEvents += 1;
-    for (const id of this.visible) if (!now.has(id)) this.flickerEvents += 1;
+    let changes = 0;
+    for (const id of now) if (!this.visible.has(id)) changes += 1;
+    for (const id of this.visible) if (!now.has(id)) changes += 1;
+    if (afterCut) this.cutEvents += changes;
+    else this.flickerEvents += changes;
     this.visible = now;
   }
 
@@ -154,6 +161,7 @@ export class FaceMeshBenchRecorder implements BenchmarkClipExtension {
         empty: share(this.kinds.empty),
       },
       flickerEventsPerMinute: minutes > 0 ? this.flickerEvents / minutes : null,
+      cutEventsPerMinute: minutes > 0 ? this.cutEvents / minutes : null,
       lookahead: this.sources.lookahead(),
       init: this.sources.init(),
       wasmMemoryBytes: await this.sources.wasmMemoryBytes(),

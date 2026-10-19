@@ -31,6 +31,17 @@ describe("face mesh benchmark block", () => {
     expect(block.lookahead).toEqual({ lengthMs: 320, baseLengthMs: 160, minimumMs: 330 });
   });
 
+  it("counts changes on the frame a cut is shown apart from flicker", async () => {
+    const bench = recorder();
+    bench.start({ warmupSec: 0 });
+    bench.recordFrame(0, [1], ["interpolated"], 1);
+    bench.recordFrame(30, [2], ["stepped"], 1, true);
+    bench.recordFrame(60, [], [], 1);
+    const block = await bench.finish();
+    expect(block.cutEventsPerMinute).toBeCloseTo(2, 6);
+    expect(block.flickerEventsPerMinute).toBeCloseTo(2, 6);
+  });
+
   it("summarises checked ticks and counts skipped ones and faces without a mesh", async () => {
     const bench = recorder();
     bench.start({ warmupSec: 0 });
