@@ -154,6 +154,7 @@ export class FaceMeshController {
     }
     if (state === "failed") {
       this.engine.setMinimumLookaheadMs(null);
+      this.engine.setSourceViewDetection(false);
       this.appliedMinimumMs = null;
     }
     this.emitStatus();

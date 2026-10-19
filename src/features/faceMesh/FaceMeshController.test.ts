@@ -151,7 +151,7 @@ describe("FaceMeshController", () => {
     vi.useRealTimers();
   });
 
-  it("drops the minimum when loading fails", () => {
+  it("drops the minimum and the 16:9 detection when loading fails", () => {
     vi.useFakeTimers();
     const { engine, client, ticks, statuses } = setUp();
     client.becomeReady();
@@ -159,6 +159,7 @@ describe("FaceMeshController", () => {
     expect(engine.minimumMs()).toBe(330);
     client.events().onStateChange("failed", "timeout");
     expect(engine.minimumMs()).toBeNull();
+    expect(engine.calls.at(-1)).toBe("sourceView:false");
     expect(statuses.at(-1)).toMatchObject({ reason: "timeout", minimumLookaheadMs: null });
     vi.useRealTimers();
   });

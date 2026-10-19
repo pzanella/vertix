@@ -251,6 +251,11 @@ describe("VertixEngine host hooks", () => {
       expect(ticks[0].tracks).toHaveLength(1);
       expect(engine.getState().speakerCount).toBe(0);
       expect(engine.getLookaheadStatus()).toMatchObject({ bypassed: true, lengthMs: 0 });
+
+      engine.setSourceViewDetection(false);
+      play(20);
+      expect(frames).toHaveLength(1);
+      expect(engine.getLookaheadStatus()).toMatchObject({ bypassed: true, lengthMs: 0 });
       engine.destroy();
     });
   });
