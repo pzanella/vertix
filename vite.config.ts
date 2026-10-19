@@ -1,6 +1,7 @@
-import { defineConfig } from "vite";
+import { defineConfig, type Plugin } from "vite";
 import react from "@vitejs/plugin-react";
 import { LOCAL_CLIPS_MARKER, readLocalClips } from "./scripts/local-clips.mjs";
+import { PAGE_CONTENT_SECURITY_POLICY } from "./scripts/lib/content-security-policy.mjs";
 
 interface LocalClip {
   label: string;
@@ -32,8 +33,22 @@ function localClips(command: "serve" | "build", mode: string): LocalClip[] {
   return clips;
 }
 
+/** Adds the page's Content Security Policy right after <meta charset>, before any script or stylesheet of the built index.html. */
+function contentSecurityPolicy(): Plugin {
+  const charset = '<meta charset="UTF-8" />';
+  return {
+    name: "vertix-content-security-policy",
+    apply: "build",
+    transformIndexHtml(html) {
+      if (!html.includes(charset)) throw new Error(`index.html: ${charset} not found for the CSP meta tag`);
+      const policy = PAGE_CONTENT_SECURITY_POLICY.replaceAll("'", "&#39;");
+      return html.replace(charset, `${charset}\n    <meta http-equiv="Content-Security-Policy" content="${policy}" />`);
+    },
+  };
+}
+
 export default defineConfig(({ command, mode }) => ({
-  plugins: [react()],
+  plugins: [react(), contentSecurityPolicy()],
   define: {
     __VERTIX_LOCAL_CLIPS__: JSON.stringify(localClips(command, mode)),
   },
