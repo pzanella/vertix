@@ -72,7 +72,8 @@ async function runInPage({ scenario, seconds, publicHls, publicDash, probeUrl })
   };
   const playing = async (what) => {
     await waitFor(() => video() && !video().paused && video().currentTime > 0.5, `${what} to play`, 90000);
-    video().loop = true;
+    // Long enough for MediaPipe's 60 s metrics interval; never during the suite (its clips must end).
+    video().loop = scenario !== "suite";
   };
   const loadSample = async (title) => {
     await openSourceTab("Sample");
@@ -187,6 +188,7 @@ async function runInPage({ scenario, seconds, publicHls, publicDash, probeUrl })
       failures: report.failures.length,
       runsWithFaceMesh: report.results.filter((r) => r.extensions?.faceMesh).length,
       blockedInRuns: blocked.reduce((a, b) => a + b, 0),
+      failureMessages: [...new Set(report.failures.map((f) => `${f.name}: ${f.message}`))].slice(0, 5),
       readout: readout(),
     });
     return result;
