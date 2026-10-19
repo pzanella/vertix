@@ -4,3 +4,11 @@ Copyright 2026 Pietro Zanella
 This product includes the UltraFace face-detection model
 (https://github.com/Linzaer/Ultra-Light-Fast-Generic-Face-Detector-1MB),
 licensed under the MIT License. See wasm/src/models/ATTRIBUTION.md.
+
+The "Face mesh" demo switch loads MediaPipe Tasks Vision
+(@mediapipe/tasks-vision 1.1.1) and the MediaPipe Face Landmarker model,
+both Copyright Google LLC and licensed under the Apache License 2.0. See
+public/face-mesh/NOTICE.
+
+The app's fonts (Space Grotesk, IBM Plex Sans, IBM Plex Mono) are bundled
+from @fontsource and licensed under the SIL Open Font License 1.1.

@@ -1,0 +1,36 @@
+Third-party files for the Vertix "Face mesh" demo
+==================================================
+
+The files in this directory, and the face mesh worker
+(workers/faceMeshWorker.js, which bundles the library below), are loaded
+only when the "Face mesh" switch is turned on. They are served from the
+same origin as the app; nothing is requested from a third party.
+
+MediaPipe Tasks Vision (@mediapipe/tasks-vision 1.1.1)
+  Files: vision_wasm_internal.js, vision_wasm_internal.wasm,
+         vision_wasm_nosimd_internal.js, vision_wasm_nosimd_internal.wasm,
+         and the library code bundled into workers/faceMeshWorker.js
+  Copyright The MediaPipe Authors (Google LLC)
+  License: Apache License 2.0 (see LICENSE in this directory)
+  Source: https://github.com/google-ai-edge/mediapipe
+          https://www.npmjs.com/package/@mediapipe/tasks-vision
+  Not modified.
+
+  Privacy: the MediaPipe Tasks privacy notice
+  (https://developers.google.com/edge/mediapipe/solutions/tasks#mediapipe_tasks_privacy_notice)
+  says the APIs send performance and usage metrics to Google. In Vertix the
+  worker runs under a Content Security Policy that only allows its own
+  origin, and a network guard stops any other request; see the README.
+
+MediaPipe Face Landmarker model (face_landmarker.task, float16, version 1)
+  Contains the BlazeFace short-range face detector, FaceMesh V2 and the
+  Blendshape V2 models.
+  Copyright Google LLC
+  License: Apache License 2.0 (see LICENSE in this directory), as stated in
+  the model cards.
+  Source: https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task
+  sha256: 64184e229b263107bc2b804c6625db1341ff2bb731874b0bcc2fe6544e0bc9ff
+  Model cards: https://ai.google.dev/edge/mediapipe/solutions/vision/face_landmarker#models
+  Intended use per the model cards: AR effects on faces close to the camera.
+  Vertix uses it for a visual overlay only; it makes no decision from it.
+  Not modified.

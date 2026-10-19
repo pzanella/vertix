@@ -1,5 +1,7 @@
-// Bundles the face-detection and cut-trigger workers with esbuild into
-// public/workers/, served as plain static files in both dev and prod.
+// Bundles the face-detection and cut-trigger workers (library) and the face
+// mesh demo worker (app) with esbuild into public/workers/, served as plain
+// static files in both dev and prod, and copies the face mesh WASM from
+// @mediapipe/tasks-vision into public/face-mesh/.
 // Vite's own worker bundling hung indefinitely for the detection worker for reasons that never
 // produced an error — see README.md's Known Limitations.
 //
@@ -52,4 +54,29 @@ for (const build of WASM_BUILDS) {
   copyFileSync(join(wasmDir, build, "wasm_bg.wasm"), join(outDir, `wasm_${build}_bg.wasm`));
 }
 
-console.log("Worker bundles + both wasm binaries written to public/workers/");
+// The "Face mesh" demo worker. Kept out of the library build above; its
+// Apache-2.0 license comments stay in the bundle.
+await build({
+  entryPoints: { faceMeshWorker: join(root, "src/features/faceMesh/faceMeshWorker.ts") },
+  bundle: true,
+  format: "iife",
+  platform: "browser",
+  target: "es2022",
+  outdir: outDir,
+  legalComments: "eof",
+  logLevel: "info",
+  logOverride: { "empty-import-meta": "silent" },
+});
+
+const tasksVisionWasmDir = join(root, "node_modules/@mediapipe/tasks-vision/wasm");
+const faceMeshDir = join(root, "public/face-mesh");
+for (const file of [
+  "vision_wasm_internal.js",
+  "vision_wasm_internal.wasm",
+  "vision_wasm_nosimd_internal.js",
+  "vision_wasm_nosimd_internal.wasm",
+]) {
+  copyFileSync(join(tasksVisionWasmDir, file), join(faceMeshDir, file));
+}
+
+console.log("Worker bundles + both wasm binaries written to public/workers/, face mesh WASM to public/face-mesh/");
