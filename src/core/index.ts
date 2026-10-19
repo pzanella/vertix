@@ -25,4 +25,15 @@ export { PANEL_VARIANT } from "./tracking/panelDetector";
 export type { PanelVariant } from "./tracking/panelDetector";
 export { LOOKAHEAD_ON_BY_DEFAULT, getActiveWasmBuild, switchWasmBuild } from "./VertixEngine";
 export { defaultWasmBuild, isWasmSimdSupported, WASM_BINARY_SIZES } from "./wasmBuild";
+export { detectDeviceClass, MAX_LOOKAHEAD_MS } from "./lookahead/lookaheadSizing";
+export type { DeviceClass } from "./lookahead/lookaheadSizing";
+export type {
+  DetectionObserver,
+  DetectionTick,
+  DetectionTickTrack,
+  LookaheadLengths,
+  OverlayFrame,
+  OverlayRenderer,
+  OverlayView,
+} from "./hostHooks";
 export type { WasmBuildReason, WasmBuildSelection, WasmBuildVariant } from "./wasmBuild";

@@ -42,6 +42,7 @@ import {
   DEFAULT_FRAME_INTERVAL_MS,
   DEFAULT_TRIGGER_P95_MS,
   FRAME_BUFFER_BUDGET_BYTES,
+  MAX_LOOKAHEAD_MS,
   RollingP95,
   alignToFrames,
   chooseSlotSize,
@@ -55,6 +56,13 @@ import {
   type SlotSize,
 } from "./lookahead/lookaheadSizing";
 import { DelaySchedule } from "./lookahead/delaySchedule";
+import type {
+  DetectionObserver,
+  DetectionTickTrack,
+  LookaheadLengths,
+  OverlayRenderer,
+  OverlayView,
+} from "./hostHooks";
 import { FrameIntervalTracker } from "./lookahead/frameInterval";
 import {
   HIGH_FRAME_RATE_FPS,
@@ -806,6 +814,12 @@ export class VertixEngine {
   private sourceShownAsIs = false;
   private tracksOverlay: HTMLCanvasElement | null = null;
   private tracksOverlayCtx: CanvasRenderingContext2D | null = null;
+  private hostOverlay: HTMLCanvasElement | null = null;
+  private hostOverlayCtx: CanvasRenderingContext2D | null = null;
+  private hostOverlayRenderer: OverlayRenderer | null = null;
+  private readonly detectionObservers = new Set<DetectionObserver>();
+  // Host option: keep detecting and tracking in 16:9 (no layout, no lookahead).
+  private sourceViewDetection = false;
 
   private audioMonitor = new AudioActivityMonitor();
 
@@ -860,6 +874,9 @@ export class VertixEngine {
   private lookaheadUnavailable: LookaheadUnavailableReason | null = null;
   // Current (target) length, whole frames, and the frame interval it was computed with.
   private lookaheadLengthMs = 0;
+  // The host's minimum lookahead length (setMinimumLookaheadMs), and the length the engine itself would use.
+  private minimumLookaheadMs: number | null = null;
+  private baseLookaheadLengthMs = 0;
   private delayFrames = 0;
   private lengthIntervalSec: number | null = null;
   // What audio and video actually follow: lookaheadLengthMs, or a ramp towards it.
@@ -1079,6 +1096,58 @@ export class VertixEngine {
     this.tracksOverlayCtx = null;
   }
 
+  /**
+   * Calls `renderer` after every frame drawn on the output, with `canvas`
+   * (laid exactly over the output by the host) sized like the output and
+   * cleared. The output itself is never drawn on. Pass nulls to stop.
+   */
+  setOverlayRenderer(canvas: HTMLCanvasElement | null, renderer: OverlayRenderer | null): void {
+    if (this.hostOverlay && this.hostOverlay !== canvas) {
+      this.hostOverlayCtx?.clearRect(0, 0, this.hostOverlay.width, this.hostOverlay.height);
+    }
+    if (canvas !== this.hostOverlay) this.hostOverlayCtx = null;
+    this.hostOverlay = renderer ? canvas : null;
+    this.hostOverlayRenderer = canvas ? renderer : null;
+  }
+
+  /** Follows every detection (see DetectionObserver). Returns the function that stops it. */
+  observeDetections(observer: DetectionObserver): () => void {
+    this.detectionObservers.add(observer);
+    return () => this.detectionObservers.delete(observer);
+  }
+
+  /**
+   * Keeps face detection and tracking running in 16:9, for a host overlay:
+   * detection ticks reach DetectionObservers, but nothing is laid out and
+   * lookahead stays off in 16:9. Off by default.
+   */
+  setSourceViewDetection(enabled: boolean): void {
+    if (enabled === this.sourceViewDetection) return;
+    this.sourceViewDetection = enabled;
+    if (this.mode === "16:9") this.resetTrackingState();
+  }
+
+  /**
+   * A lower bound for the lookahead length, in ms (capped at
+   * MAX_LOOKAHEAD_MS), for a host that needs the output further behind the
+   * decoded frame. Null removes it: the length is then exactly the
+   * engine's own. A running lookahead moves to the new length by a ramp.
+   */
+  setMinimumLookaheadMs(ms: number | null): void {
+    const minimum = ms !== null && Number.isFinite(ms) && ms > 0 ? ms : null;
+    if (minimum === this.minimumLookaheadMs) return;
+    this.minimumLookaheadMs = minimum;
+    if (this.lookaheadLengthMs > 0) this.refreshLookahead("ramp");
+  }
+
+  getLookaheadLengths(): LookaheadLengths {
+    return {
+      lengthMs: this.lookaheadLengthMs,
+      baseLengthMs: this.lookaheadLengthMs > 0 ? this.baseLookaheadLengthMs : 0,
+      minimumMs: this.minimumLookaheadMs,
+    };
+  }
+
   /** Switches how a panel is recognised (see PanelVariant), for A/B measurement; resets tracking like a seek. */
   setPanelVariant(variant: PanelVariant): void {
     this.planner.setPanelVariant(variant);
@@ -1115,6 +1184,11 @@ export class VertixEngine {
   /** 9:16 on a landscape source: the only case with detection, crops and lookahead. */
   private get reframing(): boolean {
     return this.mode === "9:16" && !this.sourceShownAsIs;
+  }
+
+  /** 16:9 on a landscape source with setSourceViewDetection(true): detection and tracking only. */
+  private get detectsInSourceView(): boolean {
+    return this.sourceViewDetection && this.mode === "16:9" && !this.sourceShownAsIs;
   }
 
   private get lookaheadEnabled(): boolean {
@@ -1517,7 +1591,10 @@ export class VertixEngine {
       this.triggerLatency.p95() ?? DEFAULT_TRIGGER_P95_MS,
       (intervalSec * 1000) / playbackRate
     );
-    return alignToFrames(lengthMs, intervalSec, playbackRate);
+    const base = alignToFrames(lengthMs, intervalSec, playbackRate);
+    this.baseLookaheadLengthMs = base.lengthMs;
+    if (this.minimumLookaheadMs === null || this.minimumLookaheadMs <= lengthMs) return base;
+    return alignToFrames(Math.min(MAX_LOOKAHEAD_MS, this.minimumLookaheadMs), intervalSec, playbackRate);
   }
 
   /** Once this build has enough warm detections, the measured length replaces the stored or default one, by a ramp. */
@@ -1617,7 +1694,7 @@ export class VertixEngine {
   }
 
   /** Where each part of the source is drawn on the output: the panes, or the whole fitted frame (B-roll, 16:9). */
-  private overlayViews(outW: number, outH: number): { source: PaneRect; dest: PaneRect }[] {
+  private overlayViews(outW: number, outH: number): OverlayView[] {
     const { w: srcW, h: srcH } = this.srcDims;
     if (this.mode === "16:9") {
       return [{ source: { x: 0, y: 0, w: srcW, h: srcH }, dest: { x: 0, y: 0, w: outW, h: outH } }];
@@ -1695,6 +1772,7 @@ export class VertixEngine {
     if (sharedWorkerReady && sharedWorker) {
       this.detectionInFlight = true;
       this.lastDispatchedDetectionSec = mediaTimeSec;
+      this.notifyDetectionFrame(source, mediaTimeSec);
       const generation = this.detectionRequestGeneration;
       const requestId = nextDetectionRequestId++;
       let bitmapReadyAt = 0;
@@ -1803,6 +1881,7 @@ export class VertixEngine {
       this.ensureWasm();
       if (!this.engine) return;
       this.lastDispatchedDetectionSec = mediaTimeSec;
+      this.notifyDetectionFrame(source, mediaTimeSec);
       this.faceCtx.drawImage(source, 0, 0, FACE_W, FACE_H);
       const drawnAt = probe ? performance.now() : 0;
       const faceImageData = this.faceCtx.getImageData(0, 0, FACE_W, FACE_H);
@@ -1874,6 +1953,11 @@ export class VertixEngine {
     triggeredByCut = false
   ): void {
     const detections = unpackDetections(facesFlat);
+    if (!this.reframing && this.sourceViewDetection) {
+      if (this.detectsInSourceView)
+        this.trackInSourceView(detections.faces, sceneCut, mediaTimeSec, srcW, srcH, cropW, cropH);
+      return;
+    }
     this.lastSceneCut = sceneCut;
     this.lastDetectedFaceCount = detections.faces.length;
     this.lastSkinRejectedFaces = detections.skinRejected;
@@ -1917,6 +2001,7 @@ export class VertixEngine {
           ? "localised"
           : "tick";
     this.decideLayout(decisionSec, key, stableKey, cutSource, snapWithoutCut, srcW, srcH, cropW, cropH, plan);
+    this.notifyDetectionTick(mediaTimeSec, srcW, srcH, sceneCut.isCut ? decisionSec : null);
     this.benchmarkProbe?.recordTracking(
       trackerMs,
       plan.foregroundCount,
@@ -1965,6 +2050,44 @@ export class VertixEngine {
           : this.metrics.confidenceHistory,
     };
     this.emitMetrics();
+  }
+
+  /** 16:9 with setSourceViewDetection(true): tracks the faces for DetectionObservers; no layout decision, no metrics. */
+  private trackInSourceView(
+    faces: FaceBox[],
+    sceneCut: SceneCutScores,
+    mediaTimeSec: number,
+    srcW: number,
+    srcH: number,
+    cropW: number,
+    cropH: number
+  ): void {
+    this.planner.plan(faces, null, mediaTimeSec, sceneCut.isCut, { srcW, srcH, outW: cropW, outH: cropH });
+    this.notifyDetectionTick(mediaTimeSec, srcW, srcH, sceneCut.isCut ? mediaTimeSec : null);
+  }
+
+  private notifyDetectionFrame(source: HTMLVideoElement | OffscreenCanvas, mediaTimeSec: number): void {
+    for (const observer of this.detectionObservers) observer.onFrame?.(source, mediaTimeSec);
+  }
+
+  private notifyDetectionTick(mediaTimeSec: number, srcW: number, srcH: number, cutAtSec: number | null): void {
+    if (this.detectionObservers.size === 0) return;
+    const tracks: DetectionTickTrack[] = [];
+    for (const t of this.planner.tracker.tracks) {
+      if (!t.visible) continue;
+      const box = t.lastDetection;
+      tracks.push({
+        id: t.id,
+        confirmed: t.confirmed,
+        foreground: t.foreground,
+        cx: box.cx,
+        cy: box.cy,
+        w: box.w,
+        h: box.h,
+      });
+    }
+    const tick = { mediaTimeSec, srcW, srcH, tracks, cutAtSec };
+    for (const observer of this.detectionObservers) observer.onTick?.(tick);
   }
 
   /** Turns one detection into a LayoutDecision for the frame at `mediaTimeSec`, and queues it for display. */
@@ -2225,6 +2348,11 @@ export class VertixEngine {
         } else {
           this.benchmarkProbe?.recordSkippedDetection();
         }
+      }
+    } else if (this.detectsInSourceView) {
+      this.frameCounter += 1;
+      if (this.frameCounter % FACE_DETECT_INTERVAL === 0 && !this.detectionInFlight) {
+        this.dispatchDetection(video, metadata.mediaTime, srcW, srcH, cropW, cropH);
       }
     }
     const sourceW = source instanceof OffscreenCanvas ? source.width : srcW;
@@ -2808,5 +2936,22 @@ export class VertixEngine {
 
     if (this.skinRejectionOverlay) this.drawSkinRejectionOverlay(this.skinRejectionOverlay, targetW, targetH);
     if (this.tracksOverlay) this.drawTracksOverlay(this.tracksOverlay, targetW, targetH);
+    if (this.hostOverlay && this.hostOverlayRenderer)
+      this.drawHostOverlay(this.hostOverlay, targetW, targetH, frameMediaTimeSec);
+  }
+
+  private drawHostOverlay(overlay: HTMLCanvasElement, outW: number, outH: number, mediaTimeSec: number): void {
+    if (overlay.width !== outW || overlay.height !== outH) {
+      overlay.width = outW;
+      overlay.height = outH;
+      this.hostOverlayCtx = null;
+    }
+    this.hostOverlayCtx ??= overlay.getContext("2d");
+    const ctx = this.hostOverlayCtx;
+    if (!ctx) return;
+    ctx.clearRect(0, 0, outW, outH);
+    const { w: srcW, h: srcH } = this.srcDims;
+    const views = this.sourceShownAsIs ? [] : this.overlayViews(outW, outH);
+    this.hostOverlayRenderer!({ ctx, width: outW, height: outH, mediaTimeSec, srcW, srcH, views });
   }
 }
