@@ -40,3 +40,5 @@ jobs:
       - run: npm run format:check
       - run: npm test
       - run: npm run build
+      # The library (src/core) must not contain the face mesh demo's MediaPipe code or assets.
+      - run: npm run check:library
