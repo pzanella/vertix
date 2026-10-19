@@ -367,9 +367,32 @@ Each clip result adds:
 - **JSON**: `{ tool, schemaVersion, config, environment, wasmBuildComparison,
 lookaheadComparison, precisionWarnings, results[] }`. Each result contains `summary` and `raw`,
   and `raw` holds column arrays of every sample.
-  - `schemaVersion` is 6. Every v5, v4 and v3 field is still there with
+  - `schemaVersion` is 7. Every v6, v5, v4 and v3 field is still there with
     the same meaning. Every v2 field is too, except
     `environment.wasmBuiltWithSimd` (see [Environment info](#environment-info)).
+  - New in v7: `results[].extensions`, host measurements recorded with a run
+    (`BenchmarkClipExtension`), absent when there were none. The demo app
+    fills `extensions.faceMesh` only while its "Face mesh" switch is on:
+    - `landmark`: `perFaceMs` (Face Landmarker time per face, in its
+      worker), `perTickMs` (crops sent until meshes back), `resultAgeMs`
+      (frame sent to detection until meshes back), each a summary with
+      p50/p95; `checkedTicks`, `skippedTicks` (the previous check was still
+      running), `frameMismatches`, `facesPerCheckedTick`, `noMeshShare`
+      (checked faces without a mesh: turned heads), `workerRestarts`.
+    - `drawMs`: overlay draw time per displayed frame.
+    - `frames`: `displayed`, and the share of displayed frames whose least
+      smooth mesh was `interpolated`, `stepped` or `held`, or that showed
+      none (`empty`).
+    - `flickerEventsPerMinute`: a track's mesh appearing or disappearing on
+      screen, per minute of displayed media time.
+    - `lookahead`: `{ lengthMs, baseLengthMs, minimumMs }` at the end of the
+      run: the length with the mesh's minimum, without it, and the minimum.
+    - `init`: `{ simd, downloadMs, loadMs, assets[] }` (assets with
+      transfer and decoded bytes; transfer is 0 from the HTTP cache).
+    - `wasmMemoryBytes`: the face mesh worker's WASM heap.
+    - `blockedRequests`: `{ count, hosts }`, requests to other origins the
+      face mesh worker's network guard stopped (MediaPipe's usage metrics).
+    Warm-up seconds are excluded like everywhere else.
   - New in v6: `failures` at the top level, one entry per run or step that
     failed (empty when all completed). A failed step is recorded and the
     suite moves on to the next one; only Stop ends it early. Each entry:

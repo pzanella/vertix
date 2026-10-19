@@ -85,6 +85,9 @@ manual pixel copying.
   drops back to the picker without a page reload.
 - **Responsive layout** — works down to a phone-sized screen, with the
   analytics panel moving above the video and tucking away behind a toggle.
+- **Face mesh (demo)** — an optional overlay that draws a face mesh on the
+  recognised faces, in both views. Visual only; see [Face mesh
+  demo](#face-mesh-demo).
 
 ## Architecture
 
@@ -256,6 +259,7 @@ Sourced from [Pexels](https://www.pexels.com/), free to use under the
 | `npm run compare:wasm` | Check that both WASM builds give the same detections (needs ffmpeg) |
 | `npm run build:worker` | Rebuild the worker bundles with esbuild                 |
 | `npm test`             | Run the unit tests (Vitest)                            |
+| `npm run check:library` | Check that the library build contains nothing of the face mesh demo (after `build:worker`) |
 
 ## How It Works
 
@@ -343,6 +347,56 @@ tiny SIMD module and loads only the matching build, in the detection worker
 and in the main-thread fallback alike. Both builds return the same
 detections; `npm run compare:wasm` verifies that on the sample clips. The
 benchmark records which build ran (see [`docs/benchmark.md`](docs/benchmark.md)).
+
+## Face mesh demo
+
+The dashboard's **Face mesh (demo)** switch draws a face mesh over the
+recognised faces, for presentations. It is part of the demo app
+(`src/features/faceMesh/`), not of the library: the library only offers
+generic hooks (see [`src/core/README.md`](src/core/README.md)), and nothing
+Vertix decides depends on the mesh.
+
+- **What runs**: [MediaPipe Face Landmarker](https://ai.google.dev/edge/mediapipe/solutions/vision/face_landmarker)
+  (`@mediapipe/tasks-vision` 1.1.1, CPU, one face per crop) in its own
+  worker, on a square crop around each confirmed foreground face of every
+  detection tick (at most 3, largest first).
+- **Smoothness**: each mesh point is interpolated between the two ticks
+  around the frame on screen. To have the next tick's mesh in time, the
+  switch raises the lookahead on desktop to tick interval + mesh latency +
+  one frame + 30 ms (about 0.35 s), measured, not fixed. Without enough
+  lookahead (lookahead off, 16:9, phones) the mesh moves in steps. It is
+  never interpolated or held across a scene cut.
+- **Turned heads**: the model finds no mesh beyond about 80° of head turn.
+  The last mesh is held for 0.5 s, then fades out over 0.25 s; a new mesh
+  fades in over 0.15 s.
+- **Loading**: nothing is downloaded until the switch is first turned on;
+  then about 7.5 MB gzip (the SIMD WASM and the model), from this site
+  only. If loading takes more than 30 s or fails, the switch shows the
+  reason and Vertix keeps running as before.
+- **License**: Apache 2.0 for the library and the model; see
+  [`public/face-mesh/NOTICE`](public/face-mesh/NOTICE).
+
+### Privacy and the Content Security Policy
+
+MediaPipe Tasks [sends usage metrics to Google](https://developers.google.com/edge/mediapipe/solutions/tasks#mediapipe_tasks_privacy_notice):
+`@mediapipe/tasks-vision` 1.1.1 posts them to `odml.pa.googleapis.com`
+every 60 seconds. Vertix stops that in two layers:
+
+1. **The page** has a Content Security Policy (a `<meta>` tag in the
+   production build): scripts, styles, fonts, images and workers come from
+   this site only. Media and connections also allow `https:`, so a stream
+   URL you paste (Shaka loads manifests and segments with `fetch` and plays
+   them through `blob:` MSE URLs) keeps working.
+2. **The face mesh worker** has a stricter policy of its own,
+   `connect-src 'self'`: it is created from a `blob:` URL inside a hidden
+   page, [`public/face-mesh/host.html`](public/face-mesh/host.html), and so
+   inherits that page's policy rather than the app's. A network guard in
+   the worker also stops any request to another origin before it is made;
+   the dashboard shows how many it stopped.
+
+The app's fonts are self-hosted, so with the switch on the page makes no
+request outside this site except the video URLs you load yourself.
+`node scripts/check-face-mesh.mjs` checks this in Chrome.
 
 ## Known Limitations
 
@@ -450,3 +504,8 @@ The bundled face-detection model
 ([UltraFace](https://github.com/Linzaer/Ultra-Light-Fast-Generic-Face-Detector-1MB))
 is also MIT-licensed; see
 [wasm/src/models/ATTRIBUTION.md](wasm/src/models/ATTRIBUTION.md).
+
+The face mesh demo's MediaPipe library and model are Apache-2.0-licensed
+(Copyright Google LLC); see [public/face-mesh/NOTICE](public/face-mesh/NOTICE).
+The fonts are from [Fontsource](https://fontsource.org) under the SIL Open
+Font License 1.1.
