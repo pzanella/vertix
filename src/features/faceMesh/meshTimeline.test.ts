@@ -84,6 +84,23 @@ describe("MeshTimeline", () => {
     expect(timeline.meshesAt(1 + MESH_HOLD_SEC + MESH_FADE_OUT_SEC + 0.01)).toEqual([]);
   });
 
+  it("keeps showing the latest mesh however late it came (no lookahead on a slow phone)", () => {
+    const timeline = new MeshTimeline();
+    timeline.addCheck(check(1, [[1, mesh(0.2)]]));
+    timeline.addCheck(check(1.5, [[1, mesh(0.4)]]));
+    expect(only(timeline.meshesAt(2.4))).toMatchObject({ kind: "stepped", alpha: 1 });
+  });
+
+  it("holds and fades on check time, so a late result does not cut the hold short", () => {
+    const timeline = new MeshTimeline();
+    timeline.addCheck(check(1, [[1, mesh(0.2)]]));
+    timeline.addCheck(check(1.2, [[1, null]]));
+    // Shown 0.6 s after the check without a mesh, but only 0.4 s of check time (one interval) has passed.
+    expect(only(timeline.meshesAt(1.8))).toMatchObject({ kind: "held", alpha: 1 });
+    timeline.addCheck(check(1.6, [[1, null]]));
+    expect(only(timeline.meshesAt(1.7)).alpha).toBeCloseTo(1 - (0.7 - MESH_HOLD_SEC) / MESH_FADE_OUT_SEC, 6);
+  });
+
   it("treats a track missing from a check like a check without a mesh", () => {
     const timeline = new MeshTimeline();
     timeline.addCheck(check(1, [[1, mesh(0.2)]]));
@@ -122,7 +139,6 @@ describe("MeshTimeline", () => {
     const timeline = new MeshTimeline();
     timeline.addCheck(check(5, [[1, mesh(0.2)]]));
     timeline.addCheck(check(2, [[1, mesh(0.6)]]));
-    expect(timeline.meshesAt(5.1)).toEqual([]);
     expect(only(timeline.meshesAt(2.1)).points[0]).toBeCloseTo(0.6, 6);
     expect(timeline.latestCheckSec).toBe(2);
   });

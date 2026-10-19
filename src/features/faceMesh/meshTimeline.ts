@@ -76,10 +76,18 @@ export class MeshTimeline {
     if (current < 0) return [];
     const next = shot[current + 1] ?? null;
 
+    // Hold and fade run on check time: a result that comes late (a slow
+    // phone, no lookahead) does not age the mesh. Between checks the clock
+    // advances with the frame on screen, for at most one check interval.
+    const currentSec = shot[current].mediaTimeSec;
+    const checkInterval = current > 0 ? currentSec - shot[current - 1].mediaTimeSec : 0;
+    const clockSec = currentSec + Math.min(shownSec - currentSec, checkInterval);
+
     const trackIds = new Set<number>();
-    for (let i = current; i >= 0 && shownSec - shot[i].mediaTimeSec <= MESH_HOLD_SEC + MESH_FADE_OUT_SEC; i--) {
+    for (let i = current; i >= 0 && clockSec - shot[i].mediaTimeSec <= MESH_HOLD_SEC + MESH_FADE_OUT_SEC; i--) {
       for (const [id, mesh] of shot[i].meshes) if (mesh) trackIds.add(id);
     }
+    for (const [id, mesh] of shot[current].meshes) if (mesh) trackIds.add(id);
 
     const shown: ShownMesh[] = [];
     for (const trackId of trackIds) {
@@ -102,7 +110,7 @@ export class MeshTimeline {
       }
       const last = this.lastMesh(shot, current, trackId);
       if (!last) continue;
-      const age = shownSec - last.mediaTimeSec;
+      const age = clockSec - last.mediaTimeSec;
       const alpha = age <= MESH_HOLD_SEC ? 1 : 1 - (age - MESH_HOLD_SEC) / MESH_FADE_OUT_SEC;
       if (alpha > 0) shown.push({ trackId, points: last.mesh, alpha, kind: "held" });
     }
