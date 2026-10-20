@@ -142,8 +142,10 @@ for (const run of result.runs) {
   const lastT = full[full.length - 1] ?? 0;
   const segmentsForClip: Segment[] = labelled ?? [{ startSec: 0, endSec: lastT + 1, shot: "close" }];
   const { segments, excluded } = snapLabels(segmentsForClip, cutTimes);
-  const predicted = replay(snapshots, rules);
-  const mismatches = engineShot.filter((shot, i) => shot !== null && shot !== predicted[i]).length;
+  const replayed = replay(snapshots, rules);
+  const predicted = snapshots.map((s, i) => s.shot ?? replayed[i]);
+  const mismatches = engineShot.filter((shot, i) => shot !== null && shot !== replayed[i]).length;
+  const sameHoldAfterCut = replay(snapshots, { ...rules, cutHoldSec: rules.shotHoldSec });
 
   for (const shotName of ["close", "wide", "none", "graphics"]) {
     const sizes = snapshots
@@ -202,6 +204,21 @@ for (const run of result.runs) {
     };
   });
   const firstErrors = cutFirst.filter((c) => c !== null && !matches(c.label, c.first as ShotType)).length;
+  const firstSecondWrongPct = (shotsAt: ShotType[]) => {
+    let wrongSec = 0;
+    let totalSec = 0;
+    for (const cutSec of cutTimes) {
+      for (let i = 0; i < snapshots.length; i++) {
+        const t = snapshots[i].t;
+        const seg = segmentAt(segments, t);
+        if (t < cutSec || t >= cutSec + 1 || !seg || isExcluded(excluded, t)) continue;
+        const dt = i + 1 < snapshots.length ? snapshots[i + 1].t - t : 0;
+        totalSec += dt;
+        if (!matches(labelled ? seg.shot : "close", shotsAt[i])) wrongSec += dt;
+      }
+    }
+    return totalSec > 0 ? Number(((100 * wrongSec) / totalSec).toFixed(1)) : null;
+  };
 
   const row = {
     clip,
@@ -213,6 +230,8 @@ for (const run of result.runs) {
     layoutChanges: run.layoutChanges,
     cutsFound: cutTimes.length,
     firstSampleErrors: `${firstErrors}/${cutFirst.filter((c) => c !== null).length}`,
+    firstSecondWrongPct: firstSecondWrongPct(predicted),
+    firstSecondWrongPctWithoutCutHold: firstSecondWrongPct(sameHoldAfterCut),
     engineReplayMismatches: mismatches,
   };
   perClip.push(row);
@@ -229,7 +248,7 @@ console.log("Thresholds:", JSON.stringify(rules));
 console.table(perClip);
 console.table(distributionRows);
 console.log(
-  `Tuning accuracy (labelled seconds, ${TUNING_CLIPS.join(", ")}): ${
+  `Tuning accuracy (labelled seconds, tuning set: ${TUNING_CLIPS.join(", ")}): ${
     tuningTotal > 0 ? ((100 * tuningCorrect) / tuningTotal).toFixed(1) : "n/a"
   }%`
 );

@@ -10,7 +10,7 @@ import {
   type TrackSnapshot,
 } from "./tracking/layoutPlanner";
 import type { PanelVariant } from "./tracking/panelDetector";
-import { displayedSourceSize, fittedOutputSize, isShownAsIs } from "./sourceAspect";
+import { displayedSourceSize, fittedOutputSize, isShownAsIs, wholeFrameRect } from "./sourceAspect";
 import {
   computeSpeakerLayout,
   faceVisibleFraction,
@@ -716,9 +716,8 @@ function drawFitFrame(
   blurCtx.filter = "none";
   ctx.drawImage(blurCanvas, Math.round((outW - bgW) / 2), Math.round((outH - bgH) / 2), bgW, bgH);
 
-  const fitScale = outW / srcW;
-  const fgH = Math.round(srcH * fitScale);
-  ctx.drawImage(video, 0, Math.round((outH - fgH) / 2), outW, fgH);
+  const frame = wholeFrameRect(srcW, srcH, outW, outH);
+  ctx.drawImage(video, frame.x, frame.y, frame.w, frame.h);
 }
 
 /** A framing to draw from the current frame: the fitted full frame (B-roll), or crops into panes. */
@@ -1710,13 +1709,7 @@ export class VertixEngine {
       return [{ source: { x: 0, y: 0, w: srcW, h: srcH }, dest: { x: 0, y: 0, w: outW, h: outH } }];
     }
     if (this.displayedSpeakerCount === 0) {
-      const fittedHeight = Math.round(srcH * (outW / srcW));
-      return [
-        {
-          source: { x: 0, y: 0, w: srcW, h: srcH },
-          dest: { x: 0, y: Math.round((outH - fittedHeight) / 2), w: outW, h: fittedHeight },
-        },
-      ];
+      return [{ source: { x: 0, y: 0, w: srcW, h: srcH }, dest: wholeFrameRect(srcW, srcH, outW, outH) }];
     }
     return this.targetPanes.map((p, i) => ({ source: this.smoothedPanes[i], dest: p.pane.dest }));
   }
