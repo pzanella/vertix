@@ -381,6 +381,8 @@ export interface BenchmarkClipResult {
   resources?: { start: ResourceSnapshot | null; end: ResourceSnapshot | null };
   /** Schema v6: set when the run stopped with an error; the rest is what was recorded until then. */
   failure?: BenchmarkFailure;
+  /** Schema v7: host measurements recorded with the run (BenchmarkClipExtension), by key; absent when there were none. */
+  extensions?: Record<string, unknown>;
   summary: BenchmarkClipSummary;
   raw: BenchmarkClipRaw;
 }

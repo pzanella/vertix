@@ -1,0 +1,18 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <!--
+      Hosts the face mesh worker (see src/features/faceMesh/FaceMeshClient.ts).
+      The worker is created here from a blob: URL, so it inherits this policy
+      instead of the app page's: it may load scripts and fetch from this
+      origin only. Nothing else runs on this page.
+    -->
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; worker-src blob:; connect-src 'self'; base-uri 'none'; form-action 'none'"
+    />
+    <title>Vertix face mesh worker host</title>
+  </head>
+  <body></body>
+</html>

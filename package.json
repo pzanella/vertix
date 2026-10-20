@@ -20,6 +20,7 @@
     "build:wasm": "node scripts/build-wasm.mjs",
     "build:worker": "node scripts/build-worker.mjs",
     "compare:wasm": "node scripts/compare-wasm-builds.mjs",
+    "check:library": "node scripts/check-library-bundle.mjs",
     "make:bench-clips": "node scripts/make-cut-clips.mjs --bench",
     "make:aspect-clips": "node scripts/make-cut-clips.mjs --aspect",
     "lint": "eslint .",
@@ -29,6 +30,10 @@
     "test": "vitest run"
   },
   "dependencies": {
+    "@fontsource/ibm-plex-mono": "5.3.0",
+    "@fontsource/ibm-plex-sans": "5.3.0",
+    "@fontsource/space-grotesk": "5.3.0",
+    "@mediapipe/tasks-vision": "1.1.1",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
     "shaka-player": "^5.2.7"

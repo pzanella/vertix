@@ -7,6 +7,8 @@ interface CanvasProps {
   skinRejectionOverlayRef?: (canvas: HTMLCanvasElement | null) => void;
   /** When set, a second transparent overlay canvas, for the engine's face tracks ("Show tracks"). */
   tracksOverlayRef?: (canvas: HTMLCanvasElement | null) => void;
+  /** When set, a third overlay canvas, for the "Face mesh" demo. */
+  faceMeshOverlayRef?: (canvas: HTMLCanvasElement | null) => void;
   mode: ReframeMode;
   /** Rendered absolutely-positioned on top of the video (e.g. StreamHealthOverlay) — a slot, like Controls' `middle`, so passing it in doesn't tie this component's re-render to state that has nothing to do with the canvas itself. */
   overlay?: ReactNode;
@@ -21,6 +23,7 @@ export const Canvas = memo(function Canvas({
   canvasRef,
   skinRejectionOverlayRef,
   tracksOverlayRef,
+  faceMeshOverlayRef,
   mode,
   overlay,
 }: CanvasProps) {
@@ -40,6 +43,13 @@ export const Canvas = memo(function Canvas({
       {tracksOverlayRef && (
         <canvas
           ref={tracksOverlayRef}
+          aria-hidden="true"
+          className={`absolute inset-0 m-auto pointer-events-none ${sizing}`}
+        />
+      )}
+      {faceMeshOverlayRef && (
+        <canvas
+          ref={faceMeshOverlayRef}
           aria-hidden="true"
           className={`absolute inset-0 m-auto pointer-events-none ${sizing}`}
         />

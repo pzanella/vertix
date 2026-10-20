@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useId, useState } from "react";
-import type { BenchmarkConfig, VertixEngine } from "../../core";
+import type { BenchmarkClipExtension, BenchmarkConfig, VertixEngine } from "../../core";
 import { DEFAULT_BENCHMARK_CONFIG } from "./benchmarkConfig";
 import { useBenchmark, type BenchmarkStage } from "../../hooks/useBenchmark";
 import { benchmarkVerdict, VERDICT_LABEL, VERDICT_TONE, type BenchmarkTone } from "./benchmarkOutcome";
@@ -16,6 +16,7 @@ interface BenchmarkLauncherProps {
   /** Whether a video is loaded: the gauge only shows then (or while a run or its panel is still active). */
   hasSource: boolean;
   onRunningChange: (running: boolean) => void;
+  clipExtension?: BenchmarkClipExtension | null;
 }
 
 const PROGRESS_POLL_MS = 250;
@@ -49,13 +50,21 @@ function useRunProgress(
  * stays visible, the gauge tracks progress, and the panel reopens on the
  * results once the run ends.
  */
-export function BenchmarkLauncher({ getEngine, videoRef, load, hasSource, onRunningChange }: BenchmarkLauncherProps) {
+export function BenchmarkLauncher({
+  getEngine,
+  videoRef,
+  load,
+  hasSource,
+  onRunningChange,
+  clipExtension,
+}: BenchmarkLauncherProps) {
   const [config, setConfig] = useState<BenchmarkConfig>(DEFAULT_BENCHMARK_CONFIG);
   const { status, stage, report, error, runSuite, runCurrentClip, cancel, downloadJson, downloadCsv } = useBenchmark({
     config,
     getEngine,
     videoRef,
     load,
+    clipExtension,
   });
   const running = status === "running";
   const { overall, stageFraction } = useRunProgress(running, stage, videoRef);

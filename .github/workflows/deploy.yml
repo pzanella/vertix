@@ -61,6 +61,7 @@ jobs:
       # The licensed clip list (.env.local, VERTIX_LOCAL_CLIPS=1) is for
       # local builds only: fail if it ever ends up in the deployed bundle.
       - run: node scripts/check-no-local-clips.mjs dist
+      - run: npm run check:library
 
       - uses: actions/upload-pages-artifact@v3
         with:

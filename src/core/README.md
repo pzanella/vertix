@@ -69,6 +69,10 @@ engine.destroy();
 | `getLookaheadStatus()` | Whether lookahead runs, its length, why it is unavailable, buffer size and memory. |
 | `setFrameRateHint(fps)` | Optional: the source's frame rate when the host knows it (e.g. Shaka's active variant), so the lookahead length and buffer are right from the first frame. Measured intervals take over; `null` clears it. |
 | `getDisplayedMediaTime()` | Media time of the frame on screen (behind `video.currentTime` by the lookahead while playing). |
+| `observeDetections(observer)` | Host hook: `onFrame(source, mediaTimeSec)` when a frame goes to detection (copy what you need during the call), then `onTick({ mediaTimeSec, srcW, srcH, tracks, cutAtSec })` with the tracks of that detection and any cut it found. Returns the function that stops it. No observer, no extra work. |
+| `setOverlayRenderer(canvas, renderer)` | Host hook: after every output frame, clears `canvas` (laid over the output by the host), sizes it like the output and calls `renderer({ ctx, width, height, mediaTimeSec, srcW, srcH, views })`, where `views` map source pixels to output pixels (each 9:16 pane, the fitted frame in B-roll, or the whole 16:9 frame). Never draws on the output. `(null, null)` stops it. |
+| `setSourceViewDetection(enabled)` | Keeps detection and tracking running in 16:9 for a host overlay; no layout, no lookahead in 16:9. Off by default. |
+| `setMinimumLookaheadMs(ms \| null)` / `getLookaheadLengths()` | A host minimum for the lookahead length (capped at 600 ms), applied by a ramp; `null` gives exactly the engine's own length. `getLookaheadLengths()` returns the applied length, the engine's own (`baseLengthMs`) and the minimum. |
 | `setBenchmarkProbe(probe \| null)` | Benchmark mode only: report per-frame and per-detection timings to a `BenchmarkProbe` (e.g. a `BenchmarkRecorder`). `null` (the default) turns it off. See `docs/benchmark.md`. |
 
 ## Files in here
@@ -95,6 +99,10 @@ engine.destroy();
   buffers), `stats.ts` (pure percentile/summary functions), environment
   probe, JSON/CSV report builders, and `runBenchmarkClip` /
   `runUnrecordedWarmup`. Nothing here runs unless a probe is attached.
+- **`hostHooks.ts`** — the types of the host hooks above. They carry no
+  knowledge of what a host does with them (the demo app's face mesh lives
+  in `src/features/faceMesh/`; `npm run check:library` fails if the
+  library output mentions it).
 - **`index.ts`** — the public export surface.
 
 ## Design notes

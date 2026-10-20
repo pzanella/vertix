@@ -38,7 +38,7 @@ export interface LookaheadComparison {
 
 export interface BenchmarkReport {
   tool: "vertix-benchmark";
-  schemaVersion: 6;
+  schemaVersion: 7;
   config: BenchmarkConfig;
   environment: BenchmarkEnvironment;
   wasmBuildComparison: WasmBuildComparison;
@@ -92,7 +92,7 @@ export function buildBenchmarkReport(
 ): BenchmarkReport {
   return {
     tool: "vertix-benchmark",
-    schemaVersion: 6,
+    schemaVersion: 7,
     config,
     environment,
     wasmBuildComparison,

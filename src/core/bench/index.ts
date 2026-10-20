@@ -46,7 +46,7 @@ export type {
 } from "./resourceStats";
 export { runSuiteSteps } from "./suiteRunner";
 export type { StepContext, SuiteOutcome, SuiteStepRunner } from "./suiteRunner";
-export type { BenchmarkClipOptions, ClipPlaybackOptions } from "./runClip";
+export type { BenchmarkClipExtension, BenchmarkClipOptions, ClipPlaybackOptions } from "./runClip";
 export * from "./stats";
 export { buildSuitePlan, wasmBuildSequenceForClip } from "./suitePlan";
 export type { BenchmarkWasmBuild, SuiteStep, WasmBuildRunOrder } from "./suitePlan";
