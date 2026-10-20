@@ -1,5 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { ruleTimeAndSwitches, TrackingRecorder, type RuleEvent } from "./trackingStats";
+import {
+  gridTimeOnWideShots,
+  ruleTimeAndSwitches,
+  shotTimeAndChanges,
+  TrackingRecorder,
+  type RuleEvent,
+  type ShotEvent,
+} from "./trackingStats";
 
 const event = (nowMs: number, rule: RuleEvent["rule"], subject = -1, cut = false): RuleEvent => ({
   nowMs,
@@ -48,5 +55,39 @@ describe("TrackingRecorder", () => {
     expect(summary.leftToRightFlips).toBe(1);
     expect(summary.layoutChangesPerMin).toBe(2);
     expect(summary.timeInRulePct.stacked).toBe(50);
+  });
+});
+
+describe("shotTimeAndChanges", () => {
+  const shot = (nowMs: number, type: ShotEvent["shot"]): ShotEvent => ({ nowMs, shot: type });
+
+  it("splits the measured window between shot types and counts changes inside it", () => {
+    const events = [shot(0, "close"), shot(4000, "wide"), shot(8000, "close")];
+    const { timeInShotPct, changes } = shotTimeAndChanges(events, 2000, 10000);
+    expect(timeInShotPct.close).toBeCloseTo(50);
+    expect(timeInShotPct.wide).toBeCloseTo(50);
+    expect(timeInShotPct.none).toBe(0);
+    expect(changes).toBe(2);
+  });
+
+  it("returns zero shares without a measured window", () => {
+    expect(shotTimeAndChanges([shot(0, "wide")], null, null).timeInShotPct.wide).toBe(0);
+  });
+});
+
+describe("gridTimeOnWideShots", () => {
+  it("counts grid time only where the shot is not close", () => {
+    const rules: RuleEvent[] = [event(0, "broll"), event(1000, "grid"), event(5000, "broll")];
+    const shots: ShotEvent[] = [
+      { nowMs: 0, shot: "close" },
+      { nowMs: 3000, shot: "wide" },
+    ];
+    expect(gridTimeOnWideShots(rules, shots, 0, 6000)).toBe(2000);
+  });
+
+  it("is zero when the whole frame is shown on wide shots", () => {
+    const rules: RuleEvent[] = [event(0, "broll")];
+    const shots: ShotEvent[] = [{ nowMs: 0, shot: "wide" }];
+    expect(gridTimeOnWideShots(rules, shots, 0, 6000)).toBe(0);
   });
 });

@@ -302,6 +302,19 @@ Further limits:
 - **Limits:** times are wall time on displayed frames, so a stalled
   display stretches the rule on screen. Track IDs restart after every cut.
 
+**Shot type (`tracking`, schema v8)**
+
+- `timeInShotPct`: share of measured playback per shot type, in percent:
+  `close` (framed as before), `wide` (faces small in the frame: the whole
+  frame is shown) and `none` (no face: the whole frame). Measured on
+  displayed frames.
+- `shotChangesPerMin`: shot type changes per minute of measured playback.
+- `gridSecOnWideShots`: seconds where the displayed layout was a grid during
+  a `wide` or `none` shot. Whole-frame views never show a grid, so this
+  should be 0.
+- `fullSceneDrawMs`: time to draw one whole-frame (no crop) frame, in ms,
+  summary with p50/p95. Only frames drawn whole are counted.
+
 **Long tasks (`longTasks`)**
 
 - **What it is:** main-thread tasks longer than 50 ms, reported by
@@ -367,7 +380,7 @@ Each clip result adds:
 - **JSON**: `{ tool, schemaVersion, config, environment, wasmBuildComparison,
 lookaheadComparison, precisionWarnings, results[] }`. Each result contains `summary` and `raw`,
   and `raw` holds column arrays of every sample.
-  - `schemaVersion` is 7. Every v6, v5, v4 and v3 field is still there with
+  - `schemaVersion` is 8 (v8 adds the shot-type fields of `tracking`). Every v7, v6, v5, v4 and v3 field is still there with
     the same meaning. Every v2 field is too, except
     `environment.wasmBuiltWithSimd` (see [Environment info](#environment-info)).
   - New in v7: `results[].extensions`, host measurements recorded with a run
