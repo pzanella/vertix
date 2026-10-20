@@ -314,6 +314,11 @@ Further limits:
   should be 0.
 - `fullSceneDrawMs`: time to draw one whole-frame (no crop) frame, in ms,
   summary with p50/p95. Only frames drawn whole are counted.
+- **Known limit:** a mid-distance group of 2–3 faces (largest face about
+  0.15–0.25 of the frame) is treated as close: it keeps the speaker layout
+  and is not shown whole. Licensed clip B (0–17 s, journalist voice-over) is
+  the case seen: about 4 s of it is classified close. No crowd rule and no
+  motion signal are used, so as not to turn 3-speaker close shots wide.
 
 **Long tasks (`longTasks`)**
 
