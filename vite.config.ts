@@ -1,6 +1,6 @@
 import { defineConfig, type Plugin } from "vite";
 import react from "@vitejs/plugin-react";
-import { LOCAL_CLIPS_MARKER, readLocalClips } from "./scripts/local-clips.mjs";
+import { LOCAL_CLIPS_MARKER, localClipMiddleware, readLocalClips } from "./scripts/local-clips.mjs";
 import { PAGE_CONTENT_SECURITY_POLICY } from "./scripts/lib/content-security-policy.mjs";
 
 interface LocalClip {
@@ -33,6 +33,20 @@ function localClips(command: "serve" | "build", mode: string): LocalClip[] {
   return clips;
 }
 
+/** Serves the local clip files by name, in the dev server and in `vite preview` (never in a build). */
+function localClipFiles(command: "serve" | "build", mode: string): Plugin {
+  return {
+    name: "vertix-local-clip-files",
+    apply: "serve",
+    configureServer(server) {
+      if (localClips(command, mode).length > 0) server.middlewares.use(localClipMiddleware(process.cwd()));
+    },
+    configurePreviewServer(server) {
+      if (localClips(command, mode).length > 0) server.middlewares.use(localClipMiddleware(process.cwd()));
+    },
+  };
+}
+
 /** Adds the page's Content Security Policy right after <meta charset>, before any script or stylesheet of the built index.html. */
 function contentSecurityPolicy(): Plugin {
   const charset = '<meta charset="UTF-8" />';
@@ -48,7 +62,7 @@ function contentSecurityPolicy(): Plugin {
 }
 
 export default defineConfig(({ command, mode }) => ({
-  plugins: [react(), contentSecurityPolicy()],
+  plugins: [react(), contentSecurityPolicy(), localClipFiles(command, mode)],
   define: {
     __VERTIX_LOCAL_CLIPS__: JSON.stringify(localClips(command, mode)),
   },

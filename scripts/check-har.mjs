@@ -13,7 +13,11 @@ import { readLocalClips } from "./local-clips.mjs";
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const [harPath, ...rest] = process.argv.slice(2);
 const appHost = rest.find((a) => a.startsWith("--app="))?.slice(6) ?? null;
-const localClipHosts = new Set(readLocalClips(root).map((clip) => new URL(clip.url).host));
+const localClipHosts = new Set(
+  readLocalClips(root)
+    .filter((clip) => /^https?:/i.test(clip.url))
+    .map((clip) => new URL(clip.url).host)
+);
 
 const entries = JSON.parse(readFileSync(harPath, "utf8")).log.entries;
 const counts = new Map();
