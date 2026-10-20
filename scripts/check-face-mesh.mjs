@@ -13,6 +13,10 @@
 //                       (build without VERTIX_LOCAL_CLIPS, so only the
 //                       sample and test clips play). 0 third-party requests
 //                       expected.
+//   --scenario=fullscene  the switch on for a licensed local clip (label from
+//                       .env.local, --clip=<name>, needs a build with
+//                       VERTIX_LOCAL_CLIPS=1): samples the Shot and Layout rows for
+//                       --seconds (default 75) to see the whole-frame views with the mesh.
 //   --scenario=players  the switch on, then every kind of source: a sample,
 //                       an uploaded file, an MP4 URL, a public HLS stream
 //                       and a public DASH stream (Shaka), each in both modes.
@@ -31,6 +35,7 @@ const args = process.argv.slice(2);
 const option = (name) => args.find((arg) => arg.startsWith(`--${name}=`))?.slice(name.length + 3);
 const scenario = option("scenario") ?? "network";
 const seconds = Number(option("seconds") ?? 75);
+const localClip = option("clip") ?? "";
 
 // Public test streams for the players scenario (third-party by design: the page allows https: media).
 const PUBLIC_HLS = "https://test-streams.mux.dev/x36xhzz/x36xhzz.m3u8";
@@ -39,7 +44,7 @@ const PUBLIC_DASH = "https://dash.akamaized.net/akamai/bbb_30fps/bbb_30fps.mpd";
 const PROBE_URL = "https://vertix-csp-probe.invalid/collect";
 
 /** Runs in the app page and drives the UI like a person would. */
-async function runInPage({ scenario, seconds, publicHls, publicDash, probeUrl }) {
+async function runInPage({ scenario, seconds, publicHls, publicDash, probeUrl, localClip }) {
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   const log = (text) => console.log(`[check] ${text}`);
   const waitFor = async (find, what, timeoutMs = 60000) => {
@@ -225,6 +230,22 @@ async function runInPage({ scenario, seconds, publicHls, publicDash, probeUrl })
     result.steps.push({ step: "benchmark panel opened", ok: Boolean(buttonWithText("Run suite")) });
     return result;
   }
+  if (scenario === "fullscene") {
+    // The URL field accepts only links ending in a video extension; the query keeps the route's name-only lookup.
+    await loadUrl(new URL(`local-clips/${localClip}?clip=.mp4`, document.baseURI).href, "the local clip");
+    await faceMeshOn();
+    const shownShots = {};
+    const untilSec = performance.now() + seconds * 1000;
+    while (performance.now() < untilSec) {
+      const key = `${rowValue("Shot")} | ${rowValue("Layout")}`;
+      shownShots[key] = (shownShots[key] ?? 0) + 1;
+      await sleep(500);
+    }
+    result.steps.push({ step: "whole-frame views, face mesh on", shownShots, readout: readout() });
+    await faceMeshOff();
+    return result;
+  }
+
   throw new Error(`unknown scenario ${scenario}`);
 }
 
@@ -241,7 +262,7 @@ try {
   const { value, capture } = await runInHeadlessChrome({
     root,
     pageFunction: runInPage,
-    args: [{ scenario, seconds, publicHls: PUBLIC_HLS, publicDash: PUBLIC_DASH, probeUrl: PROBE_URL }],
+    args: [{ scenario, seconds, publicHls: PUBLIC_HLS, publicDash: PUBLIC_DASH, probeUrl: PROBE_URL, localClip }],
     chromePath: option("chrome") ?? DEFAULT_CHROME,
     headed: args.includes("--headed"),
     productionPreview: true,
