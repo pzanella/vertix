@@ -49,7 +49,8 @@ const clips = [
           name: clip.label,
           url: clip.url,
           fps: null,
-          hls: true,
+          // A file on this server (a local clip) plays from its own URL; streams go through Shaka.
+          hls: !clip.url.startsWith("/"),
           stopAtSec: clip.maxSeconds,
         }))
     : []),
@@ -94,9 +95,22 @@ async function runInPage(clips, variants) {
 
   // Not a BenchmarkRecorder feature: the check collects every track snapshot itself.
   let snapshots = [];
+  // Displayed layout events by media time (video.currentTime at the frame): layout changes and rule changes.
+  let layoutChangeSec = [];
+  let displayedRuleEvents = [];
   const setProbe = engine.setBenchmarkProbe.bind(engine);
   engine.setBenchmarkProbe = (probe) => {
     if (probe) {
+      const recordLayoutChange = probe.recordLayoutChange.bind(probe);
+      probe.recordLayoutChange = (nowMs) => {
+        layoutChangeSec.push(video.currentTime);
+        recordLayoutChange(nowMs);
+      };
+      const recordLayoutRule = probe.recordLayoutRule.bind(probe);
+      probe.recordLayoutRule = (nowMs, rule, subjectTrackId, isCut) => {
+        displayedRuleEvents.push({ t: video.currentTime, rule });
+        recordLayoutRule(nowMs, rule, subjectTrackId, isCut);
+      };
       probe.recordTrackSnapshot = (t, tracks, subject, rule, shot, largest, cut, displayedRule) =>
         snapshots.push({
           t,
@@ -128,6 +142,8 @@ async function runInPage(clips, variants) {
       if (engine.setPanelVariant) engine.setPanelVariant(variant);
       console.log(`[check] ${clip.hls ? "local clip" : clip.name}, panel ${variant}`);
       snapshots = [];
+      layoutChangeSec = [];
+      displayedRuleEvents = [];
       const loadSource = load(clip);
       // Checkouts without stopAtSec support: end the clip by seeking to its end.
       const stopAtEnd = () => {
@@ -161,6 +177,8 @@ async function runInPage(clips, variants) {
           warmup: raw.detections.warmup,
         },
         snapshots,
+        layoutChangeSec,
+        displayedRuleEvents,
       });
     }
   }

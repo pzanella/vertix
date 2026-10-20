@@ -58,6 +58,16 @@ const rules: ShotRules = {
 
 const result = JSON.parse(readFileSync(join(here, `.eval/tracker-check-${resultLabel}.json`), "utf8"));
 
+/** The rule on screen at media time `sec`: the last displayed rule change at or before it (time-based, from the frames). */
+function displayedRuleAt(run: { displayedRuleEvents?: { t: number; rule: string }[] }, sec: number): string | null {
+  let rule: string | null = null;
+  for (const event of run.displayedRuleEvents ?? []) {
+    if (event.t > sec + 1e-6) break;
+    rule = event.rule;
+  }
+  return rule;
+}
+
 function labelOf(clip: string): string {
   return clip.replace(/^local-\d+-/, "").replace(/\.mp4$/, "");
 }
@@ -168,20 +178,31 @@ for (const run of result.runs) {
 
   let labelledSec = 0;
   let correctSec = 0;
-  let wideSec = 0;
-  let wideGridSec = 0;
+  const perLabel: Record<string, { sec: number; correct: number }> = {
+    close: { sec: 0, correct: 0 },
+    wide: { sec: 0, correct: 0 },
+    graphics: { sec: 0, correct: 0 },
+  };
+  let gridOnLabelledWideSec = 0;
   for (let i = 0; i < snapshots.length; i++) {
     const seg = segmentAt(segments, snapshots[i].t);
     if (!seg || isExcluded(excluded, snapshots[i].t)) continue;
     const dt = i + 1 < snapshots.length ? snapshots[i + 1].t - snapshots[i].t : 0;
     const shotName = labelled ? seg.shot : "close";
     labelledSec += dt;
-    if (matches(shotName, predicted[i])) correctSec += dt;
-    if (predicted[i] !== "close") {
-      wideSec += dt;
-      if (snapshots[i].rule === "grid") wideGridSec += dt;
+    const right = matches(shotName, predicted[i]);
+    if (right) correctSec += dt;
+    const bucket = perLabel[shotName];
+    if (bucket) {
+      bucket.sec += dt;
+      if (right) bucket.correct += dt;
+    }
+    if ((shotName === "wide" || shotName === "graphics") && displayedRuleAt(run, snapshots[i].t) === "grid") {
+      gridOnLabelledWideSec += dt;
     }
   }
+  const recall = (name: string) =>
+    perLabel[name].sec > 0 ? Number(((100 * perLabel[name].correct) / perLabel[name].sec).toFixed(1)) : null;
 
   const changes = predicted.slice(1).filter((shot, i) => shot !== predicted[i]).length;
   const minutes = lastT / 60;
@@ -224,8 +245,13 @@ for (const run of result.runs) {
     clip,
     labelledSec: Number(labelledSec.toFixed(1)),
     accuracyPct: labelledSec > 0 ? Number(((100 * correctSec) / labelledSec).toFixed(1)) : null,
-    wideSec: Number(wideSec.toFixed(1)),
-    timeInGridOnWideSec: Number(wideGridSec.toFixed(1)),
+    closeSec: Number(perLabel.close.sec.toFixed(1)),
+    closeRecallPct: recall("close"),
+    wideSec: Number(perLabel.wide.sec.toFixed(1)),
+    wideRecallPct: recall("wide"),
+    graphicsSec: Number(perLabel.graphics.sec.toFixed(1)),
+    graphicsRecallPct: recall("graphics"),
+    gridOnLabelledWideSec: Number(gridOnLabelledWideSec.toFixed(1)),
     shotChangesPerMin: Number((changes / minutes).toFixed(2)),
     layoutChanges: run.layoutChanges,
     cutsFound: cutTimes.length,
