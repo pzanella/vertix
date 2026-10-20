@@ -12,6 +12,7 @@ import {
 import type { BenchmarkWasmBuild } from "./suitePlan";
 import type { CutSource } from "../lookahead/decisionTimeline";
 import type { LayoutRule, TrackSnapshot } from "../tracking/layoutPlanner";
+import type { ShotType } from "../tracking/shotType";
 import { TrackingRecorder, type TrackingSummary } from "./trackingStats";
 import type { BenchmarkFailure, ResourceSnapshot } from "./resourceStats";
 
@@ -64,12 +65,19 @@ export interface BenchmarkProbe {
   ): void;
   /** Schema v6: the rule and followed track (-1 for none) applied on a displayed frame. */
   recordLayoutRule(nowMs: number, rule: LayoutRule, subjectTrackId: number, isCut?: boolean): void;
+  /** Schema v8: the shot type on a displayed frame. */
+  recordShot(nowMs: number, shot: ShotType): void;
+  /** Schema v8: the time one whole-frame (no crop) frame took to draw. */
+  recordFullSceneDraw(ms: number): void;
   /** Optional, for diagnostics (not used by BenchmarkRecorder): every track of one detection. */
   recordTrackSnapshot?(
     mediaTimeSec: number,
     tracks: readonly TrackSnapshot[],
     subjectTrackId: number | null,
-    rule: LayoutRule
+    rule: LayoutRule,
+    shotType: ShotType,
+    largestFaceSize: number,
+    isCut: boolean
   ): void;
   /** Main-thread time spent sending one frame to the cut trigger (lookahead only): in total, scaling it (drawImage + transfer), and posting it. */
   recordTriggerCost(mainThreadMs: number, drawMs?: number, postMs?: number): void;
@@ -736,6 +744,16 @@ export class BenchmarkRecorder implements BenchmarkProbe {
   recordLayoutRule(nowMs: number, rule: LayoutRule, subjectTrackId: number, isCut = false): void {
     if (this.finished) return;
     this.tracking.recordRule(nowMs, rule, subjectTrackId, isCut);
+  }
+
+  recordShot(nowMs: number, shot: ShotType): void {
+    if (this.finished) return;
+    this.tracking.recordShot(nowMs, shot);
+  }
+
+  recordFullSceneDraw(ms: number): void {
+    if (this.finished) return;
+    this.tracking.recordFullSceneDraw(ms);
   }
 
   /** Stops recording and builds the result. Recording calls after this are ignored. */

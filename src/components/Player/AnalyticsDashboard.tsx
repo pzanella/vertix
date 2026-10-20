@@ -1,6 +1,6 @@
 import { memo, useEffect, useReducer } from "react";
 import type { ReframeMeta, ReframeMetrics, ReframeMode } from "../../hooks/useWasmReframe";
-import type { LayoutRule } from "../../core";
+import type { LayoutRule, ShotType } from "../../core";
 import { classifyLayout, type LayoutBucket } from "./layoutStatus";
 import { LiveAnalyticsCharts } from "./LiveAnalyticsCharts";
 import { TONE_CLASS, formatBytes } from "./dashboardFormat";
@@ -16,6 +16,7 @@ interface AnalyticsDashboardProps {
   speakerCount: number;
   isTransitioning: boolean;
   layoutRule: LayoutRule;
+  shotType: ShotType;
   sourceShownAsIs: boolean;
   showTracks: boolean;
   onShowTracksChange: (show: boolean) => void;
@@ -58,6 +59,12 @@ const LAYOUT_LABEL: Record<LayoutBucket, (speakerCount: number) => string> = {
   grid: (n) => `Panel Grid (${n})`,
 };
 
+const SHOT_LABEL: Record<ShotType, string> = {
+  close: "Close",
+  wide: "Wide (whole frame)",
+  none: "No faces (whole frame)",
+};
+
 const RULE_LABEL: Record<LayoutRule, string> = {
   broll: "b-roll",
   single: "single",
@@ -88,6 +95,7 @@ export const AnalyticsDashboard = memo(function AnalyticsDashboard({
   speakerCount,
   isTransitioning,
   layoutRule,
+  shotType,
   sourceShownAsIs,
   showTracks,
   onShowTracksChange,
@@ -135,6 +143,7 @@ export const AnalyticsDashboard = memo(function AnalyticsDashboard({
           <MetricRow label="Speakers" value={String(speakerCount)} />
           <MetricRow label="Layout" value={LAYOUT_LABEL[bucket](speakerCount)} />
           <MetricRow label="Rule" value={mode === "9:16" && !sourceShownAsIs ? RULE_LABEL[layoutRule] : "—"} />
+          <MetricRow label="Shot" value={mode === "9:16" && !sourceShownAsIs ? SHOT_LABEL[shotType] : "—"} />
           <ToggleSwitch label="Show tracks" checked={showTracks} onChange={onShowTracksChange} />
           <MetricRow
             label="Crop Scale"

@@ -1,5 +1,6 @@
 import { AudioActivityMonitor } from "./audioActivity";
 import { PersonCountDebouncer } from "./personCount";
+import { ShotTypeTracker, type ShotType } from "./tracking/shotType";
 import {
   LayoutPlanner,
   paneCountOf,
@@ -225,6 +226,8 @@ export interface VertixState {
   isTransitioning: boolean;
   /** The rule behind the layout on screen (9:16 only). */
   layoutRule: LayoutRule;
+  /** The shot type on screen (9:16 only): "wide" and "none" are shown whole. */
+  shotType: ShotType;
   /** True when the source is not landscape: shown whole, without crop or detection. */
   sourceShownAsIs: boolean;
 }
@@ -809,6 +812,7 @@ export class VertixEngine {
   private lastResolvedFaces: FaceBox[] = [];
   private personCount = new PersonCountDebouncer();
   private planner = new LayoutPlanner();
+  private shotTypes = new ShotTypeTracker();
   private lastPlanRule: LayoutRule = "broll";
   private lastSwitchedFar = false;
   private sourceShownAsIs = false;
@@ -828,6 +832,7 @@ export class VertixEngine {
   private decidedSpeakerCount = 0;
   private decidedLayoutKey = 0;
   private decidedRule: LayoutRule = "broll";
+  private decidedShotType: ShotType = "close";
   // True once a frame was rendered (or buffered) since the last reset: the
   // no-crop layout counts as committed from then on.
   private hasFrameSinceReset = false;
@@ -840,6 +845,7 @@ export class VertixEngine {
   private displayedSpeakerCount = 0;
   private displayedSkinRejectedFaces: FaceBox[] = [];
   private displayedRule: LayoutRule = "broll";
+  private displayedShotType: ShotType = "close";
   private displayedSubjectTrackId: number | null = null;
   private displayedTracks: TrackSnapshot[] = [];
   private displayedPaneTrackIds: number[] = [];
@@ -1233,6 +1239,7 @@ export class VertixEngine {
       speakerCount: this.displayedSpeakerCount,
       isTransitioning: this.transitionStart !== null,
       layoutRule: this.displayedRule,
+      shotType: this.displayedShotType,
       sourceShownAsIs: this.sourceShownAsIs,
     };
   }
@@ -1362,18 +1369,21 @@ export class VertixEngine {
     this.detectionIntervalEma = 0;
     this.personCount.reset();
     this.planner.reset();
+    this.shotTypes.reset();
     this.lastPlanRule = "broll";
     this.lastSwitchedFar = false;
     this.decidedTargetPanes = [];
     this.decidedSpeakerCount = 0;
     this.decidedLayoutKey = 0;
     this.decidedRule = "broll";
+    this.decidedShotType = "close";
     this.hasFrameSinceReset = false;
     this.commitCountAtNextDetection = false;
     this.decisions.clear();
     this.displayedSpeakerCount = 0;
     this.displayedSkinRejectedFaces = [];
     this.displayedRule = "broll";
+    this.displayedShotType = "close";
     this.displayedSubjectTrackId = null;
     this.displayedTracks = [];
     this.displayedPaneTrackIds = [];
@@ -1722,11 +1732,17 @@ export class VertixEngine {
     const ctx = this.tracksOverlayCtx;
     if (!ctx) return;
     ctx.clearRect(0, 0, outW, outH);
-    if (!this.reframing || this.displayedTracks.length === 0) return;
+    if (!this.reframing) return;
 
     const { w: srcW, h: srcH } = this.srcDims;
     const fontPx = Math.max(14, Math.round(outH / 40));
     ctx.font = `600 ${fontPx}px system-ui, sans-serif`;
+    if (this.mode === "9:16" && !this.sourceShownAsIs) {
+      ctx.textBaseline = "top";
+      ctx.fillStyle = TRACK_SUBJECT_STROKE;
+      ctx.fillText(`shot: ${this.displayedShotType}`, 8, 8);
+    }
+    if (this.displayedTracks.length === 0) return;
     ctx.textBaseline = "bottom";
     for (const { source, dest } of this.overlayViews(outW, outH)) {
       const scaleX = dest.w / source.w;
@@ -1978,9 +1994,16 @@ export class VertixEngine {
     this.lastResolvedFaces = plan.faces;
     this.lastPlanRule = plan.rule;
     this.lastSwitchedFar = plan.switchedFar;
-    const commitAtOnce = sceneCut.isCut || this.commitCountAtNextDetection;
+    const shotType = this.shotTypes.observe(
+      { largestFaceSize: plan.largestForegroundSize, foregroundCount: plan.foregroundCount },
+      mediaTimeSec,
+      sceneCut.isCut
+    );
+    // Back to a close shot from a wide one: the person count commits at once, not after its debounce.
+    const shotReturnedToClose = shotType === "close" && this.decidedShotType !== "close";
+    const commitAtOnce = sceneCut.isCut || this.commitCountAtNextDetection || shotReturnedToClose;
     // A count committed at once after a seek or a mode switch replaces whatever was on screen: no dissolve from it.
-    const snapWithoutCut = commitAtOnce && !sceneCut.isCut;
+    const snapWithoutCut = this.commitCountAtNextDetection && !sceneCut.isCut;
     this.commitCountAtNextDetection = false;
     const key = plan.debounceKey;
     const stableKey = commitAtOnce
@@ -2000,7 +2023,7 @@ export class VertixEngine {
         : decisionSec < mediaTimeSec
           ? "localised"
           : "tick";
-    this.decideLayout(decisionSec, key, stableKey, cutSource, snapWithoutCut, srcW, srcH, cropW, cropH, plan);
+    this.decideLayout(decisionSec, key, stableKey, cutSource, snapWithoutCut, srcW, srcH, cropW, cropH, plan, shotType);
     this.notifyDetectionTick(mediaTimeSec, srcW, srcH, sceneCut.isCut ? decisionSec : null);
     this.benchmarkProbe?.recordTracking(
       trackerMs,
@@ -2009,7 +2032,15 @@ export class VertixEngine {
       plan.paneSwap,
       plan.leftToRightFlip
     );
-    this.benchmarkProbe?.recordTrackSnapshot?.(mediaTimeSec, plan.tracks, plan.subjectTrackId, plan.rule);
+    this.benchmarkProbe?.recordTrackSnapshot?.(
+      mediaTimeSec,
+      plan.tracks,
+      plan.subjectTrackId,
+      plan.rule,
+      shotType,
+      plan.largestForegroundSize,
+      sceneCut.isCut
+    );
 
     if (this.lastDetectionMediaTime !== null && mediaTimeSec > this.lastDetectionMediaTime) {
       const interval = mediaTimeSec - this.lastDetectionMediaTime;
@@ -2101,13 +2132,15 @@ export class VertixEngine {
     srcH: number,
     cropW: number,
     cropH: number,
-    plan: LayoutPlan
+    plan: LayoutPlan,
+    shotType: ShotType
   ): void {
     const isCut = cutSource !== null;
     const stablePersonCount = paneCountOf(stableKey);
     const countChanged = stableKey !== this.decidedLayoutKey;
     let reframe: Reframe | null = isCut || snap ? "snap" : null;
-    if (stablePersonCount === 0) {
+    const wholeFrame = shotType !== "close";
+    if (wholeFrame || stablePersonCount === 0) {
       this.decidedTargetPanes = [];
       this.decidedRule = "broll";
     } else if (key === stableKey) {
@@ -2133,15 +2166,17 @@ export class VertixEngine {
     }
     this.decidedSpeakerCount = stablePersonCount;
     this.decidedLayoutKey = stableKey;
+    this.decidedShotType = shotType;
     this.decisions.push({
       mediaTimeSec,
-      speakerCount: stablePersonCount,
+      speakerCount: wholeFrame ? 0 : stablePersonCount,
       targetPanes: this.decidedTargetPanes,
       reframe,
       isCut,
       cutSource,
       skinRejectedFaces: this.lastSkinRejectedFaces,
       rule: this.decidedRule,
+      shotType,
       subjectTrackId: plan.subjectTrackId,
       paneTrackIds: plan.paneTrackIds,
       tracks: plan.tracks,
@@ -2174,8 +2209,9 @@ export class VertixEngine {
     this.displayedSubjectTrackId = decision.subjectTrackId;
     this.displayedTracks = decision.tracks;
     this.displayedPaneTrackIds = decision.paneTrackIds;
-    const ruleChanged = decision.rule !== this.displayedRule;
+    const ruleChanged = decision.rule !== this.displayedRule || decision.shotType !== this.displayedShotType;
     this.displayedRule = decision.rule;
+    this.displayedShotType = decision.shotType;
     this.targetPanes = decision.targetPanes;
     this.pendingReframe = decision.reframe;
     if (countChanged || ruleChanged) this.emitState();
@@ -2854,6 +2890,7 @@ export class VertixEngine {
         probe?.recordCutShown(now, applied.mediaTimeSec, frameMediaTimeSec, applied.cutSource ?? "tick");
       }
       if (applied) probe?.recordLayoutRule(now, this.displayedRule, this.displayedSubjectTrackId ?? -1, applied.isCut);
+      if (applied) probe?.recordShot(now, this.displayedShotType);
       const speakerCount = this.displayedSpeakerCount;
       const targetSignature = speakerCount === 0 ? "broll" : `speakers:${speakerCount}`;
 
@@ -2896,7 +2933,9 @@ export class VertixEngine {
       }
 
       if (speakerCount === 0) {
+        const drawStart = probe ? performance.now() : 0;
         drawFitFrame(ctx, this.blurCanvas, source, srcW, srcH, cropW, cropH);
+        if (probe) probe.recordFullSceneDraw(performance.now() - drawStart);
       } else {
         // Mutate the already-allocated smoothed rects toward the cached
         // target and draw with integer coordinates (avoids sub-pixel blit

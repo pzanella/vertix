@@ -20,6 +20,7 @@ export type { FaceBox, PaneRect, SpeakerPane, PaneTarget, UnpackedDetections } f
 export * from "./bench";
 export type { CutSource } from "./lookahead/decisionTimeline";
 export { LAYOUT_RULES } from "./tracking/layoutPlanner";
+export type { ShotType } from "./tracking/shotType";
 export type { LayoutRule, TrackSnapshot } from "./tracking/layoutPlanner";
 export { PANEL_VARIANT } from "./tracking/panelDetector";
 export type { PanelVariant } from "./tracking/panelDetector";

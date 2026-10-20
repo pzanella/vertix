@@ -4,6 +4,7 @@ import {
   INITIAL_METRICS,
   VertixEngine,
   type LayoutRule,
+  type ShotType,
   type VertixMeta,
   type VertixMetrics,
   type VertixMode,
@@ -221,6 +222,8 @@ interface UseWasmReframeReturn {
   isTransitioning: boolean;
   /** The rule behind the layout on screen. */
   layoutRule: LayoutRule;
+  /** The shot type on screen: "wide" and "none" are shown whole. */
+  shotType: ShotType;
   /** The source is not landscape and is shown whole, without crop. */
   sourceShownAsIs: boolean;
   /** Live telemetry for the analytics dashboard. */
@@ -273,6 +276,7 @@ export function useWasmReframe(): UseWasmReframeReturn {
   const [speakerCount, setSpeakerCount] = useState(0);
   const [isTransitioning, setIsTransitioning] = useState(false);
   const [layoutRule, setLayoutRule] = useState<LayoutRule>("broll");
+  const [shotType, setShotType] = useState<ShotType>("close");
   const [sourceShownAsIs, setSourceShownAsIs] = useState(false);
   const [metrics, setMetrics] = useState<VertixMetrics>(INITIAL_METRICS);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
@@ -295,6 +299,7 @@ export function useWasmReframe(): UseWasmReframeReturn {
       setSpeakerCount(s.speakerCount);
       setIsTransitioning(s.isTransitioning);
       setLayoutRule(s.layoutRule);
+      setShotType(s.shotType);
       setSourceShownAsIs(s.sourceShownAsIs);
     });
     const unsubMetrics = engine.onMetricsUpdate(setMetrics);
@@ -624,6 +629,7 @@ export function useWasmReframe(): UseWasmReframeReturn {
     speakerCount,
     isTransitioning,
     layoutRule,
+    shotType,
     sourceShownAsIs,
     metrics,
     setLookaheadEnabled,

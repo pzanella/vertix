@@ -86,6 +86,8 @@ export interface LayoutPlan {
   switchedFar: boolean;
   tracks: TrackSnapshot[];
   foregroundCount: number;
+  /** The largest visible foreground face: max of its width and height, fraction of the frame (0 without one). */
+  largestForegroundSize: number;
   backgroundCount: number;
   /** Pane order changed while the set of pane tracks stayed the same (should stay 0). */
   paneSwap: boolean;
@@ -277,6 +279,7 @@ export class LayoutPlanner {
         lowerFaceMotion: t.lowerFaceMotion,
       })),
       foregroundCount,
+      largestForegroundSize: visibleForeground.reduce((largest, t) => Math.max(largest, t.box.w, t.box.h), 0),
       backgroundCount: tracks.filter((t) => t.visible && !t.foreground).length,
       paneSwap,
       leftToRightFlip,
