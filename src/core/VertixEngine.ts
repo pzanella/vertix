@@ -2032,7 +2032,8 @@ export class VertixEngine {
       plan.rule,
       shotType,
       plan.largestForegroundSize,
-      sceneCut.isCut
+      sceneCut.isCut,
+      this.decidedRule
     );
 
     if (this.lastDetectionMediaTime !== null && mediaTimeSec > this.lastDetectionMediaTime) {

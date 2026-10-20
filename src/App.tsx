@@ -219,6 +219,7 @@ export default function App() {
                 speakerCount={speakerCount}
                 isTransitioning={isTransitioning}
                 layoutRule={layoutRule}
+                shotType={shotType}
                 sourceShownAsIs={sourceShownAsIs}
               />
               {isBuffering && (

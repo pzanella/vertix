@@ -52,6 +52,7 @@ const LAYOUT_LABEL: Record<LayoutBucket, (speakerCount: number) => string> = {
   "as-is": () => "Shown As Is",
   transition: () => "Transitioning...",
   broll: () => "No-Crop B-Roll",
+  wide: () => "Wide Shot (whole frame)",
   single: () => "Single Focus",
   stacked: () => "Dual Split",
   subject: () => "Main Subject",
@@ -114,7 +115,7 @@ export const AnalyticsDashboard = memo(function AnalyticsDashboard({
     return () => clearInterval(id);
   }, []);
 
-  const bucket = classifyLayout(mode, layoutRule, isTransitioning, sourceShownAsIs);
+  const bucket = classifyLayout(mode, layoutRule, isTransitioning, sourceShownAsIs, shotType);
   // Deliberately impure: this is a ticking clock readout, re-rendered every
   // 500ms by forceTick above specifically so this recomputes with a fresh time.
   const stableSeconds = metrics.layoutCommittedAt !== null ? (performance.now() - metrics.layoutCommittedAt) / 1000 : 0;

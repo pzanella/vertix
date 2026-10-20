@@ -77,7 +77,9 @@ export interface BenchmarkProbe {
     rule: LayoutRule,
     shotType: ShotType,
     largestFaceSize: number,
-    isCut: boolean
+    isCut: boolean,
+    /** The rule the decision put on screen (broll for wide and none shots), not the planner's rule. */
+    displayedRule: LayoutRule
   ): void;
   /** Main-thread time spent sending one frame to the cut trigger (lookahead only): in total, scaling it (drawImage + transfer), and posting it. */
   recordTriggerCost(mainThreadMs: number, drawMs?: number, postMs?: number): void;

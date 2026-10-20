@@ -97,11 +97,12 @@ async function runInPage(clips, variants) {
   const setProbe = engine.setBenchmarkProbe.bind(engine);
   engine.setBenchmarkProbe = (probe) => {
     if (probe) {
-      probe.recordTrackSnapshot = (t, tracks, subject, rule, shot, largest, cut) =>
+      probe.recordTrackSnapshot = (t, tracks, subject, rule, shot, largest, cut, displayedRule) =>
         snapshots.push({
           t,
           audioEnergy: engine.getMetrics().audioEnergy,
           rule,
+          displayedRule,
           shot,
           largest,
           cut,
