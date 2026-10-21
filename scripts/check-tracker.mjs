@@ -34,14 +34,23 @@ const SAMPLE_CLIPS = [
   { name: "2-speakers-d.mp4", fps: 30000 / 1001 },
   { name: "3-speakers.mp4", fps: 25 },
 ];
+// Synthetic panel clips (public/bench, see make-cut-clips.mjs): static and moving groups of 3+ faces.
+const BENCH_CLIPS = [
+  { name: "cross-count.mp4", fps: 25 },
+  { name: "cross-same-count.mp4", fps: 25 },
+  { name: "cross-offset.mp4", fps: 25 },
+  { name: "cross-50fps.mp4", fps: 50 },
+];
 const wanted = option("clips")?.split(",");
 const clips = [
-  ...SAMPLE_CLIPS.filter((clip) => !wanted || wanted.includes(clip.name)).map((clip) => ({
-    ...clip,
-    url: `/samples/${clip.name}`,
-    hls: false,
-    stopAtSec: null,
-  })),
+  ...[...SAMPLE_CLIPS, ...(args.includes("--bench") ? BENCH_CLIPS : [])]
+    .filter((clip) => !wanted || wanted.includes(clip.name))
+    .map((clip) => ({
+      ...clip,
+      url: `${BENCH_CLIPS.some((bench) => bench.name === clip.name) ? "/bench" : "/samples"}/${clip.name}`,
+      hls: false,
+      stopAtSec: null,
+    })),
   ...(args.includes("--licensed")
     ? readLocalClips(here)
         .filter((clip) => !wanted || wanted.includes(clip.label))
@@ -128,6 +137,8 @@ async function runInPage(clips, variants) {
             h: tr.h,
             fg: tr.foreground,
             mouth: tr.mouthActivity,
+            cy: tr.cy,
+            confirmed: tr.confirmed,
             lower: tr.lowerFaceMotion,
           })),
         });
