@@ -296,9 +296,9 @@ describe.each([25, 50])("VertixEngine speaker tracking at %i fps", (fps) => {
   });
 
   it("shows the whole frame, not a grid, until a size-dominant face has won for 0.8s", () => {
-    const { engine, detect, secondsUntil, resolved } = setUpTracking(fps);
+    const { engine, detect, secondsUntil, resolved, speakerCount } = setUpTracking(fps);
     detect([LEFT, DOMINANT_MIDDLE, RIGHT]);
-    expect(resolved()).toHaveLength(0);
+    expect(speakerCount()).toBe(0);
     expect(secondsUntil([LEFT, DOMINANT_MIDDLE, RIGHT], () => resolved().length === 1)).toBeCloseTo(
       0.8 - FRAMES_PER_DETECTION / fps,
       6
@@ -376,10 +376,10 @@ describe("VertixEngine panel grid", () => {
 
 describe("VertixEngine scene cuts", () => {
   it("resets the active-speaker lock and counts the cut", () => {
-    const { engine, detect, secondsUntil, resolved } = setUpTracking(25);
+    const { engine, detect, secondsUntil, resolved, speakerCount } = setUpTracking(25);
     secondsUntil([LEFT, DOMINANT_MIDDLE, RIGHT], () => resolved().length === 1);
     detect([LEFT, MIDDLE, RIGHT], { cut: true });
-    expect(resolved()).toHaveLength(0);
+    expect(speakerCount()).toBe(0);
     expect(engine.getMetrics().sceneCutCount).toBe(1);
     engine.destroy();
   });

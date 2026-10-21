@@ -4,6 +4,7 @@ import { ShotTypeTracker, type ShotType } from "./tracking/shotType";
 import {
   LayoutPlanner,
   paneCountOf,
+  SUBJECT_RULE_MIN_FACES,
   SWITCH_DISSOLVE_DISTANCE,
   type LayoutPlan,
   type LayoutRule,
@@ -1993,8 +1994,7 @@ export class VertixEngine {
       sceneCut.isCut
     );
     // Back to a close shot from a wide one: the person count commits at once, not after its debounce.
-    const wholeFrame = shotType !== "close" || plan.panelWholeFrame;
-    const returnedToLayout = !wholeFrame && this.decidedWholeFrame;
+    const returnedToLayout = shotType === "close" && !plan.panelWholeFrame && this.decidedWholeFrame;
     const commitAtOnce = sceneCut.isCut || this.commitCountAtNextDetection || returnedToLayout;
     // A count committed at once after a seek or a mode switch replaces whatever was on screen: no dissolve from it.
     const snapWithoutCut = this.commitCountAtNextDetection && !sceneCut.isCut;
@@ -2134,7 +2134,7 @@ export class VertixEngine {
     const stablePersonCount = paneCountOf(stableKey);
     const countChanged = stableKey !== this.decidedLayoutKey;
     let reframe: Reframe | null = isCut || snap ? "snap" : null;
-    const wholeFrame = shotType !== "close" || plan.panelWholeFrame;
+    const wholeFrame = shotType !== "close" || (plan.panelWholeFrame && stablePersonCount >= SUBJECT_RULE_MIN_FACES);
     if (wholeFrame || stablePersonCount === 0) {
       this.decidedTargetPanes = [];
       this.decidedRule = "broll";

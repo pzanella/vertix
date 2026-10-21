@@ -28,7 +28,7 @@ export type LayoutRule = "broll" | "single" | "stacked" | "subject" | "group" | 
 export const LAYOUT_RULES: readonly LayoutRule[] = ["broll", "single", "stacked", "subject", "group", "grid"];
 
 // From this many foreground faces up, the main-subject rules apply.
-const SUBJECT_RULE_MIN_FACES = 3;
+export const SUBJECT_RULE_MIN_FACES = 3;
 // After the foreground count drops below SUBJECT_RULE_MIN_FACES, the
 // subject is kept this long, so one missed face does not reframe.
 const SUBJECT_GRACE_BELOW_MIN_SEC = 0.4;
@@ -94,7 +94,7 @@ export interface LayoutPlan {
   paneSwap: boolean;
   /** Left-to-right order of the pane tracks changed: a swap the old x-sorted layout would have made. */
   leftToRightFlip: boolean;
-  /** 3+ faces that the grid would show, but no panel evidence yet: the whole frame is shown instead (main rules). */
+  /** 3+ faces that main would show as a grid, but no panel evidence yet: the decision shows the whole frame instead. */
   panelWholeFrame: boolean;
 }
 
@@ -190,7 +190,7 @@ export class LayoutPlanner {
         .map((t) => ({ id: t.id, cx: t.box.cx, cy: t.box.cy, h: t.box.h }));
       const panelEvident = this.gridEvidence.observe(panelFaces, atSec, cut);
       panelWholeFrame = resolved.length >= SUBJECT_RULE_MIN_FACES && !panelEvident;
-      paneTracks = panelWholeFrame ? [] : this.ordered(resolvedTracks);
+      paneTracks = this.ordered(resolvedTracks);
       rule =
         resolved.length === 0
           ? "broll"
@@ -200,9 +200,7 @@ export class LayoutPlanner {
               : "single"
             : resolved.length === 2
               ? "stacked"
-              : panelWholeFrame
-                ? "broll"
-                : "grid";
+              : "grid";
       if (rule === "subject") subjectTrackId = paneTracks[0].id;
     } else if (keepSubject !== null) {
       rule = "subject";
