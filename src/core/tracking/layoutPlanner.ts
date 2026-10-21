@@ -2,6 +2,7 @@ import { groupFitsInFrame, groupFrameFace, type FaceBox } from "../layoutEngine"
 import { FaceTracker, type FaceTrack } from "./faceTracker";
 import { trackArea, updateForeground } from "./foregroundFilter";
 import { PanelDetector, PANEL_VARIANT, type PanelVariant } from "./panelDetector";
+import { PanelEvidence, type PanelFace } from "./panelEvidence";
 import { ActiveSpeakerResolver } from "./mainActiveSpeaker";
 import { CLEAR_LEAD_FACTOR, leadFactor, scoreContext, subjectScore, SubjectSelector } from "./subjectSelector";
 
@@ -93,6 +94,8 @@ export interface LayoutPlan {
   paneSwap: boolean;
   /** Left-to-right order of the pane tracks changed: a swap the old x-sorted layout would have made. */
   leftToRightFlip: boolean;
+  /** 3+ faces that the grid would show, but no panel evidence yet: the whole frame is shown instead (main rules). */
+  panelWholeFrame: boolean;
 }
 
 export interface FrameGeometry {
@@ -131,6 +134,7 @@ export class LayoutPlanner {
   private framedPosition: { cx: number; cy: number } | null = null;
   private pickNow = true;
   private readonly mainResolver = new ActiveSpeakerResolver();
+  private readonly gridEvidence = new PanelEvidence();
   private groupShown = false;
   private leftToRightOrder: number[] = [];
 
@@ -173,6 +177,7 @@ export class LayoutPlanner {
     let subjectTrackId: number | null = null;
 
     let mainSwitchedFar = false;
+    let panelWholeFrame = false;
     const keepSubject = this.manyFacesRules === "tracker" ? this.subjectDuringGrace(presentForeground, atSec) : null;
     if (this.manyFacesRules === "main") {
       // main's rules read the raw detection box and the lower-face change.
@@ -180,7 +185,12 @@ export class LayoutPlanner {
       const resolved = this.mainResolver.resolve(inputs, audioEnergy, atSec);
       mainSwitchedFar = this.mainResolver.switchedSpeaker;
       const resolvedTracks = resolved.map((face) => visibleForeground[inputs.indexOf(face)]);
-      paneTracks = this.ordered(resolvedTracks);
+      const panelFaces: PanelFace[] = visibleForeground
+        .filter((t) => t.confirmed)
+        .map((t) => ({ id: t.id, cx: t.box.cx, cy: t.box.cy, h: t.box.h }));
+      const panelEvident = this.gridEvidence.observe(panelFaces, atSec, cut);
+      panelWholeFrame = resolved.length >= SUBJECT_RULE_MIN_FACES && !panelEvident;
+      paneTracks = panelWholeFrame ? [] : this.ordered(resolvedTracks);
       rule =
         resolved.length === 0
           ? "broll"
@@ -190,7 +200,9 @@ export class LayoutPlanner {
               : "single"
             : resolved.length === 2
               ? "stacked"
-              : "grid";
+              : panelWholeFrame
+                ? "broll"
+                : "grid";
       if (rule === "subject") subjectTrackId = paneTracks[0].id;
     } else if (keepSubject !== null) {
       rule = "subject";
@@ -283,6 +295,7 @@ export class LayoutPlanner {
       backgroundCount: tracks.filter((t) => t.visible && !t.foreground).length,
       paneSwap,
       leftToRightFlip,
+      panelWholeFrame,
     };
   }
 
@@ -291,6 +304,7 @@ export class LayoutPlanner {
     this.tracker.reset();
     this.subjects.reset();
     this.mainResolver.reset();
+    this.gridEvidence.reset();
     this.panels.reset();
     this.paneOrder = [];
     this.leftToRightOrder = [];

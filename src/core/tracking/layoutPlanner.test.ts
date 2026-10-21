@@ -127,18 +127,34 @@ describe("LayoutPlanner, main's rules for 3+ faces (default)", () => {
     expect(plans.every(({ plan }) => plan.rule === "single")).toBe(true);
   });
 
-  it("shows three similar faces as a grid, debounced on the pane count", () => {
-    const plans = run(() => [testFace(0.2, 0.5, 0.2), testFace(0.5, 0.5, 0.2), testFace(0.8, 0.5, 0.2)], 1, {
+  it("shows three still faces as a grid after 1s of panel evidence, debounced on the pane count", () => {
+    const plans = run(() => [testFace(0.2, 0.5, 0.2), testFace(0.5, 0.5, 0.2), testFace(0.8, 0.5, 0.2)], 2, {
       planner: new LayoutPlanner(),
     });
-    expect(plans.every(({ plan }) => plan.rule === "grid" && plan.debounceKey === 3)).toBe(true);
+    expect(plans[0].plan.rule).toBe("broll");
+    expect(plans[0].plan.panelWholeFrame).toBe(true);
+    const grid = plans.filter(({ plan }) => plan.rule === "grid");
+    expect(grid[0].t - plans[0].t).toBeGreaterThanOrEqual(1 - 1e-3);
+    expect(grid.every(({ plan }) => plan.debounceKey === 3 && !plan.panelWholeFrame)).toBe(true);
+  });
+
+  it("shows three moving faces as the whole frame, never a grid", () => {
+    const plans = run(
+      (t) => [testFace(0.2 + 0.1 * t, 0.5, 0.2), testFace(0.5, 0.5, 0.2), testFace(0.8 - 0.1 * t, 0.5, 0.2)],
+      4,
+      {
+        planner: new LayoutPlanner(),
+      }
+    );
+    expect(plans.some(({ plan }) => plan.rule === "grid")).toBe(false);
+    expect(plans.every(({ plan }) => plan.rule === "broll" && plan.panelWholeFrame)).toBe(true);
   });
 
   it("locks onto a size-dominant face after 0.8s", () => {
     const plans = run(() => [testFace(0.2, 0.5, 0.15), testFace(0.5, 0.5, 0.22), testFace(0.8, 0.5, 0.15)], 1.2, {
       planner: new LayoutPlanner(),
     });
-    expect(plans[0].plan.rule).toBe("grid");
+    expect(plans[0].plan.rule).toBe("broll");
     expect(plans.at(-1)!.plan.rule).toBe("subject");
     expect(plans.at(-1)!.plan.faces[0].cx).toBeCloseTo(0.5, 6);
     expect(plans.at(-1)!.plan.debounceKey).toBe(1);

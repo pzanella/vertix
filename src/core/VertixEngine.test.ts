@@ -295,10 +295,10 @@ describe.each([25, 50])("VertixEngine speaker tracking at %i fps", (fps) => {
     engine.destroy();
   });
 
-  it("shows the 3-face grid until a size-dominant face has won for 0.8s", () => {
+  it("shows the whole frame, not a grid, until a size-dominant face has won for 0.8s", () => {
     const { engine, detect, secondsUntil, resolved } = setUpTracking(fps);
     detect([LEFT, DOMINANT_MIDDLE, RIGHT]);
-    expect(resolved()).toHaveLength(3);
+    expect(resolved()).toHaveLength(0);
     expect(secondsUntil([LEFT, DOMINANT_MIDDLE, RIGHT], () => resolved().length === 1)).toBeCloseTo(
       0.8 - FRAMES_PER_DETECTION / fps,
       6
@@ -354,12 +354,32 @@ describe("VertixEngine skin-filter rejections", () => {
   });
 });
 
+describe("VertixEngine panel grid", () => {
+  it("shows a still three-face panel as a grid after 1s of evidence, not on the first detection", () => {
+    const { engine, detect, secondsUntil, speakerCount } = setUpTracking(25);
+    detect([LEFT, MIDDLE, RIGHT]);
+    expect(speakerCount()).toBe(0);
+    const seconds = secondsUntil([LEFT, MIDDLE, RIGHT], () => speakerCount() === 3);
+    expect(seconds).toBeGreaterThanOrEqual(1 - 1e-3);
+    expect(seconds).toBeLessThanOrEqual(1.2);
+    engine.destroy();
+  });
+
+  it("does not show a grid after a cut until the panel is still again", () => {
+    const { engine, detect, secondsUntil, speakerCount } = setUpTracking(25);
+    secondsUntil([LEFT, MIDDLE, RIGHT], () => speakerCount() === 3);
+    detect([LEFT, MIDDLE, RIGHT], { cut: true });
+    expect(speakerCount()).toBe(0);
+    engine.destroy();
+  });
+});
+
 describe("VertixEngine scene cuts", () => {
   it("resets the active-speaker lock and counts the cut", () => {
     const { engine, detect, secondsUntil, resolved } = setUpTracking(25);
     secondsUntil([LEFT, DOMINANT_MIDDLE, RIGHT], () => resolved().length === 1);
     detect([LEFT, MIDDLE, RIGHT], { cut: true });
-    expect(resolved()).toHaveLength(3);
+    expect(resolved()).toHaveLength(0);
     expect(engine.getMetrics().sceneCutCount).toBe(1);
     engine.destroy();
   });

@@ -831,7 +831,7 @@ export class VertixEngine {
   private decidedSpeakerCount = 0;
   private decidedLayoutKey = 0;
   private decidedRule: LayoutRule = "broll";
-  private decidedShotType: ShotType = "close";
+  private decidedWholeFrame = false;
   // True once a frame was rendered (or buffered) since the last reset: the
   // no-crop layout counts as committed from then on.
   private hasFrameSinceReset = false;
@@ -1375,7 +1375,7 @@ export class VertixEngine {
     this.decidedSpeakerCount = 0;
     this.decidedLayoutKey = 0;
     this.decidedRule = "broll";
-    this.decidedShotType = "close";
+    this.decidedWholeFrame = false;
     this.hasFrameSinceReset = false;
     this.commitCountAtNextDetection = false;
     this.decisions.clear();
@@ -1993,8 +1993,9 @@ export class VertixEngine {
       sceneCut.isCut
     );
     // Back to a close shot from a wide one: the person count commits at once, not after its debounce.
-    const shotReturnedToClose = shotType === "close" && this.decidedShotType !== "close";
-    const commitAtOnce = sceneCut.isCut || this.commitCountAtNextDetection || shotReturnedToClose;
+    const wholeFrame = shotType !== "close" || plan.panelWholeFrame;
+    const returnedToLayout = !wholeFrame && this.decidedWholeFrame;
+    const commitAtOnce = sceneCut.isCut || this.commitCountAtNextDetection || returnedToLayout;
     // A count committed at once after a seek or a mode switch replaces whatever was on screen: no dissolve from it.
     const snapWithoutCut = this.commitCountAtNextDetection && !sceneCut.isCut;
     this.commitCountAtNextDetection = false;
@@ -2133,7 +2134,7 @@ export class VertixEngine {
     const stablePersonCount = paneCountOf(stableKey);
     const countChanged = stableKey !== this.decidedLayoutKey;
     let reframe: Reframe | null = isCut || snap ? "snap" : null;
-    const wholeFrame = shotType !== "close";
+    const wholeFrame = shotType !== "close" || plan.panelWholeFrame;
     if (wholeFrame || stablePersonCount === 0) {
       this.decidedTargetPanes = [];
       this.decidedRule = "broll";
@@ -2160,7 +2161,7 @@ export class VertixEngine {
     }
     this.decidedSpeakerCount = stablePersonCount;
     this.decidedLayoutKey = stableKey;
-    this.decidedShotType = shotType;
+    this.decidedWholeFrame = wholeFrame;
     this.decisions.push({
       mediaTimeSec,
       speakerCount: wholeFrame ? 0 : stablePersonCount,
