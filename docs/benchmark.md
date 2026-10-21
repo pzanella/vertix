@@ -319,6 +319,12 @@ Further limits:
   and is not shown whole. Licensed clip B (0–17 s, journalist voice-over) is
   the case seen: about 4 s of it is classified close. No crowd rule and no
   motion signal are used, so as not to turn 3-speaker close shots wide.
+- **Grid only with panel evidence.** With 3+ resolved faces, the grid is
+  shown only after the confirmed faces have been still for 1.0 s (median
+  centre shift per detection pair at most 0.04 face heights). It is left
+  after 0.6 s of consecutive moving pairs, a cut, or a change of the face
+  count. Without evidence the whole frame is shown. Measured on the
+  synthetic panels and licensed clip B at 4–6 s, which did not hold still in that window.
 
 **Long tasks (`longTasks`)**
 
