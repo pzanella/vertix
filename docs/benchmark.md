@@ -325,6 +325,13 @@ Further limits:
   after 0.6 s of consecutive moving pairs, a cut, or a change of the face
   count. Without evidence the whole frame is shown. Measured on the
   synthetic panels and licensed clip B at 4–6 s, which did not hold still in that window.
+  - **Accepted cost:** after each hard cut the whole frame is shown until
+    the panel evidence exists. On the cross-* clips this adds one layout
+    change per panel part (4 instead of 3 on main, 3 runs). Accepted as the
+    price of "no grid flash after a cut"; a cut cannot carry evidence over.
+  - **Known limit:** a crowd or group that moves (or never holds 1.0 s of
+    still pairs) is shown whole, not as a grid. Licensed clip B at 4–6 s did not hold
+    still; this is a measured window of 5 pairs, not a general crowd result.
 
 **Long tasks (`longTasks`)**
 
