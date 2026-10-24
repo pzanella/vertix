@@ -283,10 +283,12 @@ describe.each([25, 50])("VertixEngine speaker tracking at %i fps", (fps) => {
     engine.destroy();
   });
 
-  it("drops to no crop after 0.2s without faces", () => {
+  it("drops to no crop once the face's track is gone (coasting up to 0.8s), not on a missed detection", () => {
     const { engine, secondsUntil, speakerCount } = setUpTracking(fps);
     secondsUntil([LEFT], () => speakerCount() === 1);
-    expect(secondsUntil([], () => speakerCount() === 0)).toBe(0.2);
+    const seconds = secondsUntil([], () => speakerCount() === 0);
+    expect(seconds).toBeGreaterThanOrEqual(0.8);
+    expect(seconds).toBeLessThanOrEqual(1);
     engine.destroy();
   });
 
@@ -361,8 +363,9 @@ describe("VertixEngine panel grid", () => {
     const { engine, detect, secondsUntil, speakerCount } = setUpTracking(25);
     detect([LEFT, MIDDLE, RIGHT]);
     expect(speakerCount()).toBe(0);
+    // 1.0 s of still time, counted from the first detection of the three faces.
     const seconds = secondsUntil([LEFT, MIDDLE, RIGHT], () => speakerCount() === 3);
-    expect(seconds).toBeGreaterThanOrEqual(1 - 1e-3);
+    expect(seconds).toBeGreaterThanOrEqual(0.8 - 1e-3);
     expect(seconds).toBeLessThanOrEqual(1.2);
     engine.destroy();
   });
@@ -399,7 +402,7 @@ describe("VertixEngine scene cuts", () => {
     secondsUntil([LEFT], () => speakerCount() === 1);
     detect([LEFT, RIGHT], { cut: true });
     expect(speakerCount()).toBe(0);
-    expect(secondsUntil([LEFT, RIGHT], () => speakerCount() === 2)).toBeGreaterThanOrEqual(1);
+    expect(secondsUntil([LEFT, RIGHT], () => speakerCount() === 2)).toBeGreaterThanOrEqual(0.8 - 1e-3);
     engine.destroy();
   });
 

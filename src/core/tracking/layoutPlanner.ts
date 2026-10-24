@@ -187,10 +187,12 @@ export class LayoutPlanner {
     const keepSubject = this.manyFacesRules === "tracker" ? this.subjectDuringGrace(presentForeground, atSec) : null;
     if (this.manyFacesRules === "main") {
       // main's rules read the raw detection box and the lower-face change.
-      const inputs = visibleForeground.map((t) => ({ ...t.lastDetection, motion: t.lastDetection.lowerFaceMotion }));
+      // A confirmed track coasting through a missed detection still counts, as in the shot rule.
+      const counted = presentForeground;
+      const inputs = counted.map((t) => ({ ...t.lastDetection, motion: t.lastDetection.lowerFaceMotion }));
       const resolved = this.mainResolver.resolve(inputs, audioEnergy, atSec);
       mainSwitchedFar = this.mainResolver.switchedSpeaker;
-      const resolvedTracks = resolved.map((face) => visibleForeground[inputs.indexOf(face)]);
+      const resolvedTracks = resolved.map((face) => counted[inputs.indexOf(face)]);
       const panelFaces: PanelFace[] = presentForeground
         .filter((t) => t.confirmed)
         .map((t) => ({ id: t.id, cx: t.box.cx, cy: t.box.cy, w: t.box.w, h: t.box.h, visible: t.visible }));
@@ -218,7 +220,7 @@ export class LayoutPlanner {
           resolved.length === 0
             ? "broll"
             : resolved.length === 1
-              ? visibleForeground.length >= SUBJECT_RULE_MIN_FACES
+              ? counted.length >= SUBJECT_RULE_MIN_FACES
                 ? "subject"
                 : "single"
               : resolved.length === 2
