@@ -107,3 +107,23 @@ describe("ShotTypeTracker", () => {
     expect(tracker.observe(SMALL, 10.6, false)).toBe("wide");
   });
 });
+
+describe("shotCandidate with coasting tracks", () => {
+  it("gives no vote, not none, while a confirmed track coasts through a detection gap", () => {
+    expect(shotCandidate({ largestFaceSize: 0, foregroundCount: 0, confirmedPresentCount: 1 })).toBeNull();
+  });
+
+  it("is none once no confirmed track is left", () => {
+    expect(shotCandidate({ largestFaceSize: 0, foregroundCount: 0, confirmedPresentCount: 0 })).toBe("none");
+  });
+
+  it("keeps a close shot through a detection gap right after a cut", () => {
+    const tracker = new ShotTypeTracker();
+    tracker.observe({ largestFaceSize: 0.3, foregroundCount: 1, confirmedPresentCount: 1 }, 10, true);
+    for (let i = 1; i <= 3; i++) {
+      expect(
+        tracker.observe({ largestFaceSize: 0, foregroundCount: 0, confirmedPresentCount: 1 }, 10 + i * 0.2, false)
+      ).toBe("close");
+    }
+  });
+});

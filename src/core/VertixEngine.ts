@@ -1989,7 +1989,11 @@ export class VertixEngine {
     this.lastPlanRule = plan.rule;
     this.lastSwitchedFar = plan.switchedFar;
     const shotType = this.shotTypes.observe(
-      { largestFaceSize: plan.largestForegroundSize, foregroundCount: plan.foregroundCount },
+      {
+        largestFaceSize: plan.largestForegroundSize,
+        foregroundCount: plan.foregroundCount,
+        confirmedPresentCount: plan.confirmedPresentCount,
+      },
       mediaTimeSec,
       sceneCut.isCut
     );

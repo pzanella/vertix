@@ -31,13 +31,16 @@ export interface ShotObservation {
   /** Largest visible foreground face: max of its width and height, fraction of the frame. */
   largestFaceSize: number;
   foregroundCount: number;
+  /** Confirmed foreground tracks still present, visible or coasting through a missed detection. */
+  confirmedPresentCount?: number;
 }
 
 const HOLD_EPSILON_SEC = 1e-3;
 
 /** The shot type one detection points to, or null inside the zone between the two thresholds (no vote). */
 export function shotCandidate(observation: ShotObservation, rules: ShotRules = DEFAULT_SHOT_RULES): ShotType | null {
-  if (observation.foregroundCount === 0) return "none";
+  // A detection gap while a confirmed track still coasts is no vote; "none" needs every confirmed track gone.
+  if (observation.foregroundCount === 0) return (observation.confirmedPresentCount ?? 0) > 0 ? null : "none";
   if (observation.largestFaceSize >= rules.closeMinHmax) return "close";
   if (observation.largestFaceSize < rules.wideMaxHmax) return "wide";
   return null;
