@@ -1,10 +1,11 @@
 // Browser check for lookahead: plays the cut test clips, 3-speakers.mp4
 // (active-speaker comparison) and 2-speakers-b.mp4 (50 fps) through the
 // real engine in headless Chrome, once with lookahead off and once on, and
-// reports for every known cut how many displayed frames the crop changed
-// after the source cut, plus the lookahead length of every run. Without
-// --only it also checks the length after build switches, the 16:9 bypass
-// and the 16:9 -> 9:16 switch.
+// reports for every known cut the signed offset in frames from the source
+// cut to the crop change (negative = early, positive = late; "missed" only
+// without a crop change within 5 frames), plus the lookahead length of every
+// run. Without --only it also checks the length after build switches, the
+// 16:9 bypass and the 16:9 -> 9:16 switch.
 //
 // Starts its own Vite dev server and drives the engine directly (imported
 // from /src/core), not the app UI. Results go to stdout and
@@ -25,6 +26,7 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { DEFAULT_CHROME, runInHeadlessChrome } from "./lib/headless-chrome.mjs";
+import { cutOffsets, formatOffset } from "./lib/cut-offsets.mjs";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const args = process.argv.slice(2);
@@ -100,6 +102,7 @@ async function runInPage(clips, extras, allBuilds, saveRaw) {
       lookahead: result.lookahead,
       knownCuts: summary.knownCuts,
       cutsShown: summary.cutsShown,
+      displayedMediaTimeSec: raw.displays.mediaTimeSec,
       sceneCuts: summary.sceneCuts,
       displayErrorMs: summary.display.errorMs,
       displayWorkMs: summary.display.workMs,
@@ -235,12 +238,13 @@ try {
 
   const rows = [];
   for (const run of runs.filter((r) => r.label === "clips")) {
-    for (const cut of run.knownCuts) {
+    const clip = ALL_CLIPS.find((c) => c.file === run.clip);
+    for (const cut of cutOffsets(clip.knownCutsSec, run.cutsShown, clip.fps, run.displayedMediaTimeSec)) {
       rows.push({
         clip: run.clip,
         lookahead: lookaheadLabel(run.lookahead),
         "cut s": cut.timeSec,
-        "frames late": cut.framesLate ?? "missed",
+        "offset (frames)": formatOffset(cut.offsetFrames),
         "crop changed at s": cut.shownMediaTimeSec,
         "found by": cut.source ?? "-",
       });
