@@ -4,7 +4,7 @@ import { ShotTypeTracker, type ShotType } from "./tracking/shotType";
 import {
   LayoutPlanner,
   paneCountOf,
-  SUBJECT_RULE_MIN_FACES,
+  MULTIPANE_MIN_FACES,
   SWITCH_DISSOLVE_DISTANCE,
   type LayoutPlan,
   type LayoutRule,
@@ -2138,7 +2138,7 @@ export class VertixEngine {
     const stablePersonCount = paneCountOf(stableKey);
     const countChanged = stableKey !== this.decidedLayoutKey;
     let reframe: Reframe | null = isCut || snap ? "snap" : null;
-    const wholeFrame = shotType !== "close" || (plan.panelWholeFrame && stablePersonCount >= SUBJECT_RULE_MIN_FACES);
+    const wholeFrame = shotType !== "close" || (plan.panelWholeFrame && stablePersonCount >= MULTIPANE_MIN_FACES);
     if (wholeFrame || stablePersonCount === 0) {
       this.decidedTargetPanes = [];
       this.decidedRule = "broll";

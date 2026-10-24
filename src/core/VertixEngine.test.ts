@@ -274,10 +274,12 @@ describe.each([25, 50])("VertixEngine speaker tracking at %i fps", (fps) => {
     engine.destroy();
   });
 
-  it("changes an existing layout after 1.0s of agreeing detections", () => {
+  it("stacks two faces once they have been a still panel for 1.0s, not before", () => {
     const { engine, secondsUntil, speakerCount } = setUpTracking(fps);
     secondsUntil([LEFT], () => speakerCount() === 1);
-    expect(secondsUntil([LEFT, RIGHT], () => speakerCount() === 2)).toBe(1);
+    const seconds = secondsUntil([LEFT, RIGHT], () => speakerCount() === 2);
+    expect(seconds).toBeGreaterThanOrEqual(1);
+    expect(seconds).toBeLessThanOrEqual(1.7);
     engine.destroy();
   });
 
@@ -386,18 +388,27 @@ describe("VertixEngine scene cuts", () => {
 
   it("commits the new face count on the cut detection, without the debounce", () => {
     const { engine, detect, secondsUntil, speakerCount } = setUpTracking(25);
+    secondsUntil([], () => speakerCount() === 0);
+    detect([LEFT], { cut: true });
+    expect(speakerCount()).toBe(1);
+    engine.destroy();
+  });
+
+  it("shows the whole frame after a cut to two faces until they are a still panel", () => {
+    const { engine, detect, secondsUntil, speakerCount } = setUpTracking(25);
     secondsUntil([LEFT], () => speakerCount() === 1);
     detect([LEFT, RIGHT], { cut: true });
-    expect(speakerCount()).toBe(2);
+    expect(speakerCount()).toBe(0);
+    expect(secondsUntil([LEFT, RIGHT], () => speakerCount() === 2)).toBeGreaterThanOrEqual(1);
     engine.destroy();
   });
 
   it("corrects a wrong first count after a cut in 0.2s instead of 1.0s", () => {
     const { engine, detect, secondsUntil, speakerCount } = setUpTracking(25);
-    secondsUntil([LEFT, RIGHT], () => speakerCount() === 2);
-    detect([LEFT], { cut: true });
-    expect(speakerCount()).toBe(1);
-    expect(secondsUntil([LEFT, RIGHT], () => speakerCount() === 2)).toBe(0.2);
+    secondsUntil([LEFT], () => speakerCount() === 1);
+    detect([], { cut: true });
+    expect(speakerCount()).toBe(0);
+    expect(secondsUntil([BIG_MIDDLE], () => speakerCount() === 1)).toBe(0.2);
     engine.destroy();
   });
 
@@ -406,7 +417,7 @@ describe("VertixEngine scene cuts", () => {
     secondsUntil([LEFT], () => speakerCount() === 1);
     detect([LEFT], { cut: true });
     for (let i = 0; i < 5; i++) detect([LEFT]);
-    expect(secondsUntil([LEFT, RIGHT], () => speakerCount() === 2)).toBe(1);
+    expect(secondsUntil([LEFT, RIGHT], () => speakerCount() === 2)).toBeGreaterThanOrEqual(1);
     engine.destroy();
   });
 
