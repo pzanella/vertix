@@ -432,12 +432,27 @@ describe("VertixEngine scene cuts", () => {
     engine.destroy();
   });
 
-  it("still glides when the same face moves without a cut", () => {
+  it("glides once the same face has left the stationary margin, without a cut", () => {
     const { engine, detect, secondsUntil, speakerCount, isGliding } = setUpTracking(25);
     secondsUntil([LEFT], () => speakerCount() === 1);
     for (let i = 0; i < 20; i++) detect([LEFT]);
-    detect([{ ...LEFT, cx: LEFT.cx + 0.1 }]);
-    expect(isGliding()).toBe(true);
+    let glided = false;
+    for (let i = 0; i < 5 && !glided; i++) {
+      detect([{ ...LEFT, cx: LEFT.cx + 0.1 }]);
+      glided = isGliding();
+    }
+    expect(glided).toBe(true);
+    engine.destroy();
+  });
+
+  it("keeps the crop still while the face stays inside the stationary margin", () => {
+    const { engine, detect, secondsUntil, speakerCount, isGliding } = setUpTracking(25);
+    secondsUntil([LEFT], () => speakerCount() === 1);
+    for (let i = 0; i < 20; i++) detect([LEFT]);
+    for (let i = 0; i < 10; i++) {
+      detect([{ ...LEFT, cx: LEFT.cx + 0.03 }]);
+      expect(isGliding()).toBe(false);
+    }
     engine.destroy();
   });
 });
@@ -467,8 +482,12 @@ describe("VertixEngine active-speaker switch", () => {
 
   it("still glides when the locked speaker moves a little", () => {
     const { engine, detect, resolved, isGliding, isDissolving } = lockedOnMiddle();
-    detect([LEFT, DOMINANT_MIDDLE_MOVED, RIGHT]);
-    expect(isGliding()).toBe(true);
+    let glided = false;
+    for (let i = 0; i < 5 && !glided; i++) {
+      detect([LEFT, DOMINANT_MIDDLE_MOVED, RIGHT]);
+      glided = isGliding();
+    }
+    expect(glided).toBe(true);
     for (let i = 0; i < 10; i++) {
       detect([LEFT, DOMINANT_MIDDLE_MOVED, RIGHT]);
       expect(isDissolving()).toBe(false);

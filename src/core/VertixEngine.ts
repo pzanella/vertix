@@ -622,10 +622,6 @@ function isSpeakerSized(f: FaceBox): boolean {
   );
 }
 
-// A face must drift more than this (a fraction of frame width/height) from
-// where its pane's crop was last aimed before the crop moves at all.
-const DEADZONE_FRACTION = 0.04;
-
 // Skin-rejection overlay style: dashed, so it can't be mistaken for a crop.
 const SKIN_REJECTED_STROKE = "#f97316";
 const SKIN_REJECTED_LINE_WIDTH = 3;
@@ -2146,22 +2142,14 @@ export class VertixEngine {
       this.decidedRule = plan.rule;
       // Only refresh the target once the raw count matches the *committed*
       // layout — otherwise, mid-debounce, this could compute a different
-      // pane count than what's actually on screen. The deadzone itself
+      // pane count than what's actually on screen. The stationary margin
       // lives inside computeSpeakerLayout. A reframe or a new layout aims
-      // straight at the new faces, without the deadzone.
+      // straight at the new faces, without it.
       if (this.lastSwitchedFar || this.movesSinglePaneFar(countChanged)) reframe ??= "dissolve";
       this.decidedTargetPanes =
         reframe !== null || countChanged
           ? computeSpeakerLayout(this.lastResolvedFaces, srcW, srcH, cropW, cropH)
-          : computeSpeakerLayout(
-              this.lastResolvedFaces,
-              srcW,
-              srcH,
-              cropW,
-              cropH,
-              this.decidedTargetPanes,
-              DEADZONE_FRACTION
-            );
+          : computeSpeakerLayout(this.lastResolvedFaces, srcW, srcH, cropW, cropH, this.decidedTargetPanes, true);
     }
     this.decidedSpeakerCount = stablePersonCount;
     this.decidedLayoutKey = stableKey;

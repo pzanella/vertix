@@ -148,8 +148,8 @@ cut during one snaps. A new source clears the canvas, the buffer and the
 crop state. This two-layer design, a stable layout plus independently-smoothed
 positions within it, came out of several rounds of tuning against real
 footage. If camera movement still feels off, look at the constants in
-`layoutEngine.ts` (`PANE_SMOOTHING_TAU_SEC`), `VertixEngine.ts`
-(`DEADZONE_FRACTION`) and `personCount.ts` (`PERSON_COUNT_STABLE_SEC`),
+`layoutEngine.ts` (`PANE_SMOOTHING_TAU_SEC`, `STATIONARY_MARGIN_WIDTH`,
+`STATIONARY_MARGIN_HEIGHT`) and `personCount.ts` (`PERSON_COUNT_STABLE_SEC`),
 not the layout math itself.
 
 ## Lookahead
