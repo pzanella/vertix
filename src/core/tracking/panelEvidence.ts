@@ -10,19 +10,22 @@
  * back with a new track ID).
  */
 
-// The panel is entered after this long of consecutive still pairs.
+// The panel is entered after this much still time (media seconds).
 export const PANEL_STILL_SEC = 1;
-// The panel is left after this long of consecutive moving pairs (one moving
-// pair, such as a head turn, does not drop it).
+// The panel is left after this much moving time (one moving pair, such as a
+// head turn, does not drop it).
 export const PANEL_EXIT_SEC = 0.6;
-// 3+ faces: a pair is still when its median track shift is at most this many
-// face heights. Panels measured at most 0.024; the crowd in licensed clip B (4-6 s) moved
-// at least 0.025 in every pair it had.
-export const PANEL_MAX_SHIFT_HEIGHTS = 0.04;
-// 2 faces: a pair is still when the mean of the two shifts is at most this.
-// 2-speakers-b (people talking with their hands) held still runs of 18 pairs
-// at this value; the crowd in licensed clip B (0-17 s) at most 2.
-export const PANEL_MAX_SHIFT_HEIGHTS_2 = 0.08;
+// 3+ faces: still while the median face speed is at most this many face
+// heights per second (0.04 per detection at 5 Hz). Panels measured at most
+// 0.024 per detection; the crowd in licensed clip B (4-6 s) moved at least 0.025.
+export const PANEL_MAX_SPEED_HEIGHTS_PER_SEC = 0.2;
+// 2 faces: still while the mean of the two speeds is at most this (0.08 per
+// detection at 5 Hz). 2-speakers-b held still runs of 18 detections at that
+// value; the crowd in licensed clip B (0-17 s) at most 2.
+export const PANEL_MAX_SPEED_HEIGHTS_PER_SEC_2 = 0.4;
+// A pair of detections further apart than this (skipped detections, a pause)
+// is neither still nor moving: it ends the current run.
+const MAX_PAIR_SEC = 0.5;
 // A seat whose face goes missing keeps its pane this long: above the longest
 // gap measured on licensed clip C (2.2 s).
 export const MULTIPANE_HOLD_SEC = 2.5;
@@ -74,9 +77,9 @@ interface Seat {
 
 const NO_PANEL: PanelState = { evidence: false, seats: [] };
 
-/** The stillness threshold for a pair of `faceCount` faces. */
-export function panelShiftThreshold(faceCount: number): number {
-  return faceCount === 2 ? PANEL_MAX_SHIFT_HEIGHTS_2 : PANEL_MAX_SHIFT_HEIGHTS;
+/** The stillness threshold (face heights per second) for `faceCount` faces. */
+export function panelSpeedThreshold(faceCount: number): number {
+  return faceCount === 2 ? PANEL_MAX_SPEED_HEIGHTS_PER_SEC_2 : PANEL_MAX_SPEED_HEIGHTS_PER_SEC;
 }
 
 function shiftHeights(face: Pose, before: Pose): number {
@@ -84,35 +87,40 @@ function shiftHeights(face: Pose, before: Pose): number {
 }
 
 /**
- * How much the faces matched to the previous detection moved, in face
- * heights (the largest of the x and y shift per face): the mean for two
- * faces, the median for three or more; null with fewer than two matches.
+ * How fast the faces matched to the previous detection moved, in face
+ * heights per second (the largest of the x and y shift per face, over the
+ * time between the two detections): the mean for two faces, the median for
+ * three or more; null with fewer than two matches or a pair longer than
+ * MAX_PAIR_SEC.
  */
-export function panelPairShift(
+export function panelPairSpeed(
   faces: readonly (Pose & { id: number })[],
-  previous: ReadonlyMap<number, Pose>
+  previous: ReadonlyMap<number, Pose>,
+  dtSec: number
 ): number | null {
-  const shifts: number[] = [];
+  if (!(dtSec > 0) || dtSec > MAX_PAIR_SEC) return null;
+  const speeds: number[] = [];
   for (const face of faces) {
     const before = previous.get(face.id);
-    if (before) shifts.push(shiftHeights(face, before));
+    if (before) speeds.push(shiftHeights(face, before) / dtSec);
   }
-  if (shifts.length < 2) return null;
-  if (shifts.length === 2) return (shifts[0] + shifts[1]) / 2;
-  shifts.sort((a, b) => a - b);
-  return shifts[Math.floor(shifts.length / 2)];
+  if (speeds.length < 2) return null;
+  if (speeds.length === 2) return (speeds[0] + speeds[1]) / 2;
+  speeds.sort((a, b) => a - b);
+  return speeds[Math.floor(speeds.length / 2)];
 }
 
 /**
  * Follows the confirmed foreground faces, in media time, one detection pair
- * at a time. Entry: the visible faces still for PANEL_STILL_SEC (the run
- * restarts when the set of faces changes). Exit: PANEL_EXIT_SEC of
- * consecutive moving pairs of the seated faces, a cut, or fewer than two
- * seats. A new face joins as a seat only once it has itself been still for
+ * at a time; still and moving time run from the start of their first pair.
+ * Entry: the visible faces still for PANEL_STILL_SEC (the run restarts when
+ * the set of faces changes). Exit: PANEL_EXIT_SEC of moving time of the
+ * seated faces, a cut, or fewer than two seats. A new face joins as a seat only once it has itself been still for
  * PANEL_STILL_SEC.
  */
 export class PanelEvidence {
   private previous = new Map<number, Pose>();
+  private previousAtSec: number | null = null;
   private evidence = false;
   private seats: Seat[] = [];
   private entryKey = "";
@@ -126,6 +134,7 @@ export class PanelEvidence {
     if (this.evidence) this.followSeats(visible, atSec);
     else this.tryEnter(visible, atSec);
     this.previous = new Map(visible.map((face) => [face.id, { cx: face.cx, cy: face.cy, h: face.h }]));
+    this.previousAtSec = atSec;
     if (!this.evidence) return NO_PANEL;
     return {
       evidence: true,
@@ -142,7 +151,13 @@ export class PanelEvidence {
 
   reset(): void {
     this.previous = new Map();
+    this.previousAtSec = null;
     this.leave();
+  }
+
+  /** Seconds since the previous detection (NaN without one). */
+  private pairSec(atSec: number): number {
+    return this.previousAtSec === null ? NaN : atSec - this.previousAtSec;
   }
 
   private tryEnter(visible: readonly PanelFace[], atSec: number): void {
@@ -154,12 +169,12 @@ export class PanelEvidence {
       this.entryKey = key;
       this.stillSinceSec = null;
     }
-    const shift = panelPairShift(visible, this.previous);
-    if (shift === null || shift > panelShiftThreshold(visible.length)) {
+    const speed = panelPairSpeed(visible, this.previous, this.pairSec(atSec));
+    if (speed === null || speed > panelSpeedThreshold(visible.length)) {
       this.stillSinceSec = null;
       return;
     }
-    this.stillSinceSec ??= atSec;
+    this.stillSinceSec ??= this.previousAtSec ?? atSec;
     if (atSec - this.stillSinceSec < PANEL_STILL_SEC - TIME_EPSILON_SEC) return;
     this.evidence = true;
     this.movingSinceSec = null;
@@ -188,11 +203,11 @@ export class PanelEvidence {
     this.admitJoiners(visible, seated, atSec);
 
     const seatedFaces = visible.filter((face) => seated.has(face.id));
-    const shift = panelPairShift(seatedFaces, this.previous);
-    if (shift === null || shift <= panelShiftThreshold(seatedFaces.length)) {
+    const speed = panelPairSpeed(seatedFaces, this.previous, this.pairSec(atSec));
+    if (speed === null || speed <= panelSpeedThreshold(seatedFaces.length)) {
       this.movingSinceSec = null;
     } else {
-      this.movingSinceSec ??= atSec;
+      this.movingSinceSec ??= this.previousAtSec ?? atSec;
       if (atSec - this.movingSinceSec >= PANEL_EXIT_SEC - TIME_EPSILON_SEC) this.leave();
     }
     if (this.seats.length < 2) this.leave();
@@ -205,11 +220,17 @@ export class PanelEvidence {
       if (seated.has(face.id) || this.isSeated(face.id)) continue;
       present.add(face.id);
       const before = this.previous.get(face.id);
-      if (!before || shiftHeights(face, before) > PANEL_MAX_SHIFT_HEIGHTS) {
+      const pairSec = this.pairSec(atSec);
+      if (
+        !before ||
+        !(pairSec > 0) ||
+        pairSec > MAX_PAIR_SEC ||
+        shiftHeights(face, before) / pairSec > PANEL_MAX_SPEED_HEIGHTS_PER_SEC
+      ) {
         this.joiningSinceSec.delete(face.id);
         continue;
       }
-      const since = this.joiningSinceSec.get(face.id) ?? atSec;
+      const since = this.joiningSinceSec.get(face.id) ?? this.previousAtSec ?? atSec;
       this.joiningSinceSec.set(face.id, since);
       if (atSec - since >= PANEL_STILL_SEC - TIME_EPSILON_SEC) {
         const index = this.seats.findIndex((seat) => seat.cx > face.cx);

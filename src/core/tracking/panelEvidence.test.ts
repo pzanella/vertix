@@ -2,12 +2,12 @@ import { describe, expect, it } from "vitest";
 import {
   MULTIPANE_HOLD_SEC,
   PANEL_EXIT_SEC,
-  PANEL_MAX_SHIFT_HEIGHTS,
-  PANEL_MAX_SHIFT_HEIGHTS_2,
+  PANEL_MAX_SPEED_HEIGHTS_PER_SEC,
+  PANEL_MAX_SPEED_HEIGHTS_PER_SEC_2,
   PANEL_STILL_SEC,
   PanelEvidence,
-  panelPairShift,
-  panelShiftThreshold,
+  panelPairSpeed,
+  panelSpeedThreshold,
   type PanelFace,
 } from "./panelEvidence";
 
@@ -29,20 +29,20 @@ function feed(panel: PanelEvidence, at: (i: number) => PanelFace[], count: numbe
   return out;
 }
 
-describe("panelPairShift", () => {
+describe("panelPairSpeed", () => {
   const previous = new Map([
     [0, { cx: 0.2, cy: 0.5, h: 0.2 }],
     [1, { cx: 0.5, cy: 0.5, h: 0.2 }],
     [2, { cx: 0.8, cy: 0.5, h: 0.2 }],
   ]);
 
-  it("is the median for three faces (largest of the x and y shift, in face heights)", () => {
+  it("is the median for three faces (largest of the x and y shift, in face heights per second)", () => {
     const moved = [
       { id: 0, cx: 0.2, cy: 0.5, h: 0.2 },
       { id: 1, cx: 0.5, cy: 0.51, h: 0.2 },
       { id: 2, cx: 0.9, cy: 0.5, h: 0.2 },
     ];
-    expect(panelPairShift(moved, previous)).toBeCloseTo(0.05, 6);
+    expect(panelPairSpeed(moved, previous, 0.2)).toBeCloseTo(0.25, 6);
   });
 
   it("is the mean for two faces", () => {
@@ -50,16 +50,26 @@ describe("panelPairShift", () => {
       { id: 0, cx: 0.2, cy: 0.5, h: 0.2 },
       { id: 1, cx: 0.52, cy: 0.5, h: 0.2 },
     ];
-    expect(panelPairShift(moved, previous)).toBeCloseTo(0.05, 6);
+    expect(panelPairSpeed(moved, previous, 0.1)).toBeCloseTo(0.5, 6);
   });
 
   it("is null with fewer than two matched faces", () => {
-    expect(panelPairShift([{ id: 0, cx: 0.2, cy: 0.5, h: 0.2 }], previous)).toBeNull();
+    expect(panelPairSpeed([{ id: 0, cx: 0.2, cy: 0.5, h: 0.2 }], previous, 0.2)).toBeNull();
+  });
+
+  it("is null for a pair spanning skipped detections (more than 0.5 s)", () => {
+    expect(
+      panelPairSpeed(
+        [...previous].map(([id, pose]) => ({ id, ...pose })),
+        previous,
+        0.8
+      )
+    ).toBeNull();
   });
 
   it("uses the two-face threshold for two faces and the panel threshold for more", () => {
-    expect(panelShiftThreshold(2)).toBe(PANEL_MAX_SHIFT_HEIGHTS_2);
-    expect(panelShiftThreshold(3)).toBe(PANEL_MAX_SHIFT_HEIGHTS);
+    expect(panelSpeedThreshold(2)).toBe(PANEL_MAX_SPEED_HEIGHTS_PER_SEC_2);
+    expect(panelSpeedThreshold(3)).toBe(PANEL_MAX_SPEED_HEIGHTS_PER_SEC);
   });
 });
 
@@ -148,5 +158,24 @@ describe("PanelEvidence", () => {
     feed(panel, () => row([0.2, 0.5, 0.8]), 12);
     panel.reset();
     expect(panel.observe(row([0.2, 0.5, 0.8]), 10, false).evidence).toBe(false);
+  });
+});
+
+describe("PanelEvidence in seconds", () => {
+  it("needs the same still time at 10 Hz as at 5 Hz", () => {
+    for (const dt of [0.1, 0.2]) {
+      const panel = new PanelEvidence();
+      let enteredSec: number | null = null;
+      for (let i = 0; i < 30 && enteredSec === null; i++) {
+        if (panel.observe(row([0.2, 0.5, 0.8]), i * dt, false).evidence) enteredSec = i * dt;
+      }
+      expect(enteredSec).toBeCloseTo(PANEL_STILL_SEC, 6);
+    }
+  });
+
+  it("does not count skipped detections as still", () => {
+    const panel = new PanelEvidence();
+    const times = [0, 0.2, 0.4, 1.2, 1.4, 1.6];
+    expect(times.map((t) => panel.observe(row([0.2, 0.5, 0.8]), t, false).evidence).some(Boolean)).toBe(false);
   });
 });
