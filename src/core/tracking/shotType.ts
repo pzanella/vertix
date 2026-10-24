@@ -97,6 +97,8 @@ export class ShotTypeTracker {
   }
 
   private holdSec(atSec: number): number {
+    // Leaving "none": a confirmed face is already evidence, as right after a cut.
+    if (this.type === "none") return this.rules.cutHoldSec;
     const sinceShotStartSec = atSec - (this.shotStartSec ?? atSec);
     return sinceShotStartSec < this.rules.cutHoldWindowSec ? this.rules.cutHoldSec : this.rules.shotHoldSec;
   }

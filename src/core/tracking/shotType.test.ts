@@ -127,3 +127,15 @@ describe("shotCandidate with coasting tracks", () => {
     }
   });
 });
+
+describe("leaving none", () => {
+  it("uses the short hold when a confirmed face appears inside a shot", () => {
+    const tracker = new ShotTypeTracker();
+    tracker.observe({ largestFaceSize: 0, foregroundCount: 0, confirmedPresentCount: 0 }, 10, true);
+    for (let i = 1; i <= 10; i++)
+      tracker.observe({ largestFaceSize: 0, foregroundCount: 0, confirmedPresentCount: 0 }, 10 + i * 0.2, false);
+    const face = { largestFaceSize: 0.3, foregroundCount: 1, confirmedPresentCount: 1 };
+    expect(tracker.observe(face, 12.2, false)).toBe("none");
+    expect(tracker.observe(face, 12.4, false)).toBe("close");
+  });
+});
