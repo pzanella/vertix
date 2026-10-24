@@ -18,6 +18,8 @@ const list = (name) =>
     .split(",")
     .filter(Boolean) ?? [];
 const STEP_SEC = 0.04;
+// A displayed layout shorter than this, not ended by a cut, counts as a flash.
+const SHORT_LAYOUT_SEC = 0.5;
 const SHOWN_AS = {
   multipane: (rule) => rule === "stacked" || rule === "grid",
   single: (rule) => rule === "single" || rule === "subject" || rule === "group",
@@ -42,7 +44,14 @@ function runs() {
       if (result.mode !== "9:16" || !result.raw?.layoutRules) continue;
       const { mediaTimeSec, rule } = result.raw.layoutRules;
       const events = mediaTimeSec.map((t, i) => ({ t, rule: rule[i] })).filter((e) => Number.isFinite(e.t));
-      out.push({ source: file.split("/").pop(), clip: labelOf(result.clip), endSec: lastFrameSec(result), events });
+      const cuts = result.raw.cutsShown?.shownMediaTimeSec ?? [];
+      out.push({
+        source: file.split("/").pop(),
+        clip: labelOf(result.clip),
+        endSec: lastFrameSec(result),
+        events,
+        cuts,
+      });
     }
   }
   for (const file of list("tracker")) {
@@ -50,7 +59,8 @@ function runs() {
     for (const run of report.runs) {
       if (!run.displayedRuleEvents) continue;
       const events = run.displayedRuleEvents;
-      out.push({ source: file.split("/").pop(), clip: labelOf(run.clip), endSec: events.at(-1)?.t ?? 0, events });
+      const cuts = run.snapshots?.filter((s) => s.cut).map((s) => s.t) ?? [];
+      out.push({ source: file.split("/").pop(), clip: labelOf(run.clip), endSec: events.at(-1)?.t ?? 0, events, cuts });
     }
   }
   return out;
@@ -70,8 +80,30 @@ function ruleAt(events, sec) {
   return rule;
 }
 
+/** Displayed layouts shorter than SHORT_LAYOUT_SEC whose end is not a cut (within 0.3 s). */
+function flashes(run) {
+  const segments = [];
+  for (const event of run.events) {
+    if (segments.length === 0 || segments.at(-1).rule !== event.rule)
+      segments.push({ rule: event.rule, startSec: event.t });
+  }
+  const out = [];
+  for (let i = 0; i + 1 < segments.length; i++) {
+    const endSec = segments[i + 1].startSec;
+    const nearCut = run.cuts.some(
+      (cutSec) => Math.abs(cutSec - endSec) <= 0.3 || Math.abs(cutSec - segments[i].startSec) <= 0.3
+    );
+    if (endSec - segments[i].startSec < SHORT_LAYOUT_SEC && !nearCut)
+      out.push(`${segments[i].startSec.toFixed(2)} ${segments[i].rule}`);
+  }
+  return out;
+}
+
+const flashRows = [];
 const rows = [];
 for (const run of runs()) {
+  const found = flashes(run);
+  if (found.length > 0) flashRows.push({ run: run.source, clip: run.clip, flashes: found.join(", ") });
   const clipLabels = labels.get(run.clip);
   if (!clipLabels) continue;
   const stats = { multipane: [0, 0], single: [0, 0], whole: [0, 0] };
@@ -100,3 +132,5 @@ for (const run of runs()) {
   });
 }
 console.table(rows);
+console.log(`Displayed layouts under ${SHORT_LAYOUT_SEC} s, not at a cut: ${flashRows.length === 0 ? "none" : ""}`);
+if (flashRows.length > 0) console.table(flashRows);
