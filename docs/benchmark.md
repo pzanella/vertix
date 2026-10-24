@@ -632,6 +632,12 @@ What this means for the metrics:
 
 ## Known limits
 
+- **Cut shown early at 50 fps.** On cross-50fps the crop change at a cut is
+  sometimes shown 1–3 frames before the cut, also on main (the trigger scores
+  the frame next to the cut as the cut frame). `scripts/check-lookahead.mjs`
+  reports a signed offset in displayed frames per cut (negative = early,
+  positive = late; "missed" only without a crop change within 5 frames), and
+  `scripts/cut-offsets.mjs` summarises it from `--save-raw` output.
 - **Small samples.** The clips are 7.8–34.9 s long, which gives roughly
   40–170 detections per clip.
   - With fewer than about 100 samples, p99 is effectively the maximum.
