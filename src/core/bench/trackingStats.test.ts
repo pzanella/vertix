@@ -91,3 +91,21 @@ describe("gridTimeOnWideShots", () => {
     expect(gridTimeOnWideShots(rules, shots, 0, 6000)).toBe(0);
   });
 });
+
+describe("crop path per layout", () => {
+  it("sums crop moves per displayed rule inside the measured window and per minute of that rule", () => {
+    const recorder = new TrackingRecorder(16);
+    recorder.recordRule(0, "single", 1, false, 0);
+    recorder.recordCropMove(1000, 0.01);
+    recorder.recordCropMove(2000, 0.02);
+    recorder.recordRule(30000, "stacked", -1, false, 30);
+    recorder.recordCropMove(31000, 0.05);
+    recorder.recordCropMove(90000, 1);
+    const summary = recorder.summarize(0, 60000, 1);
+    expect(summary.cropPathFrameWidths.single).toBeCloseTo(0.03, 6);
+    expect(summary.cropPathFrameWidths.stacked).toBeCloseTo(0.05, 6);
+    expect(summary.cropPathPerMin.single).toBeCloseTo(0.06, 6);
+    expect(summary.cropPathPerMin.grid).toBeNull();
+    expect(recorder.ruleEvents().mediaTimeSec).toEqual([0, 30]);
+  });
+});

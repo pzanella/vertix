@@ -2929,11 +2929,18 @@ export class VertixEngine {
         // interpolation). No new objects, no layout math — that only runs
         // at detection ticks.
         const smoothingAlpha = paneSmoothingAlpha(frameDtSec);
+        let cropMove = 0;
         for (let i = 0; i < this.targetPanes.length; i++) {
           const target = this.targetPanes[i].pane;
-          const smoothed = lerpPaneRectInto(this.smoothedPanes[i], target.source, smoothingAlpha);
+          const before = this.smoothedPanes[i];
+          const beforeX = before.x + before.w / 2;
+          const beforeY = before.y + before.h / 2;
+          const smoothed = lerpPaneRectInto(before, target.source, smoothingAlpha);
+          if (probe)
+            cropMove += Math.hypot(smoothed.x + smoothed.w / 2 - beforeX, smoothed.y + smoothed.h / 2 - beforeY);
           drawCrop(ctx, source, smoothed, target.dest, scaleX, scaleY);
         }
+        if (probe && cropMove > 0) probe.recordCropMove(now, cropMove / srcW);
       }
       this.drawnLayout.broll = speakerCount === 0;
       this.drawnLayout.targetPanes = this.targetPanes;

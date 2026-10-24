@@ -13,7 +13,7 @@ import type { BenchmarkWasmBuild } from "./suitePlan";
 import type { CutSource } from "../lookahead/decisionTimeline";
 import type { LayoutRule, TrackSnapshot } from "../tracking/layoutPlanner";
 import type { ShotType } from "../tracking/shotType";
-import { TrackingRecorder, type TrackingSummary } from "./trackingStats";
+import { TrackingRecorder, type LayoutRuleEvents, type TrackingSummary } from "./trackingStats";
 import type { BenchmarkFailure, ResourceSnapshot } from "./resourceStats";
 
 export type DetectionPath = "worker" | "main-thread";
@@ -69,6 +69,8 @@ export interface BenchmarkProbe {
   recordShot(nowMs: number, shot: ShotType): void;
   /** Schema v8: the time one whole-frame (no crop) frame took to draw. */
   recordFullSceneDraw(ms: number): void;
+  /** Schema v8: how far the drawn crop centres moved on one frame (all panes), in frame widths. */
+  recordCropMove(nowMs: number, frameWidths: number): void;
   /** Optional, for diagnostics (not used by BenchmarkRecorder): every track of one detection. */
   recordTrackSnapshot?(
     mediaTimeSec: number,
@@ -335,6 +337,8 @@ export interface BenchmarkClipRaw {
   skippedDetections: { mediaTimeSec: number[]; warmup: number[] };
   layoutChanges: { nowMs: number[]; mediaTimeSec: number[]; warmup: number[] };
   longTasks: { startTimeMs: number[]; durationMs: number[]; warmup: number[] };
+  /** Schema v8: every displayed layout rule change. */
+  layoutRules: LayoutRuleEvents;
 }
 
 /** Lookahead state of one run (schema v5). */
@@ -745,7 +749,12 @@ export class BenchmarkRecorder implements BenchmarkProbe {
 
   recordLayoutRule(nowMs: number, rule: LayoutRule, subjectTrackId: number, isCut = false): void {
     if (this.finished) return;
-    this.tracking.recordRule(nowMs, rule, subjectTrackId, isCut);
+    this.tracking.recordRule(nowMs, rule, subjectTrackId, isCut, this.lastMediaTime);
+  }
+
+  recordCropMove(nowMs: number, frameWidths: number): void {
+    if (this.finished) return;
+    this.tracking.recordCropMove(nowMs, frameWidths);
   }
 
   recordShot(nowMs: number, shot: ShotType): void {
@@ -1115,6 +1124,7 @@ export class BenchmarkRecorder implements BenchmarkProbe {
         mediaTimeSec: toArray(this.skippedMediaTime, s),
         warmup: toArray(this.skippedWarmup, s),
       },
+      layoutRules: this.tracking.ruleEvents(),
       layoutChanges: {
         nowMs: toArray(this.layoutNow, l),
         mediaTimeSec: toArray(this.layoutMediaTime, l),

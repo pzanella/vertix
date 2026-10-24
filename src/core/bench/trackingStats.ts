@@ -28,11 +28,23 @@ export interface TrackingSummary {
   gridSecOnWideShots: number;
   /** Schema v8: time to draw one whole-frame (no crop) frame, in ms. */
   fullSceneDrawMs: SampleSummary;
+  /** Schema v8: distance the drawn crop centres moved per layout (all panes summed), in frame widths; layout changes and snaps not included. */
+  cropPathFrameWidths: Record<LayoutRule, number>;
+  /** Schema v8: cropPathFrameWidths per minute of measured playback in that layout (null when never shown). */
+  cropPathPerMin: Record<LayoutRule, number | null>;
+}
+
+/** Schema v8 raw: every displayed layout rule change, with the media time of the frame it appeared on. */
+export interface LayoutRuleEvents {
+  nowMs: number[];
+  mediaTimeSec: number[];
+  rule: LayoutRule[];
 }
 
 const RULE_EVENT_CAPACITY = 8192;
 const SHOT_EVENT_CAPACITY = 8192;
 const FULL_SCENE_DRAW_CAPACITY = 131072;
+const CROP_MOVE_CAPACITY = 262144;
 const NO_SUBJECT = -1;
 
 /**
@@ -52,6 +64,11 @@ export class TrackingRecorder {
   private readonly ruleIndex = new Uint8Array(RULE_EVENT_CAPACITY);
   private readonly ruleSubject = new Float64Array(RULE_EVENT_CAPACITY);
   private readonly ruleCut = new Uint8Array(RULE_EVENT_CAPACITY);
+  private readonly ruleMediaTime = new Float64Array(RULE_EVENT_CAPACITY);
+  private readonly cropNow = new Float64Array(CROP_MOVE_CAPACITY);
+  private readonly cropRule = new Uint8Array(CROP_MOVE_CAPACITY);
+  private readonly cropDistance = new Float64Array(CROP_MOVE_CAPACITY);
+  private cropCount = 0;
   private ruleCount = 0;
   private lastRule = -1;
   private lastSubject = NO_SUBJECT;
@@ -95,7 +112,7 @@ export class TrackingRecorder {
   }
 
   /** The rule and followed track (-1 for none) applied on a displayed frame; only changes are stored. */
-  recordRule(nowMs: number, rule: LayoutRule, subjectTrackId: number, isCut: boolean): void {
+  recordRule(nowMs: number, rule: LayoutRule, subjectTrackId: number, isCut: boolean, mediaTimeSec = NaN): void {
     const index = LAYOUT_RULES.indexOf(rule);
     if (index === this.lastRule && subjectTrackId === this.lastSubject && !isCut) return;
     const i = this.ruleCount;
@@ -107,6 +124,7 @@ export class TrackingRecorder {
     this.ruleIndex[i] = index;
     this.ruleSubject[i] = subjectTrackId;
     this.ruleCut[i] = isCut ? 1 : 0;
+    this.ruleMediaTime[i] = mediaTimeSec;
     this.ruleCount = i + 1;
     this.lastRule = index;
     this.lastSubject = subjectTrackId;
@@ -125,6 +143,30 @@ export class TrackingRecorder {
     this.shotIndex[i] = index;
     this.shotCount = i + 1;
     this.lastShot = index;
+  }
+
+  /** How far the drawn crop centres moved on one frame, in frame widths, under the rule last recorded. */
+  recordCropMove(nowMs: number, frameWidths: number): void {
+    if (this.lastRule < 0) return;
+    const i = this.cropCount;
+    if (i >= CROP_MOVE_CAPACITY) {
+      this.overflow += 1;
+      return;
+    }
+    this.cropNow[i] = nowMs;
+    this.cropRule[i] = this.lastRule;
+    this.cropDistance[i] = frameWidths;
+    this.cropCount = i + 1;
+  }
+
+  /** Every displayed rule change, for raw output. */
+  ruleEvents(): LayoutRuleEvents {
+    const n = this.ruleCount;
+    return {
+      nowMs: Array.from(this.ruleNow.subarray(0, n)),
+      mediaTimeSec: Array.from(this.ruleMediaTime.subarray(0, n)),
+      rule: Array.from(this.ruleIndex.subarray(0, n), (index) => LAYOUT_RULES[index]),
+    };
   }
 
   /** Time to draw one whole-frame (no crop) frame. */
@@ -176,7 +218,28 @@ export class TrackingRecorder {
       shotChangesPerMin: minutes ? shots.changes / minutes : null,
       gridSecOnWideShots: gridTimeOnWideShots(events, shotEvents, fromMs, toMs) / 1000,
       fullSceneDrawMs: summarize(this.fullSceneDraw.subarray(0, this.fullSceneDrawCount)),
+      ...this.cropPath(fromMs, toMs, rules.timeInRulePct),
     };
+  }
+
+  private cropPath(
+    fromMs: number | null,
+    toMs: number | null,
+    timeInRulePct: Record<LayoutRule, number>
+  ): Pick<TrackingSummary, "cropPathFrameWidths" | "cropPathPerMin"> {
+    const path = Object.fromEntries(LAYOUT_RULES.map((rule) => [rule, 0])) as Record<LayoutRule, number>;
+    const perMin = Object.fromEntries(LAYOUT_RULES.map((rule) => [rule, null])) as Record<LayoutRule, number | null>;
+    if (fromMs === null || toMs === null || toMs <= fromMs)
+      return { cropPathFrameWidths: path, cropPathPerMin: perMin };
+    for (let i = 0; i < this.cropCount; i++) {
+      if (this.cropNow[i] >= fromMs && this.cropNow[i] <= toMs)
+        path[LAYOUT_RULES[this.cropRule[i]]] += this.cropDistance[i];
+    }
+    for (const rule of LAYOUT_RULES) {
+      const minutes = ((timeInRulePct[rule] / 100) * (toMs - fromMs)) / 60000;
+      perMin[rule] = minutes > 0 ? path[rule] / minutes : null;
+    }
+    return { cropPathFrameWidths: path, cropPathPerMin: perMin };
   }
 }
 

@@ -314,6 +314,11 @@ Further limits:
   should be 0.
 - `fullSceneDrawMs`: time to draw one whole-frame (no crop) frame, in ms,
   summary with p50/p95. Only frames drawn whole are counted.
+- `cropPathFrameWidths`, `cropPathPerMin`: how far the drawn crop centres
+  moved, per displayed rule (all panes summed), in frame widths, and that
+  per minute of measured playback in the rule. Glides only: layout changes
+  and snaps are not counted. `raw.layoutRules` lists every displayed rule
+  change with the media time of its frame.
 - **Known limit:** a mid-distance group of 2–3 faces (largest face about
   0.15–0.25 of the frame) is treated as close: it keeps the speaker layout
   and is not shown whole. Licensed clip B (0–17 s, journalist voice-over) is
