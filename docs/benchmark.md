@@ -324,19 +324,29 @@ Further limits:
   and is not shown whole. Licensed clip B (0–17 s, journalist voice-over) is
   the case seen: about 4 s of it is classified close. No crowd rule and no
   motion signal are used, so as not to turn 3-speaker close shots wide.
-- **Grid only with panel evidence.** With 3+ resolved faces, the grid is
-  shown only after the confirmed faces have been still for 1.0 s (median
-  centre shift per detection pair at most 0.04 face heights). It is left
-  after 0.6 s of consecutive moving pairs, a cut, or a change of the face
-  count. Without evidence the whole frame is shown. Measured on the
-  synthetic panels and licensed clip B at 4–6 s, which did not hold still in that window.
-  - **Accepted cost:** after each hard cut the whole frame is shown until
-    the panel evidence exists. On the cross-* clips this adds one layout
-    change per panel part (4 instead of 3 on main, 3 runs). Accepted as the
-    price of "no grid flash after a cut"; a cut cannot carry evidence over.
+- **Multi-pane only with panel evidence.** With 2+ resolved faces, stacked
+  or grid is shown only after the confirmed faces have been still for
+  1.0 s: mean centre shift per detection pair at most 0.08 face heights for
+  two faces (`PANEL_MAX_SHIFT_HEIGHTS_2`), median at most 0.04 for three or
+  more (`PANEL_MAX_SHIFT_HEIGHTS`). It is left after 0.6 s of consecutive
+  moving pairs, a cut, or fewer than two seats. Without evidence the whole
+  frame is shown. Measured on the synthetic panels, the 2-speakers samples
+  and licensed clip B, which did not hold still in its measured windows.
+  - **Seats:** with evidence each face has a seat (its pane). A missing face
+    keeps its seat for `MULTIPANE_HOLD_SEC` = 2.5 s (set from the longest
+    gap on licensed clip C, 2.2 s); a new confirmed face at the same place
+    takes it over. A new face gets a seat only after being still for 1.0 s
+    itself, so a short-lived false box adds no pane.
+  - **Accepted cost:** after each hard cut, and at the start of a clip, the
+    whole frame is shown until the evidence exists (about 1 s). On the
+    cross-* clips this adds one layout change per panel part (4 instead of 3
+    on main); cross-same-count goes from 3 to 6.
   - **Known limit:** a crowd or group that moves (or never holds 1.0 s of
-    still pairs) is shown whole, not as a grid. Licensed clip B at 4–6 s did not hold
-    still; this is a measured window of 5 pairs, not a general crowd result.
+    still pairs) is shown whole, not in panes. Two speakers who move a lot
+    while talking (2-speakers-b) lose most of their stacked time.
+- **Stationary camera.** A pane's crop stays put while its face's centre is
+  inside 50% of the crop width and 40% of its height (around where the crop
+  aims the face), and is aimed again only when the face leaves that box.
 
 **Long tasks (`longTasks`)**
 
