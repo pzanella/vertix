@@ -31,6 +31,8 @@ const args = process.argv.slice(2);
 const chromePath = args.find((arg) => arg.startsWith("--chrome="))?.slice("--chrome=".length) ?? DEFAULT_CHROME;
 const headed = args.includes("--headed");
 const allBuilds = args.includes("--all-builds");
+// Also saves every run's raw samples (frames, detections, triggers, layout rules) to .eval/lookahead-raw-<label>.json.
+const rawLabel = args.find((arg) => arg.startsWith("--save-raw="))?.slice("--save-raw=".length);
 const cpuThrottle = Number(args.find((arg) => arg.startsWith("--cpu-throttle="))?.slice("--cpu-throttle=".length) ?? 1);
 const CLIP_TIMEOUT_MS = 10 * 60 * 1000;
 
@@ -53,7 +55,7 @@ const CLIPS = ONLY ? ALL_CLIPS.filter((clip) => clip.file === ONLY) : ALL_CLIPS;
  * - one 16:9 run (lookahead must be bypassed);
  * - a 16:9 -> 9:16 switch per build, timed.
  */
-async function runInPage(clips, extras, allBuilds) {
+async function runInPage(clips, extras, allBuilds, saveRaw) {
   const core = await import("/src/core/index.ts");
   const video = document.createElement("video");
   video.muted = false;
@@ -116,6 +118,8 @@ async function runInPage(clips, extras, allBuilds) {
         resolvedCx: raw.detections.resolvedCx,
         triggered: raw.detections.triggered,
       },
+      raw: saveRaw ? raw : undefined,
+      fullSceneDrawMs: summary.tracking?.fullSceneDrawMs,
     });
   };
 
@@ -220,7 +224,7 @@ try {
   const { runs, modeSwitches } = await runInHeadlessChrome({
     root,
     pageFunction: runInPage,
-    args: [CLIPS, !ONLY, allBuilds],
+    args: [CLIPS, !ONLY, allBuilds, Boolean(rawLabel)],
     chromePath,
     headed,
     cpuThrottle,
@@ -300,6 +304,10 @@ try {
   }
 
   mkdirSync(join(root, ".eval"), { recursive: true });
+  if (rawLabel) {
+    writeFileSync(join(root, `.eval/lookahead-raw-${rawLabel}.json`), JSON.stringify(runs));
+    for (const run of runs) delete run.raw;
+  }
   writeFileSync(
     join(root, ".eval/lookahead-check.json"),
     JSON.stringify(
