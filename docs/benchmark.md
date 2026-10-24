@@ -326,12 +326,15 @@ Further limits:
   motion signal are used, so as not to turn 3-speaker close shots wide.
 - **Multi-pane only with panel evidence.** With 2+ resolved faces, stacked
   or grid is shown only after the confirmed faces have been still for
-  1.0 s: mean centre shift per detection pair at most 0.08 face heights for
-  two faces (`PANEL_MAX_SHIFT_HEIGHTS_2`), median at most 0.04 for three or
-  more (`PANEL_MAX_SHIFT_HEIGHTS`). It is left after 0.6 s of consecutive
-  moving pairs, a cut, or fewer than two seats. Without evidence the whole
-  frame is shown. Measured on the synthetic panels, the 2-speakers samples
-  and licensed clip B, which did not hold still in its measured windows.
+  1.0 s of media time: mean face speed at most 0.4 face heights per second
+  for two faces (`PANEL_MAX_SPEED_HEIGHTS_PER_SEC_2`), median at most 0.2
+  for three or more (`PANEL_MAX_SPEED_HEIGHTS_PER_SEC`). Speeds use the real
+  time between detections, so the result does not depend on the detection
+  rate; a pair longer than 0.5 s (skipped detections) counts as neither
+  still nor moving. It is left after 0.6 s of moving time, a cut, or fewer
+  than two seats. Without evidence the whole frame is shown. Measured on the
+  synthetic panels, the 2-speakers samples and licensed clip B, which did not hold
+  still in its measured windows.
   - **Seats:** with evidence each face has a seat (its pane). A missing face
     keeps its seat for `MULTIPANE_HOLD_SEC` = 2.5 s (set from the longest
     gap on licensed clip C, 2.2 s); a new confirmed face at the same place
@@ -344,6 +347,10 @@ Further limits:
   - **Known limit:** a crowd or group that moves (or never holds 1.0 s of
     still pairs) is shown whole, not in panes. Two speakers who move a lot
     while talking (2-speakers-b) lose most of their stacked time.
+- **Missed detections.** A confirmed track that coasts through a missed
+  detection (up to 0.8 s) still counts for the person count and the shot
+  type, so a real exit shows up to 0.8 s later. "None" needs no confirmed
+  track left, and leaving "none" uses the short 0.2 s hold.
 - **Stationary camera.** A pane's crop stays put while its face's centre is
   inside 50% of the crop width and 40% of its height (around where the crop
   aims the face), and is aimed again only when the face leaves that box.
