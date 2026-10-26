@@ -632,6 +632,9 @@ What this means for the metrics:
 
 ## Known limits
 
+- **Shot type sees only face sizes.** A person who stays large in the frame
+  while the scene around them changes (an interviewee signing autographs)
+  stays close, framed single; the change of scene is not seen.
 - **Cut shown early at 50 fps.** On cross-50fps the crop change at a cut is
   sometimes shown 1–3 frames before the cut, also on main (the trigger scores
   the frame next to the cut as the cut frame). `scripts/check-lookahead.mjs`
