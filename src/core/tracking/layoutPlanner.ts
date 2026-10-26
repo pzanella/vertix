@@ -31,6 +31,8 @@ export const LAYOUT_RULES: readonly LayoutRule[] = ["broll", "single", "stacked"
 export const SUBJECT_RULE_MIN_FACES = 3;
 // From this many faces up, a layout has several panes (stacked or grid) and needs panel evidence.
 export const MULTIPANE_MIN_FACES = 2;
+// A coasting track holds the layout only after this many matched detections.
+const MIN_HITS_TO_COAST = 2;
 // After the foreground count drops below SUBJECT_RULE_MIN_FACES, the
 // subject is kept this long, so one missed face does not reframe.
 const SUBJECT_GRACE_BELOW_MIN_SEC = 0.4;
@@ -167,8 +169,12 @@ export class LayoutPlanner {
     const visibleForeground = tracks.filter((t) => t.visible && t.foreground);
     // A confirmed track missed by one detection still holds its place
     // among 3+ people, so a missed face does not reset the panel evidence
-    // or reshape the group.
-    const presentForeground = tracks.filter((t) => t.foreground && (t.visible || t.confirmed));
+    // or reshape the group. Only a track matched on at least two
+    // detections coasts: one born on a cut frame and never seen again (the
+    // previous shot's face on a cut flagged a frame early) does not.
+    const presentForeground = tracks.filter(
+      (t) => t.foreground && (t.visible || (t.confirmed && t.hits >= MIN_HITS_TO_COAST))
+    );
     // Only confirmed tracks start the 3+ rules: a face seen for one or two
     // detections (often a false detection next to a real face) must not
     // turn a two-person shot into a main-subject shot.

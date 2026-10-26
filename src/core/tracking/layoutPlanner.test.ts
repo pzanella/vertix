@@ -158,3 +158,24 @@ describe("LayoutPlanner, main's rules for 3+ faces (default)", () => {
     expect(plans.at(-1)!.plan.debounceKey).toBe(1);
   });
 });
+
+describe("LayoutPlanner, coasting tracks", () => {
+  const face = () => testFace(0.5, 0.45, 0.3);
+
+  it("does not count a face seen only on the cut frame once it is missed", () => {
+    const planner = new LayoutPlanner();
+    planner.plan([face()], null, 10, true, FRAME);
+    const next = planner.plan([], null, 10.2, false, FRAME);
+    expect(next.debounceKey).toBe(0);
+    expect(next.confirmedPresentCount).toBe(0);
+  });
+
+  it("keeps counting a face matched on two detections through a missed detection", () => {
+    const planner = new LayoutPlanner();
+    planner.plan([face()], null, 10, true, FRAME);
+    planner.plan([face()], null, 10.2, false, FRAME);
+    const missed = planner.plan([], null, 10.4, false, FRAME);
+    expect(missed.debounceKey).toBe(1);
+    expect(missed.confirmedPresentCount).toBe(1);
+  });
+});
