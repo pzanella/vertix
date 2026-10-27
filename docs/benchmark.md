@@ -56,10 +56,10 @@ clips headless.
 
 While the local clips are served (dev server or `vite preview` with clips in
 `.env.local`, or with `VERTIX_LOCAL_CLIPS=1` set), the server listens on
-`127.0.0.1` only. `--host` without an address, `0.0.0.0` and `::` are refused,
-so the clips never reach every network interface; to reach a phone on the same
-network, pass that one address (`npm run preview -- --host 192.168.x.y`) and
-stop the server after the run.
+`127.0.0.1` only: any other `--host` (none, `0.0.0.0`, `::`, `localhost`, a
+named address) is refused, so the clips never reach the network. A phone
+reaches the server over USB with `adb reverse tcp:4173 tcp:4173` and opens
+`http://localhost:4173/`.
 
 Labels and file names of licensed clips stay in `.env.local` and `.eval/`
 (gitignored). Docs, code and commits refer to them as licensed clip A, B, …;

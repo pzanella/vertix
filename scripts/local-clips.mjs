@@ -16,6 +16,14 @@ export const LOCAL_CLIPS_MARKER = "vertix-local-clips-included";
 export const LOCAL_CLIP_ROUTE = "/local-clips/";
 // A long news stream is measured over its first minutes only.
 const DEFAULT_MAX_SECONDS = 120;
+// The only host a server with the local clips may listen on.
+export const LOCAL_CLIPS_HOST = "127.0.0.1";
+
+/** Why a server with the local clips may not listen on `host` (a Vite `server.host` / `preview.host`), or null. */
+export function localClipsHostError(host) {
+  if (host === LOCAL_CLIPS_HOST) return null;
+  return `Local clips are served: listen on ${LOCAL_CLIPS_HOST} only, not on ${host === true ? "every interface" : String(host)}`;
+}
 
 /** Reads one variable from the environment, else from .env.local. */
 export function readLocalEnv(root, name) {

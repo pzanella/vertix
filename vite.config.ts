@@ -1,6 +1,12 @@
 import { defineConfig, type Plugin } from "vite";
 import react from "@vitejs/plugin-react";
-import { LOCAL_CLIPS_MARKER, localClipMiddleware, readLocalClips } from "./scripts/local-clips.mjs";
+import {
+  LOCAL_CLIPS_HOST,
+  LOCAL_CLIPS_MARKER,
+  localClipMiddleware,
+  localClipsHostError,
+  readLocalClips,
+} from "./scripts/local-clips.mjs";
 import { PAGE_CONTENT_SECURITY_POLICY } from "./scripts/lib/content-security-policy.mjs";
 
 interface LocalClip {
@@ -33,11 +39,7 @@ function localClips(command: "serve" | "build", mode: string): LocalClip[] {
   return clips;
 }
 
-// A server with the local clips listens on loopback only by default and
-// refuses every-interface hosts (`--host`, 0.0.0.0, ::).
-const LOOPBACK_HOST = "127.0.0.1";
-const ALL_INTERFACE_HOSTS: (string | boolean | undefined)[] = [true, "0.0.0.0", "::"];
-
+/** While local clips are served, dev and preview listen on LOCAL_CLIPS_HOST only. */
 function servesLocalClips(command: "serve" | "build", mode: string): boolean {
   return command === "serve" && (process.env.VERTIX_LOCAL_CLIPS === "1" || localClips(command, mode).length > 0);
 }
@@ -50,11 +52,8 @@ function localClipFiles(command: "serve" | "build", mode: string): Plugin {
     configResolved(config) {
       if (!servesLocalClips(command, mode)) return;
       for (const host of [config.server.host, config.preview.host]) {
-        if (ALL_INTERFACE_HOSTS.includes(host)) {
-          throw new Error(
-            `Local clips are served: listen on ${LOOPBACK_HOST} or one named address, not on every interface`
-          );
-        }
+        const error = localClipsHostError(host);
+        if (error) throw new Error(error);
       }
     },
     configureServer(server) {
@@ -83,8 +82,8 @@ function contentSecurityPolicy(): Plugin {
 export default defineConfig(({ command, mode }) => ({
   plugins: [react(), contentSecurityPolicy(), localClipFiles(command, mode)],
   ...(servesLocalClips(command, mode) && {
-    server: { host: LOOPBACK_HOST },
-    preview: { host: LOOPBACK_HOST },
+    server: { host: LOCAL_CLIPS_HOST },
+    preview: { host: LOCAL_CLIPS_HOST },
   }),
   define: {
     __VERTIX_LOCAL_CLIPS__: JSON.stringify(localClips(command, mode)),
