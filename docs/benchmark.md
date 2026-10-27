@@ -386,6 +386,70 @@ Do **not** compare `frameWorkMs` between the two runs directly. The baseline
 draws a 1280×720 output, while 9:16 draws a 405×720 output, so the per-frame
 draw costs are not equivalent.
 
+## Shot type and multi-pane results
+
+Measured for the shot type, panel evidence and seats change. Desktop: the
+production build (`scripts/bench-preview.mjs`), 3 runs of the 53-run suite,
+0 failures. Licensed clips are named by letter: A street interview, B and G
+news pieces with crowds (G held out), C news interview with two people, D–F
+sport interviews.
+
+### Constants (frozen)
+
+| Constant | Value | Reason |
+|---|---|---|
+| `CLOSE_MIN_HMAX` / `WIDE_MAX_HMAX` | 0.25 / 0.15 | news and 3-speakers set the lower bound, a close shot in clip B the upper |
+| `SHOT_HOLD_SEC` / `CUT_HOLD_SEC` | 1.0 / 0.2 s | 0.2 s also when leaving "none" |
+| `PANEL_STILL_SEC` / `PANEL_EXIT_SEC` | 1.0 / 0.6 s | media time |
+| `PANEL_MAX_SPEED_HEIGHTS_PER_SEC` | 0.2 h/s (3+ faces, median) | panels at most 0.122; the crowd in clip B at least 0.523 |
+| `PANEL_MAX_SPEED_HEIGHTS_PER_SEC_2` | 0.4 h/s (2 faces, mean) | equals 0.08 per pair at 5 Hz |
+| `MULTIPANE_HOLD_SEC` | 2.5 s | longest missing-face gap on clip C is 2.2 s |
+| `MIN_HITS_TO_COAST` | 2 | a face seen only on a cut frame does not hold the layout |
+| `STATIONARY_MARGIN_WIDTH` / `_HEIGHT` | 0.5 / 0.4 | not adjusted |
+
+### Labelled time per clip
+
+| Clip | Expected | Labelled time | Shown as expected | Multi-pane on single/whole | Grid |
+|---|---|---|---|---|---|
+| C | multi-pane | 143.6–143.8 s | 93.3% | 0 s | 0 s |
+| B | single | 9.0 s | 92.5–94.2% | 0 s | 0 s |
+| B | whole | 95.7–96.0 s | 99.4–99.7% | 0 s | 0 s |
+| G (held out) | single | 30.4 s | 94.1–94.7% | 0 s | 0 s |
+| G (held out) | whole | 44.6–44.8 s | 97.2–97.6% | 0 s | 0 s |
+
+### Criteria
+
+| Criterion | Result |
+|---|---|
+| B, G: 0 s multi-pane on labelled whole/single | ✓ |
+| B, G: labelled single ≥ 90% | ✓ 92.5–94.7% |
+| C: stacked ≥ 90% | ✓ 93.3% |
+| C: grid 0 s | ✓ |
+| C: layout changes ≤ 11 (main) | ✓ 7 |
+| C: crop path lower | ✓ 0.248 → 0.056 frame widths per minute |
+| Samples as on main apart from the ~1 s wait | ✓ 2-speakers-a/c/d, 3-speakers; 2-speakers-b shown whole (intended) |
+| No displayed layout under 0.5 s except at cuts | ✓ none in 3 runs |
+| No single → whole → single within 1 s after a cut (cross-*, B–G) | ✓ 0 |
+| Cut offsets | ✓ 0 frames on the 25 fps cut clips; cross-50fps within −2…+1 frames (also on main) |
+
+Checked by eye and intended: 2-speakers-b is shown whole (the speakers move
+a lot while talking); clip A at 21.28 s has a flash in the source, which
+resets the evidence for about 1.2 s; clip C is shown whole now and then when
+the two people move; cross-count goes cut → whole → grid; the moving crowd in
+clip B (4–6 s) and in clip G is shown whole.
+
+### Phone (Android, main vs this change, 2 runs each, alternated)
+
+| Measure | Result |
+|---|---|
+| Failures, hidden runs | 0 on both builds |
+| Lookahead length | identical on 47 of 51 rows; the other 4 are 40 ms shorter on the branch |
+| Detection p95 | same within noise: about 110–125 ms SIMD, 200–233 ms scalar |
+| Whole-frame draw p95 | 0.36–2.06 ms (JavaScript time, not GPU time) |
+| Dropped frames, 25–30 fps clips | 0–8 per run on both builds, so the cached-backdrop fallback is not needed |
+| Dropped frames, 50 fps clips | high on both builds: 2-speakers-b main 89–93, branch 58–106; cross-50fps main 155–160, branch 137–150 |
+| Cut offsets | 0 frames on the 25 fps cut clips; cross-50fps within −2…+1 frames on both builds, no misses |
+
 ## Environment info
 
 Each report includes:
