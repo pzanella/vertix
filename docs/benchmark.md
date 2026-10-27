@@ -41,7 +41,7 @@ the suite without ever being committed or deployed. List them in `.env.local`
 (gitignored):
 
 ```
-VERTIX_E2E_HLS_URLS=rally|https://…/master.m3u8|120,interview|https://…/master.m3u8
+VERTIX_E2E_HLS_URLS=news-a|https://…/master.m3u8|120,interview-b|https://…/master.m3u8
 ```
 
 Each comma-separated entry is `url`, `label|url` or `label|url|maxSeconds`
@@ -53,6 +53,11 @@ a production build only with `VERTIX_LOCAL_CLIPS=1 npm run build` (then
 workflow runs `scripts/check-no-local-clips.mjs`, which fails if a bundle
 carries the list. `node scripts/check-lookahead.mjs --licensed` runs the same
 clips headless.
+
+Labels and file names of licensed clips stay in `.env.local` and `.eval/`
+(gitignored). Docs, code and commits refer to them as licensed clip A, B, …;
+scripts read the labels at runtime (for example `scripts/eval-shots.ts` reads
+its tuning and held-out sets from `.eval/shot-clip-sets.json`).
 
 ### Settings
 

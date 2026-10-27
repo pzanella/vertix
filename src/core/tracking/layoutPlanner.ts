@@ -12,7 +12,7 @@ import { CLEAR_LEAD_FACTOR, leadFactor, scoreContext, subjectScore, SubjectSelec
  *   panelDetector.ts), with the debounce keyed on the layout kind.
  * - "main": main's active-speaker resolution (mainActiveSpeaker.ts) on the
  *   foreground faces, debounced on the pane count as on main.
- * "main" is the default: on news-interview-2p "tracker" made 13-15 layout
+ * "main" is the default: on licensed clip C "tracker" made 13-15 layout
  * changes against main's 11 (see docs/benchmark.md).
  */
 export type ManyFacesRules = "tracker" | "main";

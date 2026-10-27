@@ -1,6 +1,6 @@
 // Tracker + layout rules cost per detection, measured in Node with a
 // precise timer (the browser checks' timer is too coarse for it). Synthetic
-// scenes: 1, 2 and 3 foreground faces, and a rally (3 large faces, 12 small).
+// scenes: 1, 2 and 3 foreground faces, and a crowd (3 large faces, 12 small).
 //
 // Usage: npx vite-node scripts/bench-tracker.ts
 import { LayoutPlanner } from "../src/core/tracking/layoutPlanner";
@@ -26,7 +26,7 @@ const SCENES: Record<string, (t: number) => FaceBox[]> = {
   "1 face": (t) => [face(0.5, 0.4, 0.3, t, 1)],
   "2 faces": (t) => [face(0.3, 0.4, 0.25, t, 1), face(0.7, 0.4, 0.25, t, 2)],
   "3 faces": (t) => [face(0.2, 0.4, 0.22, t, 1), face(0.5, 0.4, 0.22, t, 2), face(0.8, 0.4, 0.22, t, 3)],
-  "rally (3 + 12 small)": (t) => [
+  "crowd (3 + 12 small)": (t) => [
     face(0.3, 0.45, 0.25, t, 1),
     face(0.5, 0.4, 0.3, t, 2),
     face(0.7, 0.45, 0.24, t, 3),
