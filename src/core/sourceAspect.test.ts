@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { displayedSourceSize, fittedOutputSize, isShownAsIs } from "./sourceAspect";
+import { displayedSourceSize, fittedOutputSize, isShownAsIs, wholeFrameRect } from "./sourceAspect";
 
 describe("isShownAsIs", () => {
   it("shows portrait and square sources whole, and crops 4:3 and wider", () => {
@@ -34,5 +34,15 @@ describe("fittedOutputSize", () => {
     expect(fittedOutputSize(1080, 1920, 16 / 9)).toEqual({ width: 3413, height: 1920 });
     expect(fittedOutputSize(1080, 1080, 9 / 16)).toEqual({ width: 1080, height: 1920 });
     expect(fittedOutputSize(1080, 1920, 9 / 16)).toEqual({ width: 1080, height: 1920 });
+  });
+});
+
+describe("wholeFrameRect", () => {
+  it("fits a 16:9 frame to the output width and centres it vertically", () => {
+    expect(wholeFrameRect(1920, 1080, 1080, 1920)).toEqual({ x: 0, y: 656, w: 1080, h: 608 });
+  });
+
+  it("fills the output height when the source is as wide as the output", () => {
+    expect(wholeFrameRect(1080, 1920, 1080, 1920)).toEqual({ x: 0, y: 0, w: 1080, h: 1920 });
   });
 });

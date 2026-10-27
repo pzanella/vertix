@@ -123,6 +123,23 @@ const MULTI_SPEAKER_ZOOM_FACTOR = 2.75;
 // themselves close to it.
 const FACE_VERTICAL_ANCHOR = 0.35;
 
+// Stationary camera: a pane's crop stays put while its face's centre stays
+// inside a box of this share of the crop's width and height, centred where
+// the crop aims the face (horizontal centre, FACE_VERTICAL_ANCHOR). AutoFlip
+// does the same per shot when the subject fits a still crop.
+export const STATIONARY_MARGIN_WIDTH = 0.5;
+export const STATIONARY_MARGIN_HEIGHT = 0.4;
+
+/** Whether `face`'s centre is inside the stationary margin of `crop` (source pixels). */
+export function faceInsideCropMargin(face: FaceBox, crop: PaneRect, srcW: number, srcH: number): boolean {
+  const aimX = crop.x + crop.w / 2;
+  const aimY = crop.y + crop.h * FACE_VERTICAL_ANCHOR;
+  return (
+    Math.abs(face.cx * srcW - aimX) <= (crop.w * STATIONARY_MARGIN_WIDTH) / 2 &&
+    Math.abs(face.cy * srcH - aimY) <= (crop.h * STATIONARY_MARGIN_HEIGHT) / 2
+  );
+}
+
 /**
  * A "cover" crop of the source frame at the given aspect ratio, sized from
  * the face's own height (see `zoomFactor`) and clamped to the source
@@ -215,14 +232,14 @@ export interface PaneTarget {
  * half, so each person stays centered in their own pane regardless of where
  * they sit in the frame.
  *
- * `previous` + `deadzone` add a dead zone: a pane's crop only moves if its
- * face has drifted more than `deadzone` (a fraction of frame width/height)
- * from the face that produced the *previous* result for that pane —
- * otherwise the previous pane (same crop, unchanged) is returned as-is, so
- * ordinary small gestures don't reopen the camera's LERP chase. Pass an
- * empty array for `previous` (or omit it) for a fresh, unconditional
- * layout — every pane counts as "moved", which is what a genuine layout
- * change (a new committed face count) wants.
+ * `previous` + `stationary` make each pane a stationary camera: its crop
+ * stays where it is while the face's centre stays inside the crop's
+ * margin (see faceInsideCropMargin), and is aimed again only when the face
+ * leaves it — otherwise the previous pane (same crop, unchanged) is
+ * returned as-is, so ordinary small movements don't reopen the camera's
+ * LERP chase. Pass an empty array for `previous` (or omit it) for a fresh,
+ * unconditional layout — every pane counts as "moved", which is what a
+ * genuine layout change (a new committed face count) wants.
  *
  * Deliberately stateless and cheap to call — callers decide *when* to call
  * it (typically: once, when the face count changes, or at a detection
@@ -235,7 +252,7 @@ export function computeSpeakerLayout(
   outW: number,
   outH: number,
   previous: PaneTarget[] = [],
-  deadzone = 0
+  stationary = false
 ): PaneTarget[] {
   if (faces.length === 0) return [];
 
@@ -254,7 +271,7 @@ export function computeSpeakerLayout(
       const face = ordered[idx];
       const dest: PaneRect = { x: col * paneW, y: rowIdx * rowH, w: paneW, h: rowH };
       const prev = previous[idx];
-      const moved = !prev || Math.abs(face.cx - prev.face.cx) > deadzone || Math.abs(face.cy - prev.face.cy) > deadzone;
+      const moved = !prev || !stationary || !faceInsideCropMargin(face, prev.pane.source, srcW, srcH);
 
       results.push(
         moved

@@ -37,6 +37,7 @@ export default function App() {
     speakerCount,
     isTransitioning,
     layoutRule,
+    shotType,
     sourceShownAsIs,
     meta,
     metrics,
@@ -218,6 +219,7 @@ export default function App() {
                 speakerCount={speakerCount}
                 isTransitioning={isTransitioning}
                 layoutRule={layoutRule}
+                shotType={shotType}
                 sourceShownAsIs={sourceShownAsIs}
               />
               {isBuffering && (
@@ -250,6 +252,7 @@ export default function App() {
             speakerCount={speakerCount}
             isTransitioning={isTransitioning}
             layoutRule={layoutRule}
+            shotType={shotType}
             sourceShownAsIs={sourceShownAsIs}
             showTracks={showTracks}
             onShowTracksChange={setShowTracks}

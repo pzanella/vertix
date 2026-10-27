@@ -11,6 +11,7 @@ function decision(mediaTimeSec: number, overrides: Partial<LayoutDecision> = {})
     cutSource: null,
     skinRejectedFaces: [],
     rule: "broll",
+    shotType: "close",
     subjectTrackId: null,
     paneTrackIds: [],
     tracks: [],

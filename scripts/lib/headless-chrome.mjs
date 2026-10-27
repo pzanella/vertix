@@ -7,6 +7,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createServer, preview } from "vite";
+import { LOCAL_CLIPS_HOST } from "../local-clips.mjs";
 
 const DEBUG_PORT = 9333;
 export const DEFAULT_CHROME = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
@@ -117,8 +118,8 @@ export async function runInHeadlessChrome({
   captureNetwork = false,
 }) {
   const server = productionPreview
-    ? await preview({ root, logLevel: "error", preview: { port: 0 } })
-    : await createServer({ root, logLevel: "error", server: { port: 0 } });
+    ? await preview({ root, logLevel: "error", preview: { host: LOCAL_CLIPS_HOST, port: 0 } })
+    : await createServer({ root, logLevel: "error", server: { host: LOCAL_CLIPS_HOST, port: 0 } });
   if (!productionPreview) await server.listen();
   const appUrl = server.resolvedUrls.local[0];
   const profileDir = mkdtempSync(join(tmpdir(), "vertix-check-"));

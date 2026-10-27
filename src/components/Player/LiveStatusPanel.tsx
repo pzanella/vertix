@@ -1,6 +1,6 @@
 import { memo } from "react";
 import type { ReframeMode } from "../../hooks/useWasmReframe";
-import type { LayoutRule } from "../../core";
+import type { LayoutRule, ShotType } from "../../core";
 import { classifyLayout, type LayoutBucket } from "./layoutStatus";
 
 interface LiveStatusPanelProps {
@@ -8,6 +8,7 @@ interface LiveStatusPanelProps {
   speakerCount: number;
   isTransitioning: boolean;
   layoutRule: LayoutRule;
+  shotType: ShotType;
   sourceShownAsIs: boolean;
 }
 
@@ -16,6 +17,7 @@ const LABEL: Record<LayoutBucket, (speakerCount: number) => string> = {
   "as-is": () => "Source is not landscape: shown as is",
   transition: () => "Scene Transition...",
   broll: () => "Scene Action / B-Roll",
+  wide: () => "Wide Shot (whole frame)",
   single: () => "Single Speaker",
   stacked: () => "Dual Focus (Speakers 1 & 2)",
   subject: () => "Main Subject",
@@ -28,6 +30,7 @@ const DOT: Record<LayoutBucket, string> = {
   "as-is": "bg-neutral-500",
   transition: "bg-amber-400",
   broll: "bg-purple-400",
+  wide: "bg-cyan-400",
   single: "bg-emerald-400",
   stacked: "bg-sky-400",
   subject: "bg-emerald-400",
@@ -40,9 +43,10 @@ export const LiveStatusPanel = memo(function LiveStatusPanel({
   speakerCount,
   isTransitioning,
   layoutRule,
+  shotType,
   sourceShownAsIs,
 }: LiveStatusPanelProps) {
-  const bucket = classifyLayout(mode, layoutRule, isTransitioning, sourceShownAsIs);
+  const bucket = classifyLayout(mode, layoutRule, isTransitioning, sourceShownAsIs, shotType);
 
   return (
     <div className="flex items-center gap-2 px-2.5 py-1 rounded-full bg-neutral-900 border border-neutral-800 text-xs text-neutral-300 w-fit">

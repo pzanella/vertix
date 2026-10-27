@@ -1,15 +1,17 @@
 import { AudioActivityMonitor } from "./audioActivity";
 import { PersonCountDebouncer } from "./personCount";
+import { ShotTypeTracker, type ShotType } from "./tracking/shotType";
 import {
   LayoutPlanner,
   paneCountOf,
+  MULTIPANE_MIN_FACES,
   SWITCH_DISSOLVE_DISTANCE,
   type LayoutPlan,
   type LayoutRule,
   type TrackSnapshot,
 } from "./tracking/layoutPlanner";
 import type { PanelVariant } from "./tracking/panelDetector";
-import { displayedSourceSize, fittedOutputSize, isShownAsIs } from "./sourceAspect";
+import { displayedSourceSize, fittedOutputSize, isShownAsIs, wholeFrameRect } from "./sourceAspect";
 import {
   computeSpeakerLayout,
   faceVisibleFraction,
@@ -225,6 +227,8 @@ export interface VertixState {
   isTransitioning: boolean;
   /** The rule behind the layout on screen (9:16 only). */
   layoutRule: LayoutRule;
+  /** The shot type on screen (9:16 only): "wide" and "none" are shown whole. */
+  shotType: ShotType;
   /** True when the source is not landscape: shown whole, without crop or detection. */
   sourceShownAsIs: boolean;
 }
@@ -618,10 +622,6 @@ function isSpeakerSized(f: FaceBox): boolean {
   );
 }
 
-// A face must drift more than this (a fraction of frame width/height) from
-// where its pane's crop was last aimed before the crop moves at all.
-const DEADZONE_FRACTION = 0.04;
-
 // Skin-rejection overlay style: dashed, so it can't be mistaken for a crop.
 const SKIN_REJECTED_STROKE = "#f97316";
 const SKIN_REJECTED_LINE_WIDTH = 3;
@@ -713,9 +713,8 @@ function drawFitFrame(
   blurCtx.filter = "none";
   ctx.drawImage(blurCanvas, Math.round((outW - bgW) / 2), Math.round((outH - bgH) / 2), bgW, bgH);
 
-  const fitScale = outW / srcW;
-  const fgH = Math.round(srcH * fitScale);
-  ctx.drawImage(video, 0, Math.round((outH - fgH) / 2), outW, fgH);
+  const frame = wholeFrameRect(srcW, srcH, outW, outH);
+  ctx.drawImage(video, frame.x, frame.y, frame.w, frame.h);
 }
 
 /** A framing to draw from the current frame: the fitted full frame (B-roll), or crops into panes. */
@@ -809,6 +808,7 @@ export class VertixEngine {
   private lastResolvedFaces: FaceBox[] = [];
   private personCount = new PersonCountDebouncer();
   private planner = new LayoutPlanner();
+  private shotTypes = new ShotTypeTracker();
   private lastPlanRule: LayoutRule = "broll";
   private lastSwitchedFar = false;
   private sourceShownAsIs = false;
@@ -828,6 +828,7 @@ export class VertixEngine {
   private decidedSpeakerCount = 0;
   private decidedLayoutKey = 0;
   private decidedRule: LayoutRule = "broll";
+  private decidedWholeFrame = false;
   // True once a frame was rendered (or buffered) since the last reset: the
   // no-crop layout counts as committed from then on.
   private hasFrameSinceReset = false;
@@ -840,6 +841,7 @@ export class VertixEngine {
   private displayedSpeakerCount = 0;
   private displayedSkinRejectedFaces: FaceBox[] = [];
   private displayedRule: LayoutRule = "broll";
+  private displayedShotType: ShotType = "close";
   private displayedSubjectTrackId: number | null = null;
   private displayedTracks: TrackSnapshot[] = [];
   private displayedPaneTrackIds: number[] = [];
@@ -1233,6 +1235,7 @@ export class VertixEngine {
       speakerCount: this.displayedSpeakerCount,
       isTransitioning: this.transitionStart !== null,
       layoutRule: this.displayedRule,
+      shotType: this.displayedShotType,
       sourceShownAsIs: this.sourceShownAsIs,
     };
   }
@@ -1362,18 +1365,21 @@ export class VertixEngine {
     this.detectionIntervalEma = 0;
     this.personCount.reset();
     this.planner.reset();
+    this.shotTypes.reset();
     this.lastPlanRule = "broll";
     this.lastSwitchedFar = false;
     this.decidedTargetPanes = [];
     this.decidedSpeakerCount = 0;
     this.decidedLayoutKey = 0;
     this.decidedRule = "broll";
+    this.decidedWholeFrame = false;
     this.hasFrameSinceReset = false;
     this.commitCountAtNextDetection = false;
     this.decisions.clear();
     this.displayedSpeakerCount = 0;
     this.displayedSkinRejectedFaces = [];
     this.displayedRule = "broll";
+    this.displayedShotType = "close";
     this.displayedSubjectTrackId = null;
     this.displayedTracks = [];
     this.displayedPaneTrackIds = [];
@@ -1700,13 +1706,7 @@ export class VertixEngine {
       return [{ source: { x: 0, y: 0, w: srcW, h: srcH }, dest: { x: 0, y: 0, w: outW, h: outH } }];
     }
     if (this.displayedSpeakerCount === 0) {
-      const fittedHeight = Math.round(srcH * (outW / srcW));
-      return [
-        {
-          source: { x: 0, y: 0, w: srcW, h: srcH },
-          dest: { x: 0, y: Math.round((outH - fittedHeight) / 2), w: outW, h: fittedHeight },
-        },
-      ];
+      return [{ source: { x: 0, y: 0, w: srcW, h: srcH }, dest: wholeFrameRect(srcW, srcH, outW, outH) }];
     }
     return this.targetPanes.map((p, i) => ({ source: this.smoothedPanes[i], dest: p.pane.dest }));
   }
@@ -1722,11 +1722,17 @@ export class VertixEngine {
     const ctx = this.tracksOverlayCtx;
     if (!ctx) return;
     ctx.clearRect(0, 0, outW, outH);
-    if (!this.reframing || this.displayedTracks.length === 0) return;
+    if (!this.reframing) return;
 
     const { w: srcW, h: srcH } = this.srcDims;
     const fontPx = Math.max(14, Math.round(outH / 40));
     ctx.font = `600 ${fontPx}px system-ui, sans-serif`;
+    if (this.mode === "9:16" && !this.sourceShownAsIs) {
+      ctx.textBaseline = "top";
+      ctx.fillStyle = TRACK_SUBJECT_STROKE;
+      ctx.fillText(`shot: ${this.displayedShotType}`, 8, 8);
+    }
+    if (this.displayedTracks.length === 0) return;
     ctx.textBaseline = "bottom";
     for (const { source, dest } of this.overlayViews(outW, outH)) {
       const scaleX = dest.w / source.w;
@@ -1978,9 +1984,20 @@ export class VertixEngine {
     this.lastResolvedFaces = plan.faces;
     this.lastPlanRule = plan.rule;
     this.lastSwitchedFar = plan.switchedFar;
-    const commitAtOnce = sceneCut.isCut || this.commitCountAtNextDetection;
+    const shotType = this.shotTypes.observe(
+      {
+        largestFaceSize: plan.largestForegroundSize,
+        foregroundCount: plan.foregroundCount,
+        confirmedPresentCount: plan.confirmedPresentCount,
+      },
+      mediaTimeSec,
+      sceneCut.isCut
+    );
+    // Back to a close shot from a wide one: the person count commits at once, not after its debounce.
+    const returnedToLayout = shotType === "close" && !plan.panelWholeFrame && this.decidedWholeFrame;
+    const commitAtOnce = sceneCut.isCut || this.commitCountAtNextDetection || returnedToLayout;
     // A count committed at once after a seek or a mode switch replaces whatever was on screen: no dissolve from it.
-    const snapWithoutCut = commitAtOnce && !sceneCut.isCut;
+    const snapWithoutCut = this.commitCountAtNextDetection && !sceneCut.isCut;
     this.commitCountAtNextDetection = false;
     const key = plan.debounceKey;
     const stableKey = commitAtOnce
@@ -2000,7 +2017,7 @@ export class VertixEngine {
         : decisionSec < mediaTimeSec
           ? "localised"
           : "tick";
-    this.decideLayout(decisionSec, key, stableKey, cutSource, snapWithoutCut, srcW, srcH, cropW, cropH, plan);
+    this.decideLayout(decisionSec, key, stableKey, cutSource, snapWithoutCut, srcW, srcH, cropW, cropH, plan, shotType);
     this.notifyDetectionTick(mediaTimeSec, srcW, srcH, sceneCut.isCut ? decisionSec : null);
     this.benchmarkProbe?.recordTracking(
       trackerMs,
@@ -2009,7 +2026,16 @@ export class VertixEngine {
       plan.paneSwap,
       plan.leftToRightFlip
     );
-    this.benchmarkProbe?.recordTrackSnapshot?.(mediaTimeSec, plan.tracks, plan.subjectTrackId, plan.rule);
+    this.benchmarkProbe?.recordTrackSnapshot?.(
+      mediaTimeSec,
+      plan.tracks,
+      plan.subjectTrackId,
+      plan.rule,
+      shotType,
+      plan.largestForegroundSize,
+      sceneCut.isCut,
+      this.decidedRule
+    );
 
     if (this.lastDetectionMediaTime !== null && mediaTimeSec > this.lastDetectionMediaTime) {
       const interval = mediaTimeSec - this.lastDetectionMediaTime;
@@ -2101,47 +2127,43 @@ export class VertixEngine {
     srcH: number,
     cropW: number,
     cropH: number,
-    plan: LayoutPlan
+    plan: LayoutPlan,
+    shotType: ShotType
   ): void {
     const isCut = cutSource !== null;
     const stablePersonCount = paneCountOf(stableKey);
     const countChanged = stableKey !== this.decidedLayoutKey;
     let reframe: Reframe | null = isCut || snap ? "snap" : null;
-    if (stablePersonCount === 0) {
+    const wholeFrame = shotType !== "close" || (plan.panelWholeFrame && stablePersonCount >= MULTIPANE_MIN_FACES);
+    if (wholeFrame || stablePersonCount === 0) {
       this.decidedTargetPanes = [];
       this.decidedRule = "broll";
     } else if (key === stableKey) {
       this.decidedRule = plan.rule;
       // Only refresh the target once the raw count matches the *committed*
       // layout — otherwise, mid-debounce, this could compute a different
-      // pane count than what's actually on screen. The deadzone itself
+      // pane count than what's actually on screen. The stationary margin
       // lives inside computeSpeakerLayout. A reframe or a new layout aims
-      // straight at the new faces, without the deadzone.
+      // straight at the new faces, without it.
       if (this.lastSwitchedFar || this.movesSinglePaneFar(countChanged)) reframe ??= "dissolve";
       this.decidedTargetPanes =
         reframe !== null || countChanged
           ? computeSpeakerLayout(this.lastResolvedFaces, srcW, srcH, cropW, cropH)
-          : computeSpeakerLayout(
-              this.lastResolvedFaces,
-              srcW,
-              srcH,
-              cropW,
-              cropH,
-              this.decidedTargetPanes,
-              DEADZONE_FRACTION
-            );
+          : computeSpeakerLayout(this.lastResolvedFaces, srcW, srcH, cropW, cropH, this.decidedTargetPanes, true);
     }
     this.decidedSpeakerCount = stablePersonCount;
     this.decidedLayoutKey = stableKey;
+    this.decidedWholeFrame = wholeFrame;
     this.decisions.push({
       mediaTimeSec,
-      speakerCount: stablePersonCount,
+      speakerCount: wholeFrame ? 0 : stablePersonCount,
       targetPanes: this.decidedTargetPanes,
       reframe,
       isCut,
       cutSource,
       skinRejectedFaces: this.lastSkinRejectedFaces,
       rule: this.decidedRule,
+      shotType,
       subjectTrackId: plan.subjectTrackId,
       paneTrackIds: plan.paneTrackIds,
       tracks: plan.tracks,
@@ -2174,8 +2196,9 @@ export class VertixEngine {
     this.displayedSubjectTrackId = decision.subjectTrackId;
     this.displayedTracks = decision.tracks;
     this.displayedPaneTrackIds = decision.paneTrackIds;
-    const ruleChanged = decision.rule !== this.displayedRule;
+    const ruleChanged = decision.rule !== this.displayedRule || decision.shotType !== this.displayedShotType;
     this.displayedRule = decision.rule;
+    this.displayedShotType = decision.shotType;
     this.targetPanes = decision.targetPanes;
     this.pendingReframe = decision.reframe;
     if (countChanged || ruleChanged) this.emitState();
@@ -2854,6 +2877,7 @@ export class VertixEngine {
         probe?.recordCutShown(now, applied.mediaTimeSec, frameMediaTimeSec, applied.cutSource ?? "tick");
       }
       if (applied) probe?.recordLayoutRule(now, this.displayedRule, this.displayedSubjectTrackId ?? -1, applied.isCut);
+      if (applied) probe?.recordShot(now, this.displayedShotType);
       const speakerCount = this.displayedSpeakerCount;
       const targetSignature = speakerCount === 0 ? "broll" : `speakers:${speakerCount}`;
 
@@ -2896,18 +2920,27 @@ export class VertixEngine {
       }
 
       if (speakerCount === 0) {
+        const drawStart = probe ? performance.now() : 0;
         drawFitFrame(ctx, this.blurCanvas, source, srcW, srcH, cropW, cropH);
+        if (probe) probe.recordFullSceneDraw(performance.now() - drawStart);
       } else {
         // Mutate the already-allocated smoothed rects toward the cached
         // target and draw with integer coordinates (avoids sub-pixel blit
         // interpolation). No new objects, no layout math — that only runs
         // at detection ticks.
         const smoothingAlpha = paneSmoothingAlpha(frameDtSec);
+        let cropMove = 0;
         for (let i = 0; i < this.targetPanes.length; i++) {
           const target = this.targetPanes[i].pane;
-          const smoothed = lerpPaneRectInto(this.smoothedPanes[i], target.source, smoothingAlpha);
+          const before = this.smoothedPanes[i];
+          const beforeX = before.x + before.w / 2;
+          const beforeY = before.y + before.h / 2;
+          const smoothed = lerpPaneRectInto(before, target.source, smoothingAlpha);
+          if (probe)
+            cropMove += Math.hypot(smoothed.x + smoothed.w / 2 - beforeX, smoothed.y + smoothed.h / 2 - beforeY);
           drawCrop(ctx, source, smoothed, target.dest, scaleX, scaleY);
         }
+        if (probe && cropMove > 0) probe.recordCropMove(now, cropMove / srcW);
       }
       this.drawnLayout.broll = speakerCount === 0;
       this.drawnLayout.targetPanes = this.targetPanes;

@@ -1,5 +1,13 @@
 import { describe, expect, it } from "vitest";
-import { lerpPaneRectInto, mouthActivity, paneSmoothingAlpha, unpackDetections } from "./layoutEngine";
+import {
+  computeSpeakerLayout,
+  faceInsideCropMargin,
+  lerpPaneRectInto,
+  mouthActivity,
+  paneSmoothingAlpha,
+  unpackDetections,
+  type FaceBox,
+} from "./layoutEngine";
 
 /** Glides a pane from x=0 toward x=100 for `seconds` at `fps`, one blend per rendered frame. */
 function glideX(fps: number, seconds: number): number {
@@ -42,5 +50,42 @@ describe("unpackDetections", () => {
     expect(skinRejected).toEqual([
       { cx: 0.7, cy: 0.5, w: 0.2, h: 0.2, motion: 0, lowerFaceMotion: 0, confidence: 0.85 },
     ]);
+  });
+});
+
+describe("stationary camera", () => {
+  const face = (cx: number, cy: number): FaceBox => ({
+    cx,
+    cy,
+    w: 0.1,
+    h: 0.15,
+    motion: 0,
+    lowerFaceMotion: 0,
+    confidence: 0.9,
+  });
+  const SRC = { w: 1920, h: 1080 };
+  const OUT = { w: 608, h: 1080 };
+
+  it("keeps the crop while the face stays inside the margin", () => {
+    const first = computeSpeakerLayout([face(0.5, 0.4)], SRC.w, SRC.h, OUT.w, OUT.h);
+    const next = computeSpeakerLayout([face(0.52, 0.41)], SRC.w, SRC.h, OUT.w, OUT.h, first, true);
+    expect(next[0].pane.source).toEqual(first[0].pane.source);
+  });
+
+  it("aims again once the face leaves the margin", () => {
+    const first = computeSpeakerLayout([face(0.5, 0.4)], SRC.w, SRC.h, OUT.w, OUT.h);
+    const crop = first[0].pane.source;
+    const outside = face((crop.x + crop.w) / SRC.w - 0.001, 0.4);
+    const next = computeSpeakerLayout([outside], SRC.w, SRC.h, OUT.w, OUT.h, first, true);
+    expect(next[0].pane.source.x).toBeGreaterThan(crop.x);
+  });
+
+  it("measures the margin around where the crop aims the face", () => {
+    const crop = { x: 100, y: 0, w: 400, h: 1000 };
+    const at = (x: number, y: number) => face(x / SRC.w, y / SRC.h);
+    expect(faceInsideCropMargin(at(300, 350), crop, SRC.w, SRC.h)).toBe(true);
+    expect(faceInsideCropMargin(at(300 + 100, 350), crop, SRC.w, SRC.h)).toBe(true);
+    expect(faceInsideCropMargin(at(300 + 101, 350), crop, SRC.w, SRC.h)).toBe(false);
+    expect(faceInsideCropMargin(at(300, 350 + 201), crop, SRC.w, SRC.h)).toBe(false);
   });
 });

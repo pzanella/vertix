@@ -1,3 +1,5 @@
+import type { PaneRect } from "./layoutEngine";
+
 // At or below this width/height ratio a source is not landscape (portrait
 // phone video, square): cropping it to 9:16 makes no sense, so it is shown
 // whole. 4:3 (1.33) stays landscape.
@@ -31,6 +33,15 @@ export function displayedSourceSize(
     return { width: videoWidth, height: videoHeight };
   }
   return { width, height };
+}
+
+/**
+ * Where the whole source frame is drawn in a whole-frame view: fitted to the
+ * output width and centred vertically. Overlays map through the same rect.
+ */
+export function wholeFrameRect(srcW: number, srcH: number, outW: number, outH: number): PaneRect {
+  const h = Math.round(srcH * (outW / srcW));
+  return { x: 0, y: Math.round((outH - h) / 2), w: outW, h };
 }
 
 /** The `aspect` (width / height) output size that holds a whole `width` x `height` source: as wide or as tall as the source. */

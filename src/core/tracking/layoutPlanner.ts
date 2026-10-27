@@ -2,6 +2,7 @@ import { groupFitsInFrame, groupFrameFace, type FaceBox } from "../layoutEngine"
 import { FaceTracker, type FaceTrack } from "./faceTracker";
 import { trackArea, updateForeground } from "./foregroundFilter";
 import { PanelDetector, PANEL_VARIANT, type PanelVariant } from "./panelDetector";
+import { PanelEvidence, type PanelFace } from "./panelEvidence";
 import { ActiveSpeakerResolver } from "./mainActiveSpeaker";
 import { CLEAR_LEAD_FACTOR, leadFactor, scoreContext, subjectScore, SubjectSelector } from "./subjectSelector";
 
@@ -11,7 +12,7 @@ import { CLEAR_LEAD_FACTOR, leadFactor, scoreContext, subjectScore, SubjectSelec
  *   panelDetector.ts), with the debounce keyed on the layout kind.
  * - "main": main's active-speaker resolution (mainActiveSpeaker.ts) on the
  *   foreground faces, debounced on the pane count as on main.
- * "main" is the default: on news-interview-2p "tracker" made 13-15 layout
+ * "main" is the default: on licensed clip C "tracker" made 13-15 layout
  * changes against main's 11 (see docs/benchmark.md).
  */
 export type ManyFacesRules = "tracker" | "main";
@@ -27,7 +28,11 @@ export type LayoutRule = "broll" | "single" | "stacked" | "subject" | "group" | 
 export const LAYOUT_RULES: readonly LayoutRule[] = ["broll", "single", "stacked", "subject", "group", "grid"];
 
 // From this many foreground faces up, the main-subject rules apply.
-const SUBJECT_RULE_MIN_FACES = 3;
+export const SUBJECT_RULE_MIN_FACES = 3;
+// From this many faces up, a layout has several panes (stacked or grid) and needs panel evidence.
+export const MULTIPANE_MIN_FACES = 2;
+// A coasting track holds the layout only after this many matched detections.
+const MIN_HITS_TO_COAST = 2;
 // After the foreground count drops below SUBJECT_RULE_MIN_FACES, the
 // subject is kept this long, so one missed face does not reframe.
 const SUBJECT_GRACE_BELOW_MIN_SEC = 0.4;
@@ -86,11 +91,17 @@ export interface LayoutPlan {
   switchedFar: boolean;
   tracks: TrackSnapshot[];
   foregroundCount: number;
+  /** The largest visible foreground face: max of its width and height, fraction of the frame (0 without one). */
+  largestForegroundSize: number;
+  /** Confirmed foreground tracks present: visible, or coasting through a missed detection. */
+  confirmedPresentCount: number;
   backgroundCount: number;
   /** Pane order changed while the set of pane tracks stayed the same (should stay 0). */
   paneSwap: boolean;
   /** Left-to-right order of the pane tracks changed: a swap the old x-sorted layout would have made. */
   leftToRightFlip: boolean;
+  /** 2+ faces that main would show in several panes, but no panel evidence: the decision shows the whole frame instead. */
+  panelWholeFrame: boolean;
 }
 
 export interface FrameGeometry {
@@ -129,6 +140,7 @@ export class LayoutPlanner {
   private framedPosition: { cx: number; cy: number } | null = null;
   private pickNow = true;
   private readonly mainResolver = new ActiveSpeakerResolver();
+  private readonly gridEvidence = new PanelEvidence();
   private groupShown = false;
   private leftToRightOrder: number[] = [];
 
@@ -157,8 +169,12 @@ export class LayoutPlanner {
     const visibleForeground = tracks.filter((t) => t.visible && t.foreground);
     // A confirmed track missed by one detection still holds its place
     // among 3+ people, so a missed face does not reset the panel evidence
-    // or reshape the group.
-    const presentForeground = tracks.filter((t) => t.foreground && (t.visible || t.confirmed));
+    // or reshape the group. Only a track matched on at least two
+    // detections coasts: one born on a cut frame and never seen again (the
+    // previous shot's face on a cut flagged a frame early) does not.
+    const presentForeground = tracks.filter(
+      (t) => t.foreground && (t.visible || (t.confirmed && t.hits >= MIN_HITS_TO_COAST))
+    );
     // Only confirmed tracks start the 3+ rules: a face seen for one or two
     // detections (often a false detection next to a real face) must not
     // turn a two-person shot into a main-subject shot.
@@ -171,25 +187,53 @@ export class LayoutPlanner {
     let subjectTrackId: number | null = null;
 
     let mainSwitchedFar = false;
+    let panelWholeFrame = false;
+    let seatFaces: FaceBox[] | null = null;
+    let seatTrackIds: number[] | null = null;
     const keepSubject = this.manyFacesRules === "tracker" ? this.subjectDuringGrace(presentForeground, atSec) : null;
     if (this.manyFacesRules === "main") {
       // main's rules read the raw detection box and the lower-face change.
-      const inputs = visibleForeground.map((t) => ({ ...t.lastDetection, motion: t.lastDetection.lowerFaceMotion }));
+      // A confirmed track coasting through a missed detection still counts, as in the shot rule.
+      const counted = presentForeground;
+      const inputs = counted.map((t) => ({ ...t.lastDetection, motion: t.lastDetection.lowerFaceMotion }));
       const resolved = this.mainResolver.resolve(inputs, audioEnergy, atSec);
       mainSwitchedFar = this.mainResolver.switchedSpeaker;
-      const resolvedTracks = resolved.map((face) => visibleForeground[inputs.indexOf(face)]);
-      paneTracks = this.ordered(resolvedTracks);
-      rule =
-        resolved.length === 0
-          ? "broll"
-          : resolved.length === 1
-            ? visibleForeground.length >= SUBJECT_RULE_MIN_FACES
-              ? "subject"
-              : "single"
-            : resolved.length === 2
-              ? "stacked"
-              : "grid";
-      if (rule === "subject") subjectTrackId = paneTracks[0].id;
+      const resolvedTracks = resolved.map((face) => counted[inputs.indexOf(face)]);
+      const panelFaces: PanelFace[] = presentForeground
+        .filter((t) => t.confirmed)
+        .map((t) => ({ id: t.id, cx: t.box.cx, cy: t.box.cy, w: t.box.w, h: t.box.h, visible: t.visible }));
+      const panel = this.gridEvidence.observe(panelFaces, atSec, cut);
+      // With evidence, the panes are the panel's seats: a missing face keeps its pane for
+      // MULTIPANE_HOLD_SEC, and a face that is not seated (a false box, a passer-by) adds none.
+      const fromSeats =
+        panel.evidence &&
+        panel.seats.length >= MULTIPANE_MIN_FACES &&
+        (resolved.length >= MULTIPANE_MIN_FACES || panel.seats.some((seat) => seat.held));
+      panelWholeFrame = resolved.length >= MULTIPANE_MIN_FACES && !fromSeats;
+      if (fromSeats) {
+        seatTrackIds = panel.seats.map((seat) => seat.trackId);
+        paneTracks = panel.seats.flatMap((seat) => tracks.filter((t) => t.id === seat.trackId));
+        seatFaces = panel.seats.map((seat) => {
+          const track = tracks.find((t) => t.id === seat.trackId);
+          return track
+            ? faceOf(track)
+            : { cx: seat.cx, cy: seat.cy, w: seat.w, h: seat.h, motion: 0, lowerFaceMotion: 0, confidence: 0 };
+        });
+        rule = panel.seats.length === 2 ? "stacked" : "grid";
+      } else {
+        paneTracks = this.ordered(resolvedTracks);
+        rule =
+          resolved.length === 0
+            ? "broll"
+            : resolved.length === 1
+              ? counted.length >= SUBJECT_RULE_MIN_FACES
+                ? "subject"
+                : "single"
+              : resolved.length === 2
+                ? "stacked"
+                : "grid";
+        if (rule === "subject") subjectTrackId = paneTracks[0].id;
+      }
     } else if (keepSubject !== null) {
       rule = "subject";
       paneTracks = [keepSubject];
@@ -241,7 +285,7 @@ export class LayoutPlanner {
     if (foregroundCount > 0) this.pickNow = false;
 
     const previousOrder = this.paneOrder;
-    const paneTrackIds = paneTracks.map((t) => t.id);
+    const paneTrackIds = seatTrackIds ?? paneTracks.map((t) => t.id);
     const paneSwap =
       paneTrackIds.length > 1 && sameMembers(paneTrackIds, previousOrder) && !sameOrder(paneTrackIds, previousOrder);
     const leftToRightFlip =
@@ -252,9 +296,10 @@ export class LayoutPlanner {
     this.leftToRightOrder = this.leftToRight(paneTracks);
 
     const planFaces =
-      rule === "group"
+      seatFaces ??
+      (rule === "group"
         ? [groupFrameFace(groupFaces.map(faceOf), frame.srcW, frame.srcH, frame.outW, frame.outH)]
-        : paneTracks.map(faceOf);
+        : paneTracks.map(faceOf));
     const switchedFar =
       this.manyFacesRules === "main" ? mainSwitchedFar : this.noteFraming(rule, paneTrackIds, planFaces);
 
@@ -277,9 +322,12 @@ export class LayoutPlanner {
         lowerFaceMotion: t.lowerFaceMotion,
       })),
       foregroundCount,
+      largestForegroundSize: visibleForeground.reduce((largest, t) => Math.max(largest, t.box.w, t.box.h), 0),
+      confirmedPresentCount: presentForeground.filter((t) => t.confirmed).length,
       backgroundCount: tracks.filter((t) => t.visible && !t.foreground).length,
       paneSwap,
       leftToRightFlip,
+      panelWholeFrame,
     };
   }
 
@@ -288,6 +336,7 @@ export class LayoutPlanner {
     this.tracker.reset();
     this.subjects.reset();
     this.mainResolver.reset();
+    this.gridEvidence.reset();
     this.panels.reset();
     this.paneOrder = [];
     this.leftToRightOrder = [];

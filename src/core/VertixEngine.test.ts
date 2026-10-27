@@ -274,17 +274,21 @@ describe.each([25, 50])("VertixEngine speaker tracking at %i fps", (fps) => {
     engine.destroy();
   });
 
-  it("changes an existing layout after 1.0s of agreeing detections", () => {
+  it("stacks two faces once they have been a still panel for 1.0s, not before", () => {
     const { engine, secondsUntil, speakerCount } = setUpTracking(fps);
     secondsUntil([LEFT], () => speakerCount() === 1);
-    expect(secondsUntil([LEFT, RIGHT], () => speakerCount() === 2)).toBe(1);
+    const seconds = secondsUntil([LEFT, RIGHT], () => speakerCount() === 2);
+    expect(seconds).toBeGreaterThanOrEqual(1);
+    expect(seconds).toBeLessThanOrEqual(1.7);
     engine.destroy();
   });
 
-  it("drops to no crop after 0.2s without faces", () => {
+  it("drops to no crop once the face's track is gone (coasting up to 0.8s), not on a missed detection", () => {
     const { engine, secondsUntil, speakerCount } = setUpTracking(fps);
     secondsUntil([LEFT], () => speakerCount() === 1);
-    expect(secondsUntil([], () => speakerCount() === 0)).toBe(0.2);
+    const seconds = secondsUntil([], () => speakerCount() === 0);
+    expect(seconds).toBeGreaterThanOrEqual(0.8);
+    expect(seconds).toBeLessThanOrEqual(1);
     engine.destroy();
   });
 
@@ -295,10 +299,10 @@ describe.each([25, 50])("VertixEngine speaker tracking at %i fps", (fps) => {
     engine.destroy();
   });
 
-  it("shows the 3-face grid until a size-dominant face has won for 0.8s", () => {
-    const { engine, detect, secondsUntil, resolved } = setUpTracking(fps);
+  it("shows the whole frame, not a grid, until a size-dominant face has won for 0.8s", () => {
+    const { engine, detect, secondsUntil, resolved, speakerCount } = setUpTracking(fps);
     detect([LEFT, DOMINANT_MIDDLE, RIGHT]);
-    expect(resolved()).toHaveLength(3);
+    expect(speakerCount()).toBe(0);
     expect(secondsUntil([LEFT, DOMINANT_MIDDLE, RIGHT], () => resolved().length === 1)).toBeCloseTo(
       0.8 - FRAMES_PER_DETECTION / fps,
       6
@@ -354,30 +358,60 @@ describe("VertixEngine skin-filter rejections", () => {
   });
 });
 
+describe("VertixEngine panel grid", () => {
+  it("shows a still three-face panel as a grid after 1s of evidence, not on the first detection", () => {
+    const { engine, detect, secondsUntil, speakerCount } = setUpTracking(25);
+    detect([LEFT, MIDDLE, RIGHT]);
+    expect(speakerCount()).toBe(0);
+    // 1.0 s of still time, counted from the first detection of the three faces.
+    const seconds = secondsUntil([LEFT, MIDDLE, RIGHT], () => speakerCount() === 3);
+    expect(seconds).toBeGreaterThanOrEqual(0.8 - 1e-3);
+    expect(seconds).toBeLessThanOrEqual(1.2);
+    engine.destroy();
+  });
+
+  it("does not show a grid after a cut until the panel is still again", () => {
+    const { engine, detect, secondsUntil, speakerCount } = setUpTracking(25);
+    secondsUntil([LEFT, MIDDLE, RIGHT], () => speakerCount() === 3);
+    detect([LEFT, MIDDLE, RIGHT], { cut: true });
+    expect(speakerCount()).toBe(0);
+    engine.destroy();
+  });
+});
+
 describe("VertixEngine scene cuts", () => {
   it("resets the active-speaker lock and counts the cut", () => {
-    const { engine, detect, secondsUntil, resolved } = setUpTracking(25);
+    const { engine, detect, secondsUntil, resolved, speakerCount } = setUpTracking(25);
     secondsUntil([LEFT, DOMINANT_MIDDLE, RIGHT], () => resolved().length === 1);
     detect([LEFT, MIDDLE, RIGHT], { cut: true });
-    expect(resolved()).toHaveLength(3);
+    expect(speakerCount()).toBe(0);
     expect(engine.getMetrics().sceneCutCount).toBe(1);
     engine.destroy();
   });
 
   it("commits the new face count on the cut detection, without the debounce", () => {
     const { engine, detect, secondsUntil, speakerCount } = setUpTracking(25);
+    secondsUntil([], () => speakerCount() === 0);
+    detect([LEFT], { cut: true });
+    expect(speakerCount()).toBe(1);
+    engine.destroy();
+  });
+
+  it("shows the whole frame after a cut to two faces until they are a still panel", () => {
+    const { engine, detect, secondsUntil, speakerCount } = setUpTracking(25);
     secondsUntil([LEFT], () => speakerCount() === 1);
     detect([LEFT, RIGHT], { cut: true });
-    expect(speakerCount()).toBe(2);
+    expect(speakerCount()).toBe(0);
+    expect(secondsUntil([LEFT, RIGHT], () => speakerCount() === 2)).toBeGreaterThanOrEqual(0.8 - 1e-3);
     engine.destroy();
   });
 
   it("corrects a wrong first count after a cut in 0.2s instead of 1.0s", () => {
     const { engine, detect, secondsUntil, speakerCount } = setUpTracking(25);
-    secondsUntil([LEFT, RIGHT], () => speakerCount() === 2);
-    detect([LEFT], { cut: true });
-    expect(speakerCount()).toBe(1);
-    expect(secondsUntil([LEFT, RIGHT], () => speakerCount() === 2)).toBe(0.2);
+    secondsUntil([LEFT], () => speakerCount() === 1);
+    detect([], { cut: true });
+    expect(speakerCount()).toBe(0);
+    expect(secondsUntil([BIG_MIDDLE], () => speakerCount() === 1)).toBe(0.2);
     engine.destroy();
   });
 
@@ -386,7 +420,7 @@ describe("VertixEngine scene cuts", () => {
     secondsUntil([LEFT], () => speakerCount() === 1);
     detect([LEFT], { cut: true });
     for (let i = 0; i < 5; i++) detect([LEFT]);
-    expect(secondsUntil([LEFT, RIGHT], () => speakerCount() === 2)).toBe(1);
+    expect(secondsUntil([LEFT, RIGHT], () => speakerCount() === 2)).toBeGreaterThanOrEqual(1);
     engine.destroy();
   });
 
@@ -401,12 +435,27 @@ describe("VertixEngine scene cuts", () => {
     engine.destroy();
   });
 
-  it("still glides when the same face moves without a cut", () => {
+  it("glides once the same face has left the stationary margin, without a cut", () => {
     const { engine, detect, secondsUntil, speakerCount, isGliding } = setUpTracking(25);
     secondsUntil([LEFT], () => speakerCount() === 1);
     for (let i = 0; i < 20; i++) detect([LEFT]);
-    detect([{ ...LEFT, cx: LEFT.cx + 0.1 }]);
-    expect(isGliding()).toBe(true);
+    let glided = false;
+    for (let i = 0; i < 5 && !glided; i++) {
+      detect([{ ...LEFT, cx: LEFT.cx + 0.1 }]);
+      glided = isGliding();
+    }
+    expect(glided).toBe(true);
+    engine.destroy();
+  });
+
+  it("keeps the crop still while the face stays inside the stationary margin", () => {
+    const { engine, detect, secondsUntil, speakerCount, isGliding } = setUpTracking(25);
+    secondsUntil([LEFT], () => speakerCount() === 1);
+    for (let i = 0; i < 20; i++) detect([LEFT]);
+    for (let i = 0; i < 10; i++) {
+      detect([{ ...LEFT, cx: LEFT.cx + 0.03 }]);
+      expect(isGliding()).toBe(false);
+    }
     engine.destroy();
   });
 });
@@ -436,8 +485,12 @@ describe("VertixEngine active-speaker switch", () => {
 
   it("still glides when the locked speaker moves a little", () => {
     const { engine, detect, resolved, isGliding, isDissolving } = lockedOnMiddle();
-    detect([LEFT, DOMINANT_MIDDLE_MOVED, RIGHT]);
-    expect(isGliding()).toBe(true);
+    let glided = false;
+    for (let i = 0; i < 5 && !glided; i++) {
+      detect([LEFT, DOMINANT_MIDDLE_MOVED, RIGHT]);
+      glided = isGliding();
+    }
+    expect(glided).toBe(true);
     for (let i = 0; i < 10; i++) {
       detect([LEFT, DOMINANT_MIDDLE_MOVED, RIGHT]);
       expect(isDissolving()).toBe(false);

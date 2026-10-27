@@ -245,6 +245,9 @@ function cutProbe() {
     recordLayoutChange: noop,
     recordTracking: noop,
     recordLayoutRule: noop,
+    recordShot: noop,
+    recordFullSceneDraw: noop,
+    recordCropMove: noop,
     recordTriggerCost: noop,
     recordDisplay: noop,
     recordCutShown: (_now, cutMediaTimeSec, shownMediaTimeSec, source) =>

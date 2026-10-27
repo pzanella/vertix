@@ -41,7 +41,7 @@ the suite without ever being committed or deployed. List them in `.env.local`
 (gitignored):
 
 ```
-VERTIX_E2E_HLS_URLS=rally|https://…/master.m3u8|120,interview|https://…/master.m3u8
+VERTIX_E2E_HLS_URLS=news-a|https://…/master.m3u8|120,interview-b|https://…/master.m3u8
 ```
 
 Each comma-separated entry is `url`, `label|url` or `label|url|maxSeconds`
@@ -53,6 +53,18 @@ a production build only with `VERTIX_LOCAL_CLIPS=1 npm run build` (then
 workflow runs `scripts/check-no-local-clips.mjs`, which fails if a bundle
 carries the list. `node scripts/check-lookahead.mjs --licensed` runs the same
 clips headless.
+
+While the local clips are served (dev server or `vite preview` with clips in
+`.env.local`, or with `VERTIX_LOCAL_CLIPS=1` set), the server listens on
+`127.0.0.1` only: any other `--host` (none, `0.0.0.0`, `::`, `localhost`, a
+named address) is refused, so the clips never reach the network. A phone
+reaches the server over USB with `adb reverse tcp:4173 tcp:4173` and opens
+`http://localhost:4173/`.
+
+Labels and file names of licensed clips stay in `.env.local` and `.eval/`
+(gitignored). Docs, code and commits refer to them as licensed clip A, B, …;
+scripts read the labels at runtime (for example `scripts/eval-shots.ts` reads
+its tuning and held-out sets from `.eval/shot-clip-sets.json`).
 
 ### Settings
 
@@ -302,6 +314,59 @@ Further limits:
 - **Limits:** times are wall time on displayed frames, so a stalled
   display stretches the rule on screen. Track IDs restart after every cut.
 
+**Shot type (`tracking`, schema v8)**
+
+- `timeInShotPct`: share of measured playback per shot type, in percent:
+  `close` (framed as before), `wide` (faces small in the frame: the whole
+  frame is shown) and `none` (no face: the whole frame). Measured on
+  displayed frames.
+- `shotChangesPerMin`: shot type changes per minute of measured playback.
+- `gridSecOnWideShots`: seconds where the displayed layout was a grid during
+  a `wide` or `none` shot. Whole-frame views never show a grid, so this
+  should be 0.
+- `fullSceneDrawMs`: time to draw one whole-frame (no crop) frame, in ms,
+  summary with p50/p95. Only frames drawn whole are counted.
+- `cropPathFrameWidths`, `cropPathPerMin`: how far the drawn crop centres
+  moved, per displayed rule (all panes summed), in frame widths, and that
+  per minute of measured playback in the rule. Glides only: layout changes
+  and snaps are not counted. `raw.layoutRules` lists every displayed rule
+  change with the media time of its frame.
+- **Known limit:** a mid-distance group of 2–3 faces (largest face about
+  0.15–0.25 of the frame) is treated as close: it keeps the speaker layout
+  and is not shown whole. Licensed clip B (0–17 s, journalist voice-over) is
+  the case seen: about 4 s of it is classified close. No crowd rule and no
+  motion signal are used, so as not to turn 3-speaker close shots wide.
+- **Multi-pane only with panel evidence.** With 2+ resolved faces, stacked
+  or grid is shown only after the confirmed faces have been still for
+  1.0 s of media time: mean face speed at most 0.4 face heights per second
+  for two faces (`PANEL_MAX_SPEED_HEIGHTS_PER_SEC_2`), median at most 0.2
+  for three or more (`PANEL_MAX_SPEED_HEIGHTS_PER_SEC`). Speeds use the real
+  time between detections, so the result does not depend on the detection
+  rate; a pair longer than 0.5 s (skipped detections) counts as neither
+  still nor moving. It is left after 0.6 s of moving time, a cut, or fewer
+  than two seats. Without evidence the whole frame is shown. Measured on the
+  synthetic panels, the 2-speakers samples and licensed clip B, which did not hold
+  still in its measured windows.
+  - **Seats:** with evidence each face has a seat (its pane). A missing face
+    keeps its seat for `MULTIPANE_HOLD_SEC` = 2.5 s (set from the longest
+    gap on licensed clip C, 2.2 s); a new confirmed face at the same place
+    takes it over. A new face gets a seat only after being still for 1.0 s
+    itself, so a short-lived false box adds no pane.
+  - **Accepted cost:** after each hard cut, and at the start of a clip, the
+    whole frame is shown until the evidence exists (about 1 s). On the
+    cross-* clips this adds one layout change per panel part (4 instead of 3
+    on main); cross-same-count goes from 3 to 6.
+  - **Known limit:** a crowd or group that moves (or never holds 1.0 s of
+    still pairs) is shown whole, not in panes. Two speakers who move a lot
+    while talking (2-speakers-b) lose most of their stacked time.
+- **Missed detections.** A confirmed track that coasts through a missed
+  detection (up to 0.8 s) still counts for the person count and the shot
+  type, so a real exit shows up to 0.8 s later. "None" needs no confirmed
+  track left, and leaving "none" uses the short 0.2 s hold.
+- **Stationary camera.** A pane's crop stays put while its face's centre is
+  inside 50% of the crop width and 40% of its height (around where the crop
+  aims the face), and is aimed again only when the face leaves that box.
+
 **Long tasks (`longTasks`)**
 
 - **What it is:** main-thread tasks longer than 50 ms, reported by
@@ -320,6 +385,70 @@ frame accounting between reframing and plain playback.
 Do **not** compare `frameWorkMs` between the two runs directly. The baseline
 draws a 1280×720 output, while 9:16 draws a 405×720 output, so the per-frame
 draw costs are not equivalent.
+
+## Shot type and multi-pane results
+
+Measured for the shot type, panel evidence and seats change. Desktop: the
+production build (`scripts/bench-preview.mjs`), 3 runs of the 53-run suite,
+0 failures. Licensed clips are named by letter: A street interview, B and G
+news pieces with crowds (G held out), C news interview with two people, D–F
+sport interviews.
+
+### Constants (frozen)
+
+| Constant | Value | Reason |
+|---|---|---|
+| `CLOSE_MIN_HMAX` / `WIDE_MAX_HMAX` | 0.25 / 0.15 | news and 3-speakers set the lower bound, a close shot in clip B the upper |
+| `SHOT_HOLD_SEC` / `CUT_HOLD_SEC` | 1.0 / 0.2 s | 0.2 s also when leaving "none" |
+| `PANEL_STILL_SEC` / `PANEL_EXIT_SEC` | 1.0 / 0.6 s | media time |
+| `PANEL_MAX_SPEED_HEIGHTS_PER_SEC` | 0.2 h/s (3+ faces, median) | panels at most 0.122; the crowd in clip B at least 0.523 |
+| `PANEL_MAX_SPEED_HEIGHTS_PER_SEC_2` | 0.4 h/s (2 faces, mean) | equals 0.08 per pair at 5 Hz |
+| `MULTIPANE_HOLD_SEC` | 2.5 s | longest missing-face gap on clip C is 2.2 s |
+| `MIN_HITS_TO_COAST` | 2 | a face seen only on a cut frame does not hold the layout |
+| `STATIONARY_MARGIN_WIDTH` / `_HEIGHT` | 0.5 / 0.4 | not adjusted |
+
+### Labelled time per clip
+
+| Clip | Expected | Labelled time | Shown as expected | Multi-pane on single/whole | Grid |
+|---|---|---|---|---|---|
+| C | multi-pane | 143.6–143.8 s | 93.3% | 0 s | 0 s |
+| B | single | 9.0 s | 92.5–94.2% | 0 s | 0 s |
+| B | whole | 95.7–96.0 s | 99.4–99.7% | 0 s | 0 s |
+| G (held out) | single | 30.4 s | 94.1–94.7% | 0 s | 0 s |
+| G (held out) | whole | 44.6–44.8 s | 97.2–97.6% | 0 s | 0 s |
+
+### Criteria
+
+| Criterion | Result |
+|---|---|
+| B, G: 0 s multi-pane on labelled whole/single | ✓ |
+| B, G: labelled single ≥ 90% | ✓ 92.5–94.7% |
+| C: stacked ≥ 90% | ✓ 93.3% |
+| C: grid 0 s | ✓ |
+| C: layout changes ≤ 11 (main) | ✓ 7 |
+| C: crop path lower | ✓ 0.248 → 0.056 frame widths per minute |
+| Samples as on main apart from the ~1 s wait | ✓ 2-speakers-a/c/d, 3-speakers; 2-speakers-b shown whole (intended) |
+| No displayed layout under 0.5 s except at cuts | ✓ none in 3 runs |
+| No single → whole → single within 1 s after a cut (cross-*, B–G) | ✓ 0 |
+| Cut offsets | ✓ 0 frames on the 25 fps cut clips; cross-50fps within −2…+1 frames (also on main) |
+
+Checked by eye and intended: 2-speakers-b is shown whole (the speakers move
+a lot while talking); clip A at 21.28 s has a flash in the source, which
+resets the evidence for about 1.2 s; clip C is shown whole now and then when
+the two people move; cross-count goes cut → whole → grid; the moving crowd in
+clip B (4–6 s) and in clip G is shown whole.
+
+### Phone (Android, main vs this change, 2 runs each, alternated)
+
+| Measure | Result |
+|---|---|
+| Failures, hidden runs | 0 on both builds |
+| Lookahead length | identical on 47 of 51 rows; the other 4 are 40 ms shorter on the branch |
+| Detection p95 | same within noise: about 110–125 ms SIMD, 200–233 ms scalar |
+| Whole-frame draw p95 | 0.36–2.06 ms (JavaScript time, not GPU time) |
+| Dropped frames, 25–30 fps clips | 0–8 per run on both builds, so the cached-backdrop fallback is not needed |
+| Dropped frames, 50 fps clips | high on both builds: 2-speakers-b main 89–93, branch 58–106; cross-50fps main 155–160, branch 137–150 |
+| Cut offsets | 0 frames on the 25 fps cut clips; cross-50fps within −2…+1 frames on both builds, no misses |
 
 ## Environment info
 
@@ -367,7 +496,7 @@ Each clip result adds:
 - **JSON**: `{ tool, schemaVersion, config, environment, wasmBuildComparison,
 lookaheadComparison, precisionWarnings, results[] }`. Each result contains `summary` and `raw`,
   and `raw` holds column arrays of every sample.
-  - `schemaVersion` is 7. Every v6, v5, v4 and v3 field is still there with
+  - `schemaVersion` is 8 (v8 adds the shot-type fields of `tracking`). Every v7, v6, v5, v4 and v3 field is still there with
     the same meaning. Every v2 field is too, except
     `environment.wasmBuiltWithSimd` (see [Environment info](#environment-info)).
   - New in v7: `results[].extensions`, host measurements recorded with a run
@@ -579,6 +708,15 @@ What this means for the metrics:
 
 ## Known limits
 
+- **Shot type sees only face sizes.** A person who stays large in the frame
+  while the scene around them changes (an interviewee signing autographs)
+  stays close, framed single; the change of scene is not seen.
+- **Cut shown early at 50 fps.** On cross-50fps the crop change at a cut is
+  sometimes shown 1–3 frames before the cut, also on main (the trigger scores
+  the frame next to the cut as the cut frame). `scripts/check-lookahead.mjs`
+  reports a signed offset in displayed frames per cut (negative = early,
+  positive = late; "missed" only without a crop change within 5 frames), and
+  `scripts/cut-offsets.mjs` summarises it from `--save-raw` output.
 - **Small samples.** The clips are 7.8–34.9 s long, which gives roughly
   40–170 detections per clip.
   - With fewer than about 100 samples, p99 is effectively the maximum.

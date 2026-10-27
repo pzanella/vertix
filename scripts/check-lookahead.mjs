@@ -1,10 +1,11 @@
 // Browser check for lookahead: plays the cut test clips, 3-speakers.mp4
 // (active-speaker comparison) and 2-speakers-b.mp4 (50 fps) through the
 // real engine in headless Chrome, once with lookahead off and once on, and
-// reports for every known cut how many displayed frames the crop changed
-// after the source cut, plus the lookahead length of every run. Without
-// --only it also checks the length after build switches, the 16:9 bypass
-// and the 16:9 -> 9:16 switch.
+// reports for every known cut the signed offset in frames from the source
+// cut to the crop change (negative = early, positive = late; "missed" only
+// without a crop change within 5 frames), plus the lookahead length of every
+// run. Without --only it also checks the length after build switches, the
+// 16:9 bypass and the 16:9 -> 9:16 switch.
 //
 // Starts its own Vite dev server and drives the engine directly (imported
 // from /src/core), not the app UI. Results go to stdout and
@@ -25,12 +26,15 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { DEFAULT_CHROME, runInHeadlessChrome } from "./lib/headless-chrome.mjs";
+import { cutOffsets, formatOffset } from "./lib/cut-offsets.mjs";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const args = process.argv.slice(2);
 const chromePath = args.find((arg) => arg.startsWith("--chrome="))?.slice("--chrome=".length) ?? DEFAULT_CHROME;
 const headed = args.includes("--headed");
 const allBuilds = args.includes("--all-builds");
+// Also saves every run's raw samples (frames, detections, triggers, layout rules) to .eval/lookahead-raw-<label>.json.
+const rawLabel = args.find((arg) => arg.startsWith("--save-raw="))?.slice("--save-raw=".length);
 const cpuThrottle = Number(args.find((arg) => arg.startsWith("--cpu-throttle="))?.slice("--cpu-throttle=".length) ?? 1);
 const CLIP_TIMEOUT_MS = 10 * 60 * 1000;
 
@@ -53,7 +57,7 @@ const CLIPS = ONLY ? ALL_CLIPS.filter((clip) => clip.file === ONLY) : ALL_CLIPS;
  * - one 16:9 run (lookahead must be bypassed);
  * - a 16:9 -> 9:16 switch per build, timed.
  */
-async function runInPage(clips, extras, allBuilds) {
+async function runInPage(clips, extras, allBuilds, saveRaw) {
   const core = await import("/src/core/index.ts");
   const video = document.createElement("video");
   video.muted = false;
@@ -98,6 +102,7 @@ async function runInPage(clips, extras, allBuilds) {
       lookahead: result.lookahead,
       knownCuts: summary.knownCuts,
       cutsShown: summary.cutsShown,
+      displayedMediaTimeSec: raw.displays.mediaTimeSec,
       sceneCuts: summary.sceneCuts,
       displayErrorMs: summary.display.errorMs,
       displayWorkMs: summary.display.workMs,
@@ -116,6 +121,8 @@ async function runInPage(clips, extras, allBuilds) {
         resolvedCx: raw.detections.resolvedCx,
         triggered: raw.detections.triggered,
       },
+      raw: saveRaw ? raw : undefined,
+      fullSceneDrawMs: summary.tracking?.fullSceneDrawMs,
     });
   };
 
@@ -220,7 +227,7 @@ try {
   const { runs, modeSwitches } = await runInHeadlessChrome({
     root,
     pageFunction: runInPage,
-    args: [CLIPS, !ONLY, allBuilds],
+    args: [CLIPS, !ONLY, allBuilds, Boolean(rawLabel)],
     chromePath,
     headed,
     cpuThrottle,
@@ -231,12 +238,13 @@ try {
 
   const rows = [];
   for (const run of runs.filter((r) => r.label === "clips")) {
-    for (const cut of run.knownCuts) {
+    const clip = ALL_CLIPS.find((c) => c.file === run.clip);
+    for (const cut of cutOffsets(clip.knownCutsSec, run.cutsShown, clip.fps, run.displayedMediaTimeSec)) {
       rows.push({
         clip: run.clip,
         lookahead: lookaheadLabel(run.lookahead),
         "cut s": cut.timeSec,
-        "frames late": cut.framesLate ?? "missed",
+        "offset (frames)": formatOffset(cut.offsetFrames),
         "crop changed at s": cut.shownMediaTimeSec,
         "found by": cut.source ?? "-",
       });
@@ -300,6 +308,10 @@ try {
   }
 
   mkdirSync(join(root, ".eval"), { recursive: true });
+  if (rawLabel) {
+    writeFileSync(join(root, `.eval/lookahead-raw-${rawLabel}.json`), JSON.stringify(runs));
+    for (const run of runs) delete run.raw;
+  }
   writeFileSync(
     join(root, ".eval/lookahead-check.json"),
     JSON.stringify(

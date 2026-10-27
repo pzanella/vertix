@@ -1,5 +1,6 @@
 import type { FaceBox, PaneTarget } from "../layoutEngine";
 import type { LayoutRule, TrackSnapshot } from "../tracking/layoutPlanner";
+import type { ShotType } from "../tracking/shotType";
 
 /**
  * A framing change that must not glide: "snap" after a hard cut in the
@@ -29,6 +30,8 @@ export interface LayoutDecision {
   skinRejectedFaces: FaceBox[];
   /** The rule behind `speakerCount` and `targetPanes`. */
   rule: LayoutRule;
+  /** The shot type this decision belongs to; a "wide" or "none" shot is shown whole (speakerCount 0). */
+  shotType: ShotType;
   /** The followed person (main subject or its fallback), else null. */
   subjectTrackId: number | null;
   /** The track behind each pane of the latest plan. */
