@@ -450,6 +450,19 @@ clip B (4–6 s) and in clip G is shown whole.
 | Dropped frames, 50 fps clips | high on both builds: 2-speakers-b main 89–93, branch 58–106; cross-50fps main 155–160, branch 137–150 |
 | Cut offsets | 0 frames on the 25 fps cut clips; cross-50fps within −2…+1 frames on both builds, no misses |
 
+### GitHub Pages check (v0.1.0)
+
+- The phone on Pages matches the local build (SIMD detection p95 115–116 ms
+  against 115–117). On desktop, SIMD detection on Pages was about 40% slower
+  than locally while scalar matched; the cause is most likely the desktop
+  setup (external 60 Hz monitor, power, thermals), not the CI build. Not
+  proven.
+- 50 fps clips drop frames on a 60 Hz display; 25–30 fps clips drop none.
+  The numbers above come from the built-in Retina display.
+- A phone HAR exported through remote inspect misses the workers' requests,
+  so the network checks (0 third-party requests, gzip, cold download) rely on
+  the desktop HAR.
+
 ## Environment info
 
 Each report includes:
