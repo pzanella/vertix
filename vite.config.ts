@@ -33,11 +33,30 @@ function localClips(command: "serve" | "build", mode: string): LocalClip[] {
   return clips;
 }
 
+// A server with the local clips listens on loopback only by default and
+// refuses every-interface hosts (`--host`, 0.0.0.0, ::).
+const LOOPBACK_HOST = "127.0.0.1";
+const ALL_INTERFACE_HOSTS: (string | boolean | undefined)[] = [true, "0.0.0.0", "::"];
+
+function servesLocalClips(command: "serve" | "build", mode: string): boolean {
+  return command === "serve" && (process.env.VERTIX_LOCAL_CLIPS === "1" || localClips(command, mode).length > 0);
+}
+
 /** Serves the local clip files by name, in the dev server and in `vite preview` (never in a build). */
 function localClipFiles(command: "serve" | "build", mode: string): Plugin {
   return {
     name: "vertix-local-clip-files",
     apply: "serve",
+    configResolved(config) {
+      if (!servesLocalClips(command, mode)) return;
+      for (const host of [config.server.host, config.preview.host]) {
+        if (ALL_INTERFACE_HOSTS.includes(host)) {
+          throw new Error(
+            `Local clips are served: listen on ${LOOPBACK_HOST} or one named address, not on every interface`
+          );
+        }
+      }
+    },
     configureServer(server) {
       if (localClips(command, mode).length > 0) server.middlewares.use(localClipMiddleware(process.cwd()));
     },
@@ -63,6 +82,10 @@ function contentSecurityPolicy(): Plugin {
 
 export default defineConfig(({ command, mode }) => ({
   plugins: [react(), contentSecurityPolicy(), localClipFiles(command, mode)],
+  ...(servesLocalClips(command, mode) && {
+    server: { host: LOOPBACK_HOST },
+    preview: { host: LOOPBACK_HOST },
+  }),
   define: {
     __VERTIX_LOCAL_CLIPS__: JSON.stringify(localClips(command, mode)),
   },

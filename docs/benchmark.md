@@ -54,6 +54,13 @@ workflow runs `scripts/check-no-local-clips.mjs`, which fails if a bundle
 carries the list. `node scripts/check-lookahead.mjs --licensed` runs the same
 clips headless.
 
+While the local clips are served (dev server or `vite preview` with clips in
+`.env.local`, or with `VERTIX_LOCAL_CLIPS=1` set), the server listens on
+`127.0.0.1` only. `--host` without an address, `0.0.0.0` and `::` are refused,
+so the clips never reach every network interface; to reach a phone on the same
+network, pass that one address (`npm run preview -- --host 192.168.x.y`) and
+stop the server after the run.
+
 Labels and file names of licensed clips stay in `.env.local` and `.eval/`
 (gitignored). Docs, code and commits refer to them as licensed clip A, B, …;
 scripts read the labels at runtime (for example `scripts/eval-shots.ts` reads
