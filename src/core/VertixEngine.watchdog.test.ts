@@ -33,6 +33,7 @@ vi.mock("./audioActivity", () => ({
 const fake2dContext = () => ({
   drawImage() {},
   clearRect() {},
+  fillRect() {},
   getImageData: () => ({ data: new Uint8ClampedArray(4) }),
   filter: "none",
   globalAlpha: 1,

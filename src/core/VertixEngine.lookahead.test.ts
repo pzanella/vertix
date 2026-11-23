@@ -56,6 +56,7 @@ const fake2dContext = (target: object) => ({
   clearRect() {
     drawLog.push({ target, clear: true });
   },
+  fillRect() {},
   getImageData: () => ({ data: new Uint8ClampedArray(4) }),
   filter: "none",
   globalAlpha: 1,

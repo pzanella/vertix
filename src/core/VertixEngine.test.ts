@@ -30,7 +30,7 @@ vi.mock("./audioActivity", () => ({
   },
 }));
 
-const fake2dContext = () => ({ drawImage() {}, clearRect() {}, filter: "none", globalAlpha: 1 });
+const fake2dContext = () => ({ drawImage() {}, clearRect() {}, fillRect() {}, filter: "none", globalAlpha: 1 });
 
 vi.stubGlobal(
   "OffscreenCanvas",

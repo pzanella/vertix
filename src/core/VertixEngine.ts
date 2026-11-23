@@ -688,6 +688,30 @@ function drawLetterboxed(
   ctx.drawImage(source, Math.round((outW - w) / 2), Math.round((outH - h) / 2), w, h);
 }
 
+let canvasBlurSupported: boolean | null = null;
+
+/**
+ * Safari ignores `CanvasRenderingContext2D.filter` (or lacks it, where reading
+ * back an assigned value proves nothing): blur one pixel and see if it spreads.
+ */
+function detectCanvasBlur(): boolean {
+  try {
+    const ctx = new OffscreenCanvas(9, 9).getContext("2d");
+    if (!ctx || !("filter" in ctx)) return false;
+    ctx.filter = "blur(2px)";
+    ctx.fillStyle = "#fff";
+    ctx.fillRect(4, 4, 1, 1);
+    return ctx.getImageData(3, 4, 1, 1).data[3] > 0;
+  } catch {
+    return false;
+  }
+}
+
+function supportsCanvasBlur(): boolean {
+  canvasBlurSupported ??= detectCanvasBlur();
+  return canvasBlurSupported;
+}
+
 function drawFitFrame(
   ctx: CanvasRenderingContext2D,
   blurCanvas: OffscreenCanvas,
@@ -697,21 +721,26 @@ function drawFitFrame(
   outW: number,
   outH: number
 ) {
-  const coverScale = Math.max(outW / srcW, outH / srcH);
-  const bgW = Math.round(srcW * coverScale);
-  const bgH = Math.round(srcH * coverScale);
+  if (supportsCanvasBlur()) {
+    const coverScale = Math.max(outW / srcW, outH / srcH);
+    const bgW = Math.round(srcW * coverScale);
+    const bgH = Math.round(srcH * coverScale);
 
-  const halfW = Math.max(1, Math.round(bgW / 2));
-  const halfH = Math.max(1, Math.round(bgH / 2));
-  if (blurCanvas.width !== halfW || blurCanvas.height !== halfH) {
-    blurCanvas.width = halfW;
-    blurCanvas.height = halfH;
+    const halfW = Math.max(1, Math.round(bgW / 2));
+    const halfH = Math.max(1, Math.round(bgH / 2));
+    if (blurCanvas.width !== halfW || blurCanvas.height !== halfH) {
+      blurCanvas.width = halfW;
+      blurCanvas.height = halfH;
+    }
+    const blurCtx = blurCanvas.getContext("2d")!;
+    blurCtx.filter = "blur(15px)";
+    blurCtx.drawImage(video, 0, 0, halfW, halfH);
+    blurCtx.filter = "none";
+    ctx.drawImage(blurCanvas, Math.round((outW - bgW) / 2), Math.round((outH - bgH) / 2), bgW, bgH);
+  } else {
+    ctx.fillStyle = "#000";
+    ctx.fillRect(0, 0, outW, outH);
   }
-  const blurCtx = blurCanvas.getContext("2d")!;
-  blurCtx.filter = "blur(15px)";
-  blurCtx.drawImage(video, 0, 0, halfW, halfH);
-  blurCtx.filter = "none";
-  ctx.drawImage(blurCanvas, Math.round((outW - bgW) / 2), Math.round((outH - bgH) / 2), bgW, bgH);
 
   const frame = wholeFrameRect(srcW, srcH, outW, outH);
   ctx.drawImage(video, frame.x, frame.y, frame.w, frame.h);
